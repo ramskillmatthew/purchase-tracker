@@ -1,0 +1,2 @@
+export type Purchase = { id: string; order_date: string; purchased_from: string; seller_name: string; sku: string; item_description: string; item_size: string; quantity: number; item_condition: string; price_purchased: number; arrived: boolean | null; created_at: string };
+export type Expense = { id: string; purchase_date: string; purchased_from: string; arrived: boolean | null; item_description: string; cost: number; created_at: string };
