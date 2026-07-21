@@ -2,6 +2,7 @@ import "server-only";
 import { supabaseRequest } from "@/lib/supabase";
 import type { EmailType } from "@/lib/email/classify";
 import { rankedFilters, type RankedIndexQuery } from "./ranked-filters";
+import { hasFullCoverage, type CompletedRange } from "./coverage-gaps";
 
 export type IndexQuery = { ownerId: string; entity?: string; type?: EmailType; startDate?: string; endDate?: string; limit?: number };
 const safe = (value: string) => value.replace(/[%*,()]/g, "").trim();
@@ -28,18 +29,17 @@ export async function countIndex(value: IndexQuery) {
 
 export async function hasCoverage(ownerId: string, startDate?: string, endDate?: string) {
   if (!startDate || !endDate) return false;
-  const rows = await (await supabaseRequest(`email_index_coverage?owner_id=eq.${ownerId}&status=eq.completed&range_start=lte.${endDate}&range_end=gte.${startDate}&select=range_start,range_end&order=range_start.asc`)).json() as { range_start: string; range_end: string }[];
-  let coveredThrough: string | null = null;
-  for (const row of rows) {
-    if (row.range_end < startDate) continue;
-    if (!coveredThrough) { if (row.range_start > startDate) return false; coveredThrough = row.range_end; }
-    else { const allowedStart = nextDay(coveredThrough); if (row.range_start > allowedStart) return false; if (row.range_end > coveredThrough) coveredThrough = row.range_end; }
-    if (coveredThrough >= endDate) return true;
-  }
-  return false;
+  const rows = await (await supabaseRequest(`email_index_coverage?owner_id=eq.${ownerId}&status=eq.completed&range_start=lte.${endDate}&range_end=gte.${startDate}&select=range_start,range_end&order=range_start.asc`)).json() as CompletedRange[];
+  return hasFullCoverage(rows, startDate, endDate);
 }
 
 function nextDay(date: string) { const value = new Date(`${date}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10); }
+
+/** The single owner's most recently completed coverage row, if any — used by the cron route to resume from. This app is single-tenant, so there is only ever one owner. */
+export async function latestCompletedCoverage() {
+  const rows = await (await supabaseRequest("email_index_coverage?status=eq.completed&select=owner_id,range_end&order=range_end.desc&limit=1")).json() as { owner_id: string; range_end: string }[];
+  return rows[0] || null;
+}
 
 type EmailIndexRow = {
   id: string; folder: string; yahoo_uid: number; uid_validity: string; sender_name: string | null; sender_address: string | null;

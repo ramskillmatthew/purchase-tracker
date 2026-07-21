@@ -179,6 +179,81 @@ export type YahooMetadata = {
 };
 export async function yahooMetadataId(folder: string, uid: number, uidValidity: string) { return signEmailId({ folder, uid, uidValidity }); }
 
+export type FolderProgress = { lastUid: number; highWaterUid: number; uidValidity: string };
+export type FolderCursor = Record<string, FolderProgress>;
+
+/**
+ * Scans a date range for envelope metadata only (never message source),
+ * paginating deterministically by ascending UID up to a captured per-folder
+ * high-water UID, so completeness can be proven rather than assumed under a
+ * message-count cap.
+ *
+ * For a closed historical range (openEnded: false), each folder's
+ * high-water UID is captured once — on the first pass — and frozen for the
+ * rest of this range's resumption sequence (reused from `cursor` on later
+ * passes). This is what makes "done" mean "every message that existed at
+ * snapshot time has been processed": mail arriving after the snapshot has a
+ * UID above the frozen ceiling and is correctly excluded from this run,
+ * left for a later run's fresh snapshot to pick up.
+ *
+ * For an open-ended range (openEnded: true — used only for "today", which
+ * is never fully closed), every single pass recaptures a fresh high-water
+ * UID, raising the ceiling so newly arrived mail is included on the next
+ * pass; `done` is therefore always false in this mode, by design — a range
+ * covering today should never be marked completed.
+ *
+ * If a folder's live UIDVALIDITY no longer matches the cursor's recorded
+ * value, that folder's snapshot and progress are both discarded and
+ * recaptured fresh — UIDs are only meaningful within one UIDVALIDITY epoch.
+ */
+export async function scanYahooMetadataWithCursor(startDate: string, endDate: string, cursor: FolderCursor, limit = 1500, openEnded = false) {
+  return withClient(async imap => {
+    const listed = await imap.list();
+    const folders = listed.filter(folder => !folder.flags?.has("\\Noselect") && !/(?:^|[\\/])(sent|drafts?|spam|junk|trash|deleted(?: items)?)$/i.test(folder.path));
+    const since = new Date(`${startDate}T00:00:00Z`);
+    const before = new Date(`${endDate}T00:00:00Z`); before.setUTCDate(before.getUTCDate() + 1);
+    const rows: YahooMetadata[] = [];
+    const nextCursor: FolderCursor = { ...cursor };
+    let budget = limit;
+    let allDone = true;
+    for (const folder of folders) {
+      const existing = cursor[folder.path];
+      if (!openEnded && existing && existing.lastUid >= existing.highWaterUid) continue;
+      if (budget <= 0) { allDone = false; continue; }
+      const lock = await imap.getMailboxLock(folder.path, { readOnly: true });
+      try {
+        const uidValidity = String(imap.mailbox && imap.mailbox.uidValidity || "0");
+        const validityMatches = Boolean(existing && existing.uidValidity === uidValidity);
+        const ids = (await imap.search({ since, before }, { uid: true })) || [];
+        const highWaterUid = !openEnded && validityMatches ? existing!.highWaterUid : (ids.length ? Math.max(...ids) : 0);
+        const lastUid = validityMatches ? existing!.lastUid : 0;
+        const pending = ids.filter(uid => uid > lastUid && uid <= highWaterUid).sort((a, b) => a - b);
+        const selected = pending.slice(0, budget);
+        for (let offset = 0; offset < selected.length; offset += 200) {
+          const chunk = selected.slice(offset, offset + 200);
+          if (!chunk.length) continue;
+          const fetched = await imap.fetchAll(chunk.join(","), { envelope: true, flags: true, bodyStructure: true }, { uid: true });
+          for (const message of fetched) {
+            const from = message.envelope?.from?.[0];
+            const identity = message.envelope?.messageId || `${folder.path}|${uidValidity}|${message.uid}`;
+            rows.push({
+              message_fingerprint: createHash("sha256").update(identity).digest("hex"), folder: folder.path, yahoo_uid: message.uid,
+              uid_validity: uidValidity, sender_name: from?.name || null, sender_address: from?.address || null,
+              subject: message.envelope?.subject || "(No subject)", email_date: message.envelope?.date?.toISOString() || new Date(0).toISOString(),
+              unread: !message.flags?.has("\\Seen"), has_attachments: attachments(message.bodyStructure).length > 0,
+            });
+          }
+        }
+        budget -= selected.length;
+        const newLastUid = selected.length ? selected[selected.length - 1] : lastUid;
+        nextCursor[folder.path] = { lastUid: newLastUid, highWaterUid, uidValidity };
+        if (openEnded || newLastUid < highWaterUid) allDone = false;
+      } finally { lock.release(); }
+    }
+    return { rows, cursor: nextCursor, done: allDone, foldersSearched: folders.length };
+  });
+}
+
 /** Fetches envelope metadata only. Message bodies and attachment content never leave Yahoo. */
 export async function scanYahooMetadata(startDate: string, endDate: string, limit = 1500, sender?: string) {
   return withClient(async imap => {
