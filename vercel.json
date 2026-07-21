@@ -1,5 +1,5 @@
 {
   "crons": [
-    { "path": "/api/cron/yahoo-index", "schedule": "0 */4 * * *" }
+    { "path": "/api/cron/yahoo-index", "schedule": "0 3 * * *" }
   ]
 }
