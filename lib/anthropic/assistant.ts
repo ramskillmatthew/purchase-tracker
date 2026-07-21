@@ -112,7 +112,14 @@ export async function runAssistant(message: string, ownerId?: string) {
       const count = await countIndex({ ownerId, entity: entityTokens.join(" "), type: indexedType, startDate: dateRange?.startDate, endDate: dateRange?.endDate });
       return { answer: `You have ${count} matching email${count === 1 ? "" : "s"} between ${dateRange!.startDate} and ${dateRange!.endDate}.`, emailResults: [], usage: null };
     }
-    const counted = await countYahoo({ terms: [message], sender: entityTokens.join(" "), startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 });
+    let counted = await countYahoo({ terms: [message], sender: entityTokens.join(" "), startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 });
+    if (!counted.count) {
+      // The sender + assumed-subject-wording search found nothing; broaden to
+      // a plain keyword search so a real subject that doesn't match the
+      // assumed phrasing is still counted, mirroring the tool-loop's
+      // search_emails broadening below.
+      counted = await countYahoo({ terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 });
+    }
     const period = dateRange ? ` between ${dateRange.startDate} and ${dateRange.endDate}` : "";
     return { answer: `You have ${counted.count} matching email${counted.count === 1 ? "" : "s"}${period}.`, emailResults: [], usage: null };
   }
@@ -122,7 +129,15 @@ export async function runAssistant(message: string, ownerId?: string) {
       const indexed = await Promise.all(rows.map(row => indexRowToResult(row as unknown as IndexRow)));
       return { answer: indexed.length ? `Found ${indexed.length} relevant matching email${indexed.length === 1 ? "" : "s"}.` : "No related emails were found in the indexed date range.", emailResults: indexed, usage: null };
     }
-    const initial = await searchYahoo({ terms: [message], sender: entityTokens.join(" "), startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+    let initial = await searchYahoo({ terms: [message], sender: entityTokens.join(" "), startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+    if (!initial.results.length) {
+      // The sender + assumed-subject-wording search found nothing; broaden to
+      // a plain keyword search over just the extracted entity terms so a real
+      // subject that doesn't match the assumed phrasing is still found. The
+      // relevance filter below still narrows the final answer using the
+      // original message's full intent.
+      initial = await searchYahoo({ terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+    }
     const deterministic = relevantResults(message, initial.results);
     return { answer: deterministic.length ? `Found ${deterministic.length} relevant matching email${deterministic.length === 1 ? "" : "s"}.` : `No related emails were found${dateRange ? " in the requested date range" : ""}.`, emailResults: deterministic, usage: null };
   }

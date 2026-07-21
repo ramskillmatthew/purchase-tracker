@@ -19,4 +19,22 @@ describe("deterministic result relevance",()=>{
   it("requires every meaningful entity token",()=>{expect(resultMatchesQueryEntity("holiday booking reference",result("Travel Company","Your holiday booking","Reference ABC123"))).toBe(true);expect(resultMatchesQueryEntity("holiday booking reference",result("Holiday Deals","Weekly offers"))).toBe(false);});
   it("handles Vinted sold-message searches without confusing purchases",()=>{const query="find my Vinted solds emails this month";expect(queryRequestsTransaction(query)).toBe(true);expect(queryEntityTokens(query)).toEqual(["vinted"]);expect(resultMatchesQueryEntity(query,result("Team Vinted","You’ve sold an item on Vinted"))).toBe(true);expect(resultMatchesQueryEntity(query,result("Team Vinted","Your Vinted purchase receipt"))).toBe(false);});
   it("does not mistake plural date units for part of a company name",()=>{expect(queryEntityTokens("how many Vinted sold emails did I receive in the last 3 months")).toEqual(["vinted"]);expect(queryEntityTokens("how many ASOS orders in the past two weeks")).toEqual(["asos"]);});
+  it("reduces natural-language dimplex questions to the same clean keyword instead of a glued filler-word phrase",()=>{
+    expect(queryEntityTokens("your dimplex order")).toEqual(["dimplex"]);
+    expect(queryEntityTokens("find my dimplex delivery")).toEqual(["dimplex"]);
+    expect(queryEntityTokens("when is my dimplex order arriving")).toEqual(["dimplex"]);
+    expect(queryEntityTokens("show me my dimplex order")).toEqual(["dimplex"]);
+    expect(queryEntityTokens("emails about my dimplex order")).toEqual(["dimplex"]);
+    expect(queryEntityTokens("tell me about my dimplex order")).toEqual(["dimplex"]);
+  });
+  it("reduces natural-language parcel questions to the same clean keyword",()=>{
+    expect(queryEntityTokens("my parcel")).toEqual(["parcel"]);
+    expect(queryEntityTokens("where is my parcel")).toEqual(["parcel"]);
+    expect(queryEntityTokens("parcel delivery")).toEqual(["parcel"]);
+    expect(queryEntityTokens("parcel tracking")).toEqual(["parcel"]);
+  });
+  it("accepts shipping-worded evidence for a delivery-classified query and vice versa, since people use them interchangeably",()=>{
+    expect(resultMatchesQueryEntity("dimplex delivery",result("Dimplex <orders@dimplex.co.uk>","Your Dimplex order has been dispatched","Track it here"))).toBe(true);
+    expect(resultMatchesQueryEntity("dimplex tracking",result("Dimplex <orders@dimplex.co.uk>","Your Dimplex parcel has been delivered",""))).toBe(true);
+  });
 });

@@ -1,6 +1,6 @@
 import { classifyQueryIntent } from "@/lib/email/classify";
 
-const ignored = new Set(["find", "show", "get", "give", "import", "imports", "importing", "me", "my", "the", "a", "an", "this", "that", "these", "those", "most", "recent", "latest", "last", "past", "previous", "ago", "newest", "how", "many", "count", "number", "was", "were", "there", "did", "do", "have", "has", "between", "and", "during", "over", "within", "so", "far", "receive", "received", "email", "emails", "message", "messages", "from", "about", "relating", "related", "to", "for", "in", "containing", "contains", "with", "of", "please", "all", "every", "any", "purchase", "purchases", "order", "orders", "confirmation", "confirmations", "confirmed", "receipt", "receipts", "invoice", "invoices", "sold", "solds", "sale", "sales", "item", "items", "tracking", "delivery", "delivered", "dispatch", "dispatched", "shipping", "shipped", "refund", "refunds", "refunded", "return", "returns", "returned", "cancellation", "cancellations", "cancelled", "canceled", "unread", "read", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "day", "days", "week", "weeks", "month", "months", "year", "years", "today", "yesterday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]);
+const ignored = new Set(["find", "show", "tell", "get", "give", "import", "imports", "importing", "me", "my", "your", "the", "a", "an", "this", "that", "these", "those", "most", "recent", "latest", "last", "past", "previous", "ago", "newest", "how", "when", "where", "many", "count", "number", "is", "are", "was", "were", "there", "did", "do", "have", "has", "between", "and", "during", "over", "within", "so", "far", "receive", "received", "email", "emails", "message", "messages", "from", "about", "relating", "related", "to", "for", "in", "containing", "contains", "with", "of", "please", "all", "every", "any", "purchase", "purchases", "order", "orders", "confirmation", "confirmations", "confirmed", "receipt", "receipts", "invoice", "invoices", "sold", "solds", "sale", "sales", "item", "items", "tracking", "delivery", "delivered", "arrive", "arrives", "arriving", "arrived", "dispatch", "dispatched", "shipping", "shipped", "refund", "refunds", "refunded", "return", "returns", "returned", "cancellation", "cancellations", "cancelled", "canceled", "unread", "read", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "day", "days", "week", "weeks", "month", "months", "year", "years", "today", "yesterday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]);
 
 function normalize(value: string) { return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\b(?:centre|cente)\b/g, "center").replace(/\bconformation\b/g, "confirmation").replace(/[^a-z0-9@]+/g, " ").trim(); }
 export function queryEntityTokens(query: string) { return normalize(query).split(" ").filter(token => token.length > 1 && !ignored.has(token) && !/^\d+(?:st|nd|rd|th)?$/.test(token)).slice(0, 8); }
@@ -17,8 +17,11 @@ function resultMatchesQueryIntent(query: string, result: SearchResultText) {
   const intent = classifyQueryIntent([requested]);
 
   if (intent === "sold") return /\b(?:you ve sold|sold an? item|item sold|sale completed)\b/.test(content);
-  if (intent === "shipping") return /\b(?:dispatch|dispatched|shipping|shipped|tracking|on (?:the|its) way)\b/.test(content);
-  if (intent === "delivery") return /\b(?:delivered|delivery|ready for collection|collected)\b/.test(content);
+  // People use "delivery" and "shipping" interchangeably to mean "where's my
+  // stuff" — a query classified as either accepts evidence from both
+  // vocabularies, so "when is my order arriving" also matches a "dispatched"
+  // or "on its way" subject, not only a literal "delivered"/"delivery" one.
+  if (intent === "shipping" || intent === "delivery") return /\b(?:dispatch|dispatched|shipping|shipped|tracking|on (?:the|its) way|delivered|delivery|ready for collection|collected)\b/.test(content);
   if (intent === "cancellation") return /\b(?:cancelled|canceled|cancellation)\b/.test(content);
   if (intent === "refund") return /\b(?:refund|refunded|money back)\b/.test(content);
 
