@@ -8,6 +8,7 @@ export default function EmailAssistantPage() {
   const [query, setQuery] = useState("");
   const [answer, setAnswer] = useState("");
   const [results, setResults] = useState<Result[]>([]);
+  const [totalMatches, setTotalMatches] = useState<number | null>(null);
   const [selected, setSelected] = useState<Email | null>(null);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -15,12 +16,12 @@ export default function EmailAssistantPage() {
   const [suggestion, setSuggestion] = useState<{ original: string; corrected: string } | null>(null);
 
   async function search(message: string) {
-    setSuggestion(null); setBusy(true); setError(""); setAnswer(""); setResults([]); setSelected(null);
-    const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 40_000);
+    setSuggestion(null); setBusy(true); setError(""); setAnswer(""); setResults([]); setTotalMatches(null); setSelected(null);
+    const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 65_000);
     try {
       const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }), signal: controller.signal });
       const body = await response.json();
-      if (response.ok) { setAnswer(body.answer); setResults(body.results || []); } else setError(body.error || "Search failed.");
+      if (response.ok) { setAnswer(body.answer); setResults(body.results || []); setTotalMatches(typeof body.totalMatches === "number" ? body.totalMatches : (body.results || []).length); } else setError(body.error || "Search failed.");
     } catch { setError("The email search took too long or the connection was interrupted. Please try again."); }
     finally { window.clearTimeout(timeout); setBusy(false); }
   }
@@ -47,7 +48,7 @@ export default function EmailAssistantPage() {
     <form className="card assistant-search" onSubmit={ask}><label className="field"><span className="label">What would you like to find?</span><textarea className="input" value={query} onChange={event => { setQuery(event.target.value); setSuggestion(null); }} placeholder="Find receipts over £100 from last month." required maxLength={2000} /></label><div><span>Mailbox content is treated as untrusted data.</span><button className="button" disabled={busy || checking}>{checking ? "Checking spelling…" : busy ? "Searching…" : "Search emails"}</button></div></form>
     {suggestion && <div className="card search-suggestion" role="status"><div><strong>Did you mean:</strong><p>{suggestion.corrected}</p></div><div><button className="button" onClick={() => { setQuery(suggestion.corrected); void search(suggestion.corrected); }}>Search corrected</button><button className="button secondary" onClick={() => void search(suggestion.original)}>Keep original</button></div></div>}
     {error && <p className="bulk-save-error" role="alert">{error}</p>}{answer && <div className="card assistant-answer"><strong>Assistant</strong><p>{answer}</p></div>}
-    <div className="email-layout"><div className="data-panel email-results"><div className="grid-toolbar"><strong>{results.length} results</strong><span>{busy ? "Working…" : "Newest relevant matches"}</span></div>{results.length ? results.map(row => <button className="email-result" key={row.id} onClick={() => read(row.id)}><span><strong>{row.sender}</strong><time>{row.date ? new Date(row.date).toLocaleString() : "Unknown date"}</time></span><b>{row.unread && <i>Unread</i>}{row.subject}</b><p>{row.excerpt || "No text preview available."}</p><small>{row.folder} · {row.whyMatched}{row.hasAttachments ? " · Attachment" : ""}</small></button>) : <div className="email-empty">Ask a question to search your Yahoo mailbox.</div>}</div>
+    <div className="email-layout"><div className="data-panel email-results"><div className="grid-toolbar"><strong>{totalMatches !== null && totalMatches > results.length ? `Showing ${results.length} of ${totalMatches} matching emails` : `${results.length} results`}</strong><span>{busy ? "Working…" : "Newest relevant matches"}</span></div>{results.length ? results.map(row => <button className="email-result" key={row.id} onClick={() => read(row.id)}><span><strong>{row.sender}</strong><time>{row.date ? new Date(row.date).toLocaleString() : "Unknown date"}</time></span><b>{row.unread && <i>Unread</i>}{row.subject}</b><p>{row.excerpt || "No text preview available."}</p><small>{row.folder} · {row.whyMatched}{row.hasAttachments ? " · Attachment" : ""}</small></button>) : <div className="email-empty">Ask a question to search your Yahoo mailbox.</div>}</div>
       <div className="card email-reader">{selected ? <><header><button onClick={() => setSelected(null)}>Close</button><span>{selected.folder}</span><h2>{selected.subject}</h2><p>From {selected.sender}<br/>To {selected.recipient}</p></header><article dangerouslySetInnerHTML={{ __html: selected.html }} />{selected.attachments.length > 0 && <footer><strong>Attachments (not downloaded)</strong>{selected.attachments.map(item => <span key={item.filename}>{item.filename} · {item.contentType}</span>)}</footer>}</> : <div className="email-empty">Select a result to read its sanitized content.</div>}</div></div>
   </section>;
 }

@@ -11,7 +11,7 @@ const lifecyclePatterns: [Exclude<EmailType, "confirmation" | "other">, RegExp][
   ["cancellation", /\b(cancel(?:led|ed|lations?)?|voided)\b/i],
   ["refund", /\b(refund(?:ed|s)?|money back|reimbursement)\b/i],
   ["sold", /\b(you(?:'|’)?ve sold|item sold|sale confirmed|sold an item|solds?|sale made|sales made|items? i sold|my sales)\b/i],
-  ["delivery", /\b(deliver(?:ed|y)|arriv(?:ed|ing)|collect(?:ed|ion))\b/i],
+  ["delivery", /\b(deliver(?:ed|y)|arriv(?:e|es|ed|ing)|collect(?:ed|ion))\b/i],
   ["shipping", /\b(shipp(?:ed|ing|ment)|dispatch(?:ed)?|on (?:its|the) way|tracking)\b/i],
 ];
 

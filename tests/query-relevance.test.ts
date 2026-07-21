@@ -37,4 +37,141 @@ describe("deterministic result relevance",()=>{
     expect(resultMatchesQueryEntity("dimplex delivery",result("Dimplex <orders@dimplex.co.uk>","Your Dimplex order has been dispatched","Track it here"))).toBe(true);
     expect(resultMatchesQueryEntity("dimplex tracking",result("Dimplex <orders@dimplex.co.uk>","Your Dimplex parcel has been delivered",""))).toBe(true);
   });
+
+  describe("lifecycle status questions retrieve the whole order narrative", () => {
+    const parcelAnticipation = result("Dimplex <orders@dimplex.co.uk>", "We're expecting your Dimplex parcel", "");
+    const deliveredToday = result("Dimplex <orders@dimplex.co.uk>", "Your Dimplex order will be delivered today", "");
+    const confirmationEmail = result("Dimplex <orders@dimplex.co.uk>", "Thank you for your Dimplex order", "Order details");
+    const cancelledEmail = result("Dimplex <orders@dimplex.co.uk>", "Your Dimplex order has been cancelled", "");
+
+    it("finds both a parcel-anticipation email and a delivered email for \"When did my Dimplex order arrive?\"", () => {
+      const query = "When did my Dimplex order arrive?";
+      expect(resultMatchesQueryEntity(query, parcelAnticipation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, deliveredToday)).toBe(true);
+    });
+
+    it("finds both lifecycle emails for the shorter \"Did my Dimplex order arrive?\"", () => {
+      const query = "Did my Dimplex order arrive?";
+      expect(resultMatchesQueryEntity(query, parcelAnticipation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, deliveredToday)).toBe(true);
+    });
+
+    it("recognizes bare \"arrive\" and \"arrives\", not only \"arrived\"/\"arriving\"", () => {
+      expect(resultMatchesQueryEntity("when does my dimplex order arrive", deliveredToday)).toBe(true);
+      expect(resultMatchesQueryEntity("my dimplex parcel arrives when", parcelAnticipation)).toBe(true);
+    });
+
+    it("keeps an explicit \"find my order confirmation\" request narrow to the confirmation document", () => {
+      const query = "find my dimplex order confirmation";
+      expect(resultMatchesQueryEntity(query, parcelAnticipation)).toBe(false);
+      expect(resultMatchesQueryEntity(query, deliveredToday)).toBe(false);
+      expect(resultMatchesQueryEntity(query, confirmationEmail)).toBe(true);
+    });
+
+    it("excludes cancellation/refund emails from a normal delivery-status question", () => {
+      const query = "When did my Dimplex order arrive?";
+      expect(resultMatchesQueryEntity(query, cancelledEmail)).toBe(false);
+    });
+
+    it("still surfaces a cancellation email when the query actually asks about it", () => {
+      expect(resultMatchesQueryEntity("was my dimplex order cancelled", cancelledEmail)).toBe(true);
+    });
+  });
+
+  describe("broad-history questions retrieve the complete order narrative, including reversals", () => {
+    const meacoConfirmation = result("Meaco <orders@meaco.com>", "Thank you for your Meaco order MC-1001", "Order details. Total paid £199.00");
+    const meacoCancelled = result("Meaco <orders@meaco.com>", "Your Meaco order MC-1001 has been cancelled", "");
+    const meacoRefunded = result("Meaco <orders@meaco.com>", "Your refund for order MC-1001 has been processed", "Refund confirmation");
+    const secondMeacoConfirmation = result("Meaco <orders@meaco.com>", "Thank you for your Meaco order MC-2002", "Order details. Total paid £249.00");
+
+    it("finds confirmation, cancellation, and refund emails for \"What happened with my Meaco orders?\"", () => {
+      const query = "What happened with my Meaco orders?";
+      expect(resultMatchesQueryEntity(query, meacoConfirmation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(true);
+    });
+
+    it("finds the same complete narrative for \"Tell me the full story of my Meaco orders\"", () => {
+      const query = "Tell me the full story of my Meaco orders";
+      expect(resultMatchesQueryEntity(query, meacoConfirmation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(true);
+    });
+
+    it("keeps \"Did my Meaco order arrive?\" focused on forward-lifecycle evidence, excluding the reversal emails", () => {
+      const query = "Did my Meaco order arrive?";
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(false);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(false);
+    });
+
+    it("keeps \"Find my Meaco order confirmation\" strict to the confirmation document, excluding the reversal emails", () => {
+      const query = "Find my Meaco order confirmation";
+      expect(resultMatchesQueryEntity(query, meacoConfirmation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(false);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(false);
+    });
+
+    it("keeps a normal narrow delivery question excluding unrelated reversal emails, unaffected by the broad-history bypass", () => {
+      const query = "When did my Meaco order arrive?";
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(false);
+    });
+
+    it("retrieves emails for two separate order numbers under a broad-history question, so synthesis can keep them apart", () => {
+      const query = "What happened with my Meaco orders?";
+      expect(resultMatchesQueryEntity(query, meacoConfirmation)).toBe(true);
+      expect(resultMatchesQueryEntity(query, secondMeacoConfirmation)).toBe(true);
+      expect(meacoConfirmation.subject).toContain("MC-1001");
+      expect(secondMeacoConfirmation.subject).toContain("MC-2002");
+    });
+  });
+
+  describe("hybrid count+explain phrasing never leaks pronouns/instruction words into the entity", () => {
+    it("extracts only the retailer from the exact failing hybrid query, matching its bare-count counterpart", () => {
+      const bareCount = "How many Meaco cancellation emails did I receive";
+      const hybrid = "How many Meaco cancellation emails did I receive, and what were they for?";
+      expect(queryEntityTokens(hybrid)).toEqual(["meaco"]);
+      expect(queryEntityTokens(hybrid)).toEqual(queryEntityTokens(bareCount));
+    });
+
+    it("extracts only the retailer from 'which items ... were cancelled' phrasing", () => {
+      expect(queryEntityTokens("Which items from my Meaco orders were cancelled?")).toEqual(["meaco"]);
+    });
+
+    it("extracts every real entity word from 'list them for <retailer>' phrasing", () => {
+      expect(queryEntityTokens("List them for Pokémon Center")).toEqual(["pokemon", "center"]);
+    });
+
+    it("finds no entity at all in 'who were they from', since it names no retailer", () => {
+      expect(queryEntityTokens("Who were they from?")).toEqual([]);
+    });
+
+    it("strips 'what were they for' entirely when it is the whole query", () => {
+      expect(queryEntityTokens("what were they for")).toEqual([]);
+    });
+
+    it("strips bare 'which items'", () => {
+      expect(queryEntityTokens("which items")).toEqual([]);
+    });
+
+    it("strips 'show them'", () => {
+      expect(queryEntityTokens("show them")).toEqual([]);
+    });
+
+    it("does not let a pronoun leak into a sender/entity string used for retrieval", () => {
+      const tokens = queryEntityTokens("How many Meaco cancellation emails did I receive, and what were they for?");
+      expect(tokens.join(" ")).not.toContain("they");
+      expect(tokens.join(" ")).toBe("meaco");
+    });
+
+    it("handles 'they're'/'they've' contractions without leaking the leftover fragment as an entity token", () => {
+      expect(queryEntityTokens("they're from meaco")).toEqual(["meaco"]);
+      expect(queryEntityTokens("what were they've cancelled for")).toEqual([]);
+    });
+
+    it("still extracts the same entity tokens for accented and unaccented Pokémon Center", () => {
+      expect(queryEntityTokens("Pokémon Center")).toEqual(["pokemon", "center"]);
+      expect(queryEntityTokens("Pokemon Center")).toEqual(["pokemon", "center"]);
+      expect(queryEntityTokens("List them for Pokémon Center")).toEqual(queryEntityTokens("List them for Pokemon Center"));
+    });
+  });
 });

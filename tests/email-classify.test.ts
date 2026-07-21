@@ -31,6 +31,13 @@ describe("shared email subject classification", () => {
     expect(classifySubject("Welcome to your new account")).toBe("other");
     expect(classifyQueryIntent(["welcome to your new account"])).toBe("other");
   });
+
+  it("recognizes bare \"arrive\"/\"arrives\" as delivery, not only \"arrived\"/\"arriving\"", () => {
+    expect(classifySubject("Your Dimplex order will arrive today")).toBe("delivery");
+    expect(classifySubject("Your parcel arrives tomorrow")).toBe("delivery");
+    expect(classifyQueryIntent(["when did my dimplex order arrive"])).toBe("delivery");
+    expect(classifyQueryIntent(["when do my dimplex orders arrive"])).toBe("delivery");
+  });
 });
 
 describe("free-text query intent classification", () => {
@@ -41,6 +48,10 @@ describe("free-text query intent classification", () => {
     ["delivered emails", "delivery"],
     ["cancelled orders", "cancellation"],
     ["refund emails", "refund"],
+    ["did my order arrive", "delivery"],
+    ["when will my order arrive", "delivery"],
+    ["has my order arrived", "delivery"],
+    ["my order is arriving", "delivery"],
   ])("classifies %s", (query, expected) => expect(classifyQueryIntent([query])).toBe(expected));
 });
 

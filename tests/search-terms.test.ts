@@ -15,4 +15,18 @@ describe("forgiving mailbox terms",()=>{
   it("creates bounded typo-tolerant sender probes in useful order",()=>{const values=senderSearchVariants("Pokmon Cnter");expect(values.slice(0,3)).toEqual(["Pokmon Cnter","pokm","cnte"]);expect(senderSearchVariants("assos").slice(0,3)).toContain("asos");expect(values.length).toBeLessThanOrEqual(12);});
   it("uses strict sender matching only for literal email addresses",()=>{expect(isExactEmailAddress("orders@example.test")).toBe(true);expect(isExactEmailAddress("ASOS Sample Sale")).toBe(false);expect(isExactEmailAddress("ASOS")).toBe(false);});
   it("still recognizes sold-intent wording used by semanticSubjectTerms",()=>{expect(semanticSubjectTerms(["Vinted sold emails"])).toContain("you’ve sold");});
+  it("generates parcel/arriving/expecting subject terms for lifecycle-status questions, not only \"deliver\"/\"delivery\"",()=>{
+    const arriveTerms=semanticSubjectTerms(["when did my order arrive"]);
+    expect(arriveTerms).toContain("delivered");
+    expect(arriveTerms).toContain("parcel");
+    expect(arriveTerms).toContain("arriving");
+    const parcelTerms=semanticSubjectTerms(["where is my parcel"]);
+    expect(parcelTerms).toContain("parcel");
+    const expectingTerms=semanticSubjectTerms(["I'm expecting a delivery"]);
+    expect(expectingTerms).toContain("expecting");
+    const shippingTerms=semanticSubjectTerms(["has my parcel been dispatched"]);
+    expect(shippingTerms).toContain("dispatched");
+    expect(shippingTerms).toContain("tracking");
+    expect(shippingTerms).toContain("parcel");
+  });
 });
