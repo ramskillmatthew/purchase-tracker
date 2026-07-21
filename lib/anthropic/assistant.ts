@@ -5,7 +5,7 @@ import { emailSearchSchema, getEmailSchema } from "@/lib/validation/email";
 import { searchYahoo, countYahoo, getYahooEmail, yahooMetadataId } from "@/lib/yahoo/client";
 import { supabaseRequest } from "@/lib/supabase";
 import { resultMatchesQueryEntity } from "@/lib/yahoo/query-relevance";
-import { countIndex, hasCoverage, queryIndex } from "@/lib/email-index/query";
+import { countIndex, countIndexRanked, hasCoverage, queryIndex, searchIndexRanked } from "@/lib/email-index/query";
 import type { EmailType } from "@/lib/email/classify";
 import { planEmailQuery } from "@/lib/yahoo/query-plan";
 
@@ -25,14 +25,55 @@ const tools: Anthropic.Tool[] = [
 ];
 
 type SearchResult = Awaited<ReturnType<typeof searchYahoo>>["results"][number];
+type IndexRow = { folder: unknown; yahoo_uid: unknown; uid_validity: unknown; sender_name: unknown; sender_address: unknown; subject: unknown; email_date: unknown; has_attachments: unknown; unread: unknown };
+// Indexed metadata never includes a body excerpt (privacy-first index — no
+// message body is stored), so results carry a placeholder excerpt; opening
+// the email still fetches and sanitizes the real content live from Yahoo.
+async function indexRowToResult(row: IndexRow): Promise<SearchResult> {
+  return {
+    id: await yahooMetadataId(String(row.folder), Number(row.yahoo_uid), String(row.uid_validity)),
+    sender: [row.sender_name, row.sender_address ? `<${row.sender_address}>` : ""].filter(Boolean).join(" "),
+    recipient: "", subject: String(row.subject), date: String(row.email_date), folder: String(row.folder),
+    excerpt: "Indexed metadata match. Open the email to read its sanitized content.",
+    whyMatched: "Matched the private owner-scoped metadata index.",
+    hasAttachments: Boolean(row.has_attachments), attachmentFilenames: [], unread: Boolean(row.unread),
+  };
+}
 function uniqueResults(results: SearchResult[]) { const seen = new Set<string>(); return results.filter(result => { const key = [result.folder, result.sender, result.subject, result.date].join("|"); if (seen.has(key)) return false; seen.add(key); return true; }); }
 function relevantResults(query: string, results: SearchResult[]) {
   const relevant = uniqueResults(results).filter(result => resultMatchesQueryEntity(query, result)).sort((a, b) => Date.parse(b.date || "") - Date.parse(a.date || ""));
   return /\b(most recent|latest|newest|last)\b/i.test(query) ? relevant.slice(0, 1) : relevant;
 }
-async function execute(name: string, input: unknown, collected: SearchResult[]) {
-  if (name === "search_emails") { const criteria = emailSearchSchema.parse(input); let found = await searchYahoo(criteria); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchYahoo({ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined }); } if (!found.results.length && criteria.sender) { found = await searchYahoo({ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined }); } collected.push(...found.results); return found; }
-  if (name === "count_emails") return countYahoo(emailSearchSchema.parse({ ...(input as object), maxResults: 1 }));
+// The index has no folder/recipient/attachment-filename columns and stores
+// no body text, so it can only serve requests that don't depend on those
+// fields; anything else keeps using the existing live-IMAP path unchanged.
+function indexCanServe(criteria: z.infer<typeof emailSearchSchema>) {
+  return !criteria.folder && !criteria.recipient && !criteria.attachmentFilename && !criteria.cursor && criteria.hasAttachments === undefined
+    && criteria.readStatus === "any" && Boolean(criteria.startDate && criteria.endDate);
+}
+function combinedQueryText(criteria: z.infer<typeof emailSearchSchema>) {
+  return [...criteria.terms, criteria.sender, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)).join(" ");
+}
+
+async function execute(name: string, input: unknown, collected: SearchResult[], ownerId?: string) {
+  if (name === "search_emails") {
+    const criteria = emailSearchSchema.parse(input);
+    if (ownerId && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
+      const rows = await searchIndexRanked({ ownerId, query: combinedQueryText(criteria) || undefined, startDate: criteria.startDate, endDate: criteria.endDate, limit: criteria.maxResults });
+      const results = await Promise.all(rows.map(row => indexRowToResult(row as unknown as IndexRow)));
+      collected.push(...results);
+      return { results, nextCursor: null };
+    }
+    let found = await searchYahoo(criteria); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchYahoo({ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined }); } if (!found.results.length && criteria.sender) { found = await searchYahoo({ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined }); } collected.push(...found.results); return found;
+  }
+  if (name === "count_emails") {
+    const criteria = emailSearchSchema.parse({ ...(input as object), maxResults: 1 });
+    if (ownerId && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
+      const count = await countIndexRanked({ ownerId, query: combinedQueryText(criteria) || undefined, startDate: criteria.startDate, endDate: criteria.endDate });
+      return { count, foldersSearched: 0 };
+    }
+    return countYahoo(criteria);
+  }
   if (name === "get_email") return getYahooEmail(getEmailSchema.parse(input).id);
   if (name === "search_purchases") {
     const value = purchaseSearchSchema.parse(input); const filters = ["select=*", "order=order_date.desc", `limit=${value.limit}`];
@@ -78,7 +119,7 @@ export async function runAssistant(message: string, ownerId?: string) {
   if (!countRequest && entityTokens.length && plan.transactional) {
     if (ownerId && indexedCoverage) {
       const rows = await queryIndex({ ownerId, entity: entityTokens.join(" "), type: indexedType, startDate: dateRange?.startDate, endDate: dateRange?.endDate, limit: 25 });
-      const indexed = await Promise.all(rows.map(async row => ({ id: await yahooMetadataId(String(row.folder), Number(row.yahoo_uid), String(row.uid_validity)), sender: [row.sender_name, row.sender_address ? `<${row.sender_address}>` : ""].filter(Boolean).join(" "), recipient: "", subject: String(row.subject), date: String(row.email_date), folder: String(row.folder), excerpt: "Indexed metadata match. Open the email to read its sanitized content.", whyMatched: "Matched the private owner-scoped metadata index.", hasAttachments: Boolean(row.has_attachments), attachmentFilenames: [], unread: Boolean(row.unread) })));
+      const indexed = await Promise.all(rows.map(row => indexRowToResult(row as unknown as IndexRow)));
       return { answer: indexed.length ? `Found ${indexed.length} relevant matching email${indexed.length === 1 ? "" : "s"}.` : "No related emails were found in the indexed date range.", emailResults: indexed, usage: null };
     }
     const initial = await searchYahoo({ terms: [message], sender: entityTokens.join(" "), startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
@@ -93,7 +134,7 @@ export async function runAssistant(message: string, ownerId?: string) {
     if (!calls.length) { const all = uniqueResults(emailResults); const relevant = relevantResults(message, all); const modelAnswer = response.content.filter(x => x.type === "text").map(x => x.text).join("\n"); return { answer: all.length && relevant.length !== all.length ? relevant.length ? `Found ${relevant.length} relevant matching email${relevant.length === 1 ? "" : "s"}. Unrelated refinement results were excluded.` : `Found ${all.length} related email${all.length === 1 ? "" : "s"}, but none matched the requested email type.` : modelAnswer, emailResults: relevant, usage: response.usage }; }
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const call of calls) {
-      try { results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(await execute(call.name, call.input, emailResults)) }); }
+      try { results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(await execute(call.name, call.input, emailResults, ownerId)) }); }
       catch (error) { results.push({ type: "tool_result", tool_use_id: call.id, is_error: true, content: error instanceof z.ZodError ? "Tool arguments failed validation." : "Tool request could not be completed safely." }); }
     }
     messages.push({ role: "user", content: results });

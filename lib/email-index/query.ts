@@ -1,6 +1,7 @@
 import "server-only";
 import { supabaseRequest } from "@/lib/supabase";
 import type { EmailType } from "@/lib/email/classify";
+import { rankedFilters, type RankedIndexQuery } from "./ranked-filters";
 
 export type IndexQuery = { ownerId: string; entity?: string; type?: EmailType; startDate?: string; endDate?: string; limit?: number };
 const safe = (value: string) => value.replace(/[%*,()]/g, "").trim();
@@ -39,3 +40,20 @@ export async function hasCoverage(ownerId: string, startDate?: string, endDate?:
 }
 
 function nextDay(date: string) { const value = new Date(`${date}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10); }
+
+type EmailIndexRow = {
+  id: string; folder: string; yahoo_uid: number; uid_validity: string; sender_name: string | null; sender_address: string | null;
+  subject: string; email_date: string; email_type: EmailType; entity_name: string | null; unread: boolean; has_attachments: boolean;
+};
+
+/** Typo-tolerant (pg_trgm) ranked search over indexed metadata only — no message body is read or stored. */
+export async function searchIndexRanked(value: RankedIndexQuery) {
+  const body = { ...rankedFilters(value), p_limit: Math.min(value.limit || 25, 100) };
+  return await (await supabaseRequest("rpc/search_email_index", { method: "POST", body: JSON.stringify(body) })).json() as EmailIndexRow[];
+}
+
+/** Typo-tolerant (pg_trgm) ranked count over indexed metadata only — no message body is read or stored. */
+export async function countIndexRanked(value: RankedIndexQuery) {
+  const body = rankedFilters(value);
+  return Number(await (await supabaseRequest("rpc/count_email_index", { method: "POST", body: JSON.stringify(body) })).json());
+}
