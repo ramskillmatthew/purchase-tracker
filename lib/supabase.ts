@@ -12,6 +12,10 @@ export async function supabaseRequest(path: string, init?: RequestInit) {
   headers.set("Content-Type", "application/json");
   if (!key.startsWith("sb_secret_")) headers.set("Authorization", `Bearer ${key}`);
   const response = await fetch(`${url}/rest/v1/${path}`, { ...init, headers, cache: "no-store" });
-  if (!response.ok) throw new Error((await response.text()) || "Database request failed.");
+  if (!response.ok) {
+    const error = new Error((await response.text()) || "Database request failed.") as Error & { status: number };
+    error.status = response.status;
+    throw error;
+  }
   return response;
 }

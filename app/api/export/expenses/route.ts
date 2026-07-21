@@ -1,9 +1,10 @@
 import { expenseExportColumns, makeCsv } from "@/lib/exportColumns";
 import { supabaseRequest } from "@/lib/supabase";
+import { requireOwner } from "@/lib/auth/server";
 
 export async function GET(request: Request) {
-  try { const { searchParams } = new URL(request.url); const start = searchParams.get("start"); const end = searchParams.get("end"); if (!start || !end) return new Response("Dates required", { status: 400 });
+  try { await requireOwner(); const { searchParams } = new URL(request.url); const start = searchParams.get("start"); const end = searchParams.get("end"); if (!start || !end) return new Response("Dates required", { status: 400 });
     const r = await supabaseRequest(`expenses?select=*&purchase_date=gte.${encodeURIComponent(start)}&purchase_date=lte.${encodeURIComponent(end)}&order=purchase_date.asc`);
     return new Response(makeCsv(await r.json(), expenseExportColumns), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="expenses-${start}-${end}.csv"` } });
-  } catch (e) { return new Response(e instanceof Error ? e.message : "Export failed", { status: 500 }); }
+  } catch (e) { return new Response(e instanceof Error && e.name === "AuthError" ? "Authentication required." : "Export failed.", { status: e instanceof Error && e.name === "AuthError" ? 401 : 500 }); }
 }

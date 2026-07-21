@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseRequest } from "@/lib/supabase";
+import { requireOwner } from "@/lib/auth/server";
+import { safeApiError } from "@/lib/auth/api";
 
 type BulkRow = {
   id?: string;
@@ -16,6 +18,7 @@ type BulkRow = {
 
 export async function POST(request: Request) {
   try {
+    await requireOwner();
     const payload = await request.json();
     const rows: BulkRow[] = Array.isArray(payload.rows) ? payload.rows : [];
     if (!rows.length || rows.length > 500) return NextResponse.json({ error: "Submit between 1 and 500 purchases." }, { status: 400 });
@@ -46,7 +49,5 @@ export async function POST(request: Request) {
     if (!valid.length) return NextResponse.json({ added: 0, failures }, { status: 400 });
     await supabaseRequest("purchases", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(valid) });
     return NextResponse.json({ added: valid.length, failures }, { status: 201 });
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not save bulk purchases." }, { status: 500 });
-  }
+  } catch (error) { return safeApiError(error, "Could not save bulk purchases."); }
 }

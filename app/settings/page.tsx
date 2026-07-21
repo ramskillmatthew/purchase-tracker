@@ -1,32 +1,23 @@
 "use client";
-
 import { useEffect, useState } from "react";
 
+type YahooStatus = { configured: boolean; maskedAddress: string | null; connected?: boolean; testedAt?: string; lastSuccessful?: string | null };
+type IndexStatus = { count: number; lastSyncedAt: string | null };
+
 export default function SettingsPage() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
-
-  useEffect(() => {
-    setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light");
-  }, []);
-
-  function chooseTheme(next: "light" | "dark") {
-    setTheme(next);
-    document.documentElement.classList.toggle("dark", next === "dark");
-    localStorage.setItem("purchase-tracker-theme", next);
-    window.dispatchEvent(new Event("purchase-theme-change"));
-  }
-
-  return <section className="page-shell page-narrow">
-    <header className="page-header"><div className="title-row"><h1>Settings</h1></div></header>
-    <div className="settings-panel">
-      <div className="settings-section">
-        <div className="settings-copy"><h2>Appearance</h2><p>Choose how Purchase Tracker looks on this device.</p></div>
-        <div className="theme-options">
-          <button type="button" className={theme === "light" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("light")}><span className="theme-preview theme-preview-light"><i /><i /></span><strong>Light</strong></button>
-          <button type="button" className={theme === "dark" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("dark")}><span className="theme-preview theme-preview-dark"><i /><i /></span><strong>Dark</strong></button>
-        </div>
-      </div>
-      <div className="settings-row"><div><h2>Workspace</h2><p>Personal workspace · Supabase database</p></div><span className="status-badge"><i />Connected</span></div>
-    </div>
-  </section>;
+  const today = new Date().toISOString().slice(0, 10); const ago = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+  const [theme, setTheme] = useState<"light" | "dark">("light"); const [yahoo, setYahoo] = useState<YahooStatus | null>(null); const [testing, setTesting] = useState(false); const [connectionError, setConnectionError] = useState("");
+  const [index, setIndex] = useState<IndexStatus | null>(null); const [startDate, setStartDate] = useState(ago); const [endDate, setEndDate] = useState(today); const [syncing, setSyncing] = useState(false); const [indexMessage, setIndexMessage] = useState("");
+  async function loadIndex() { const response = await fetch("/api/yahoo/index"); if (response.ok) setIndex(await response.json()); }
+  useEffect(() => { setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light"); fetch("/api/yahoo/connection").then(async response => response.ok && setYahoo(await response.json())); loadIndex(); }, []);
+  function chooseTheme(next: "light" | "dark") { setTheme(next); document.documentElement.classList.toggle("dark", next === "dark"); localStorage.setItem("purchase-tracker-theme", next); window.dispatchEvent(new Event("purchase-theme-change")); }
+  async function testConnection() { setTesting(true); setConnectionError(""); const response = await fetch("/api/yahoo/connection", { method: "POST" }); const body = await response.json(); if (response.ok) setYahoo(current => ({ configured: true, maskedAddress: body.maskedAddress || current?.maskedAddress || null, connected: true, testedAt: body.testedAt })); else setConnectionError(body.error || "Connection test failed."); setTesting(false); }
+  async function syncIndex() { setSyncing(true); setIndexMessage(""); const response = await fetch("/api/yahoo/index", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ startDate, endDate }) }); const body = await response.json(); setIndexMessage(response.ok ? body.truncated ? `Indexed ${body.indexed} emails, but this range was too large. Sync smaller date ranges.` : `Indexed ${body.indexed} metadata records. No email bodies were stored.` : body.error || "Metadata sync failed."); if (response.ok) await loadIndex(); setSyncing(false); }
+  async function clearIndex() { if (!window.confirm("Clear the private email metadata index? This does not delete anything from Yahoo and it can be rebuilt.")) return; const response = await fetch("/api/yahoo/index", { method: "DELETE" }); setIndexMessage(response.ok ? "Metadata index cleared. Yahoo Mail was not changed." : "The index could not be cleared."); if (response.ok) await loadIndex(); }
+  return <section className="page-shell page-narrow"><header className="page-header"><div className="title-row"><h1>Settings</h1></div></header><div className="settings-panel">
+    <div className="settings-section"><div className="settings-copy"><h2>Appearance</h2><p>Choose how Purchase Tracker looks on this device.</p></div><div className="theme-options"><button type="button" className={theme === "light" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("light")}><span className="theme-preview theme-preview-light"><i /><i /></span><strong>Light</strong></button><button type="button" className={theme === "dark" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("dark")}><span className="theme-preview theme-preview-dark"><i /><i /></span><strong>Dark</strong></button></div></div>
+    <div className="settings-row"><div><h2>Workspace</h2><p>Personal workspace · Supabase database</p></div><span className="status-badge"><i />Protected</span></div>
+    <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Yahoo Mail</h2><p>Read-only IMAP access is configured only through server environment variables.</p><ol><li>Enable Yahoo two-step verification.</li><li>Create a Yahoo app password.</li><li>Set YAHOO_EMAIL and YAHOO_APP_PASSWORD locally and in Vercel.</li></ol></div><div className="yahoo-status"><span className={yahoo?.configured ? "status-badge" : "status-badge status-off"}><i />{yahoo?.configured ? "Configured" : "Not configured"}</span><strong>{yahoo?.maskedAddress || "No address configured"}</strong>{yahoo?.connected && <small>Connected · tested {yahoo.testedAt ? new Date(yahoo.testedAt).toLocaleString() : "just now"}</small>}{!yahoo?.connected && yahoo?.lastSuccessful && <small>Last successful connection or sync: {new Date(yahoo.lastSuccessful).toLocaleString()}</small>}{connectionError && <small className="purchase-form-error">{connectionError}</small>}<button className="button-secondary" disabled={testing || !yahoo?.configured} onClick={testConnection}>{testing ? "Testing…" : "Test connection"}</button></div></div>
+    <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Private email index</h2><p>Stores only sender, subject, date, email type and extracted order fields in your protected Supabase workspace. Bodies, HTML, attachments and Yahoo credentials stay out of the index.</p><p>Sync in roughly two-week chunks. Adjacent completed chunks are combined automatically for longer questions.</p><p>{index?.count || 0} metadata records indexed{index?.lastSyncedAt ? ` · last synced ${new Date(index.lastSyncedAt).toLocaleString()}` : ""}.</p></div><div className="index-controls"><label>From<input type="date" value={startDate} max={endDate} onChange={event => setStartDate(event.target.value)} /></label><label>To<input type="date" value={endDate} min={startDate} max={today} onChange={event => setEndDate(event.target.value)} /></label>{indexMessage && <small>{indexMessage}</small>}<button className="button-secondary" disabled={syncing || !yahoo?.configured} onClick={syncIndex}>{syncing ? "Indexing metadata…" : "Sync metadata"}</button><button className="button-danger" disabled={syncing || !index?.count} onClick={clearIndex}>Clear index</button></div></div>
+  </div></section>;
 }
