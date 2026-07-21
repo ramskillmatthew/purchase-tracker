@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 // Each automatic tick advances the historical index by at most this many
-// days, so a large backlog is walked forward across several 4-hourly runs
+// days, so a large backlog is walked forward across several daily runs
 // instead of one run trying (and timing out) on the whole gap at once.
 // This also always requests through "today", so runIndexSync's internal
 // historical/today split picks up today's incremental refresh every tick.
