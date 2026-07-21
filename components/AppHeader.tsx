@@ -7,6 +7,9 @@ import { useEffect, useState } from "react";
 const links = [
   { label: "Home", href: "/", icon: "home" },
   { label: "Purchases", href: "/purchases", icon: "bag" },
+  { label: "Bulk Input", href: "/bulk-input", icon: "rows" },
+  { label: "Email Assistant", href: "/email-assistant", icon: "mail" },
+  { label: "Purchase Import", href: "/vinted-import", icon: "import" },
   { label: "Expenses", href: "/expenses", icon: "receipt" },
   { label: "Export", href: "/export", icon: "download" },
   { label: "Settings", href: "/settings", icon: "settings" },
@@ -16,6 +19,9 @@ function Icon({ name }: { name: string }) {
   const paths: Record<string, React.ReactNode> = {
     home: <><path d="m4 10 8-6 8 6" /><path d="M6.5 9v10.5h11V9M10 19v-6h4v6" /></>,
     bag: <><path d="M6.5 8.5h11l1 11h-13l1-11Z" /><path d="M9 9V6.5a3 3 0 0 1 6 0V9" /></>,
+    rows: <><path d="M5 6h14M5 12h14M5 18h14" /><path d="M8 4v4M13 10v4M17 16v4" /></>,
+    mail: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/></>,
+    import: <><path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 19h14"/></>,
     receipt: <><path d="M6 3.5h12v17l-3-2-3 2-3-2-3 2v-17Z" /><path d="M9 8h6M9 12h6" /></>,
     download: <><path d="M12 3.5v11M8 11l4 4 4-4" /><path d="M5 19.5h14" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></>,
@@ -45,6 +51,8 @@ export default function AppHeader() {
   }
 
   const isActive = (href: string) => pathname === href || (href === "/purchases" && pathname.startsWith("/purchases/"));
+
+  if (pathname === "/login") return null;
 
   return <>
     <aside className="sidebar">

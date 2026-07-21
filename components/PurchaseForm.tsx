@@ -56,7 +56,7 @@ export default function PurchaseForm({ onSaved, purchase, onCancel }: { onSaved:
     <label className="field"><span className="label">Purchased From</span><select className="input" required value={source} onChange={(e) => setSource(e.target.value)}><option value="" disabled>Choose platform</option>{[...platforms, "Other"].map(x => <option key={x}>{x}</option>)}</select></label>
     {source === "Other" && <label className="field purchase-form-wide"><span className="label">Where did you purchase it?</span><input className="input" name="purchased_from_other" defaultValue={purchase && !platforms.includes(purchase.purchased_from) ? purchase.purchased_from : ""} placeholder="Enter shop, website or seller" required /></label>}
     <label className="field"><span className="label">Seller Name</span><input className="input" name="seller_name" defaultValue={purchase?.seller_name} /></label>
-    <label className="field"><span className="label">SKU</span><input className="input" name="sku" defaultValue={purchase?.sku} required /></label>
+    <label className="field"><span className="label">SKU</span><input className="input" name="sku" defaultValue={purchase?.sku} /></label>
     <label className="field"><span className="label">Item Description</span><input className="input" name="item_description" defaultValue={purchase?.item_description} required /></label>
     <label className="field"><span className="label">Item Size</span><input className="input" name="item_size" defaultValue={purchase?.item_size} required /></label>
     <label className="field"><span className="label">Quantity</span><input className="input" name="quantity" type="number" min="1" step="1" defaultValue={purchase?.quantity ?? 1} required /></label>
