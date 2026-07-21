@@ -1,4 +1,4 @@
-import { classifyEmailIntent } from "./search-terms";
+import { classifyQueryIntent } from "@/lib/email/classify";
 
 const ignored = new Set(["find", "show", "get", "give", "import", "imports", "importing", "me", "my", "the", "a", "an", "this", "that", "these", "those", "most", "recent", "latest", "last", "past", "previous", "ago", "newest", "how", "many", "count", "number", "was", "were", "there", "did", "do", "have", "has", "between", "and", "during", "over", "within", "so", "far", "receive", "received", "email", "emails", "message", "messages", "from", "about", "relating", "related", "to", "for", "in", "containing", "contains", "with", "of", "please", "all", "every", "any", "purchase", "purchases", "order", "orders", "confirmation", "confirmations", "confirmed", "receipt", "receipts", "invoice", "invoices", "sold", "solds", "sale", "sales", "item", "items", "tracking", "delivery", "delivered", "dispatch", "dispatched", "shipping", "shipped", "refund", "refunds", "refunded", "return", "returns", "returned", "cancellation", "cancellations", "cancelled", "canceled", "unread", "read", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "day", "days", "week", "weeks", "month", "months", "year", "years", "today", "yesterday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]);
 
@@ -7,14 +7,14 @@ export function queryEntityTokens(query: string) { return normalize(query).split
 type SearchResultText = { sender: string; subject: string; excerpt: string };
 
 export function queryRequestsTransaction(query: string) {
-  return classifyEmailIntent([normalize(query)]) !== "general";
+  return classifyQueryIntent([normalize(query)]) !== "other";
 }
 
 function resultMatchesQueryIntent(query: string, result: SearchResultText) {
   const requested = normalize(query);
   const subject = normalize(result.subject);
   const content = normalize(`${result.subject} ${result.excerpt}`);
-  const intent = classifyEmailIntent([requested]);
+  const intent = classifyQueryIntent([requested]);
 
   if (intent === "sold") return /\b(?:you ve sold|sold an? item|item sold|sale completed)\b/.test(content);
   if (intent === "shipping") return /\b(?:dispatch|dispatched|shipping|shipped|tracking|on (?:the|its) way)\b/.test(content);

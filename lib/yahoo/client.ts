@@ -6,8 +6,7 @@ import { excerpt, sanitizeEmailHtml } from "./sanitize";
 import { signEmailId, verifyEmailId } from "./tokens";
 import { canonicalSender, countSubjectTerms, isExactEmailAddress, searchVariants, semanticSubjectTerms, senderSearchVariants } from "./search-terms";
 import { createHash } from "node:crypto";
-import { classifyIndexedEmail } from "@/lib/email-index/classify";
-import { classifyEmailIntent } from "./search-terms";
+import { classifySubject, classifyQueryIntent } from "@/lib/email/classify";
 
 const CONNECT_TIMEOUT = 8_000;
 const SOCKET_TIMEOUT = 15_000;
@@ -158,12 +157,12 @@ export async function countYahoo(criteria: EmailSearch) {
           const ids = await imap.search(query, { uid: true });
           if (ids) ids.forEach(uid => matched.add(uid));
         }
-        const expected = classifyEmailIntent(criteria.terms);
-        if (expected === "general") count += matched.size;
+        const expected = classifyQueryIntent(criteria.terms);
+        if (expected === "other") count += matched.size;
         else {
           for (const chunk of Array.from(matched).reduce<number[][]>((groups, uid, index) => { if (index % 250 === 0) groups.push([]); groups[groups.length - 1].push(uid); return groups; }, [])) {
             for await (const message of imap.fetch(chunk.join(","), { envelope: true }, { uid: true })) {
-              if (classifyIndexedEmail(message.envelope?.subject || "") === expected) count += 1;
+              if (classifySubject(message.envelope?.subject || "") === expected) count += 1;
             }
           }
         }

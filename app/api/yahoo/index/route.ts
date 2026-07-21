@@ -4,7 +4,7 @@ import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { supabaseRequest } from "@/lib/supabase";
 import { scanYahooMetadata } from "@/lib/yahoo/client";
-import { classifyIndexedEmail, entityFromSender, extractMetadata } from "@/lib/email-index/classify";
+import { classifySubject, entityFromSender, extractMetadata } from "@/lib/email/classify";
 import { audit, enforceRateLimit } from "@/lib/security/activity";
 
 export const runtime = "nodejs";
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     const created = await supabaseRequest("email_index_coverage", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ owner_id: user.id, range_start: value.startDate, range_end: value.endDate, status: "running" }) });
     coverageId = ((await created.json()) as { id: string }[])[0]?.id || null;
     const scanned = await scanYahooMetadata(value.startDate, value.endDate);
-    const indexed = scanned.rows.map(row => ({ ...row, ...extractMetadata(row.subject), owner_id: user.id, email_type: classifyIndexedEmail(row.subject), entity_name: entityFromSender(row.sender_name, row.sender_address), updated_at: new Date().toISOString() }));
+    const indexed = scanned.rows.map(row => ({ ...row, ...extractMetadata(row.subject), owner_id: user.id, email_type: classifySubject(row.subject), entity_name: entityFromSender(row.sender_name, row.sender_address), updated_at: new Date().toISOString() }));
     for (let offset = 0; offset < indexed.length; offset += 250) await supabaseRequest("email_metadata_index?on_conflict=owner_id,message_fingerprint", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(indexed.slice(offset, offset + 250)) });
     if (coverageId) await supabaseRequest(`email_index_coverage?id=eq.${coverageId}`, { method: "PATCH", body: JSON.stringify({ status: scanned.truncated ? "failed" : "completed", messages_indexed: indexed.length, completed_at: new Date().toISOString(), safe_error: scanned.truncated ? "The range exceeded the safe per-run limit. Sync a smaller date range." : null }) });
     await audit(user.id, "email_metadata_indexed", { count: indexed.length, startDate: value.startDate, endDate: value.endDate, truncated: scanned.truncated });

@@ -1,8 +1,8 @@
 import "server-only";
 import { supabaseRequest } from "@/lib/supabase";
-import type { IndexedEmailType } from "./classify";
+import type { EmailType } from "@/lib/email/classify";
 
-export type IndexQuery = { ownerId: string; entity?: string; type?: IndexedEmailType; startDate?: string; endDate?: string; limit?: number };
+export type IndexQuery = { ownerId: string; entity?: string; type?: EmailType; startDate?: string; endDate?: string; limit?: number };
 const safe = (value: string) => value.replace(/[%*,()]/g, "").trim();
 
 export async function queryIndex(value: IndexQuery) {

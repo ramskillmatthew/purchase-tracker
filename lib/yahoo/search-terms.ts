@@ -1,15 +1,4 @@
-export type EmailIntent = "confirmation" | "sold" | "shipping" | "delivery" | "cancellation" | "refund" | "general";
-
-export function classifyEmailIntent(values: string[]): EmailIntent {
-  const value = values.join(" ").toLowerCase();
-  if (/\b(?:cancel|cancelled|canceled|cancellations?)\b/.test(value)) return "cancellation";
-  if (/\b(?:refunds?|refunded|money back)\b/.test(value)) return "refund";
-  if (/\b(?:sold|solds|sale made|sales made|items? i sold|my sales)\b/.test(value)) return "sold";
-  if (/\b(?:delivered|delivery|collected|collection)\b/.test(value)) return "delivery";
-  if (/\b(?:dispatch|dispatched|shipping|shipped|tracking|on (?:the|its) way)\b/.test(value)) return "shipping";
-  if (/\b(?:receipt|receipts|invoice|invoices|purchase|purchases|order|orders|preorder|preorders|confirmation|confirmations|confirmed)\b/.test(value)) return "confirmation";
-  return "general";
-}
+import { classifyQueryIntent } from "@/lib/email/classify";
 
 export function searchVariants(values: string[]) {
   const variants = new Set<string>();
@@ -63,7 +52,7 @@ export function isExactEmailAddress(value: string) {
 export function semanticSubjectTerms(values: string[]) {
   const intent = values.join(" ").replace(/\bconformation\b/gi, "confirmation");
   const terms = new Set<string>();
-  if (classifyEmailIntent(values) === "sold") ["sold", "you've sold", "you’ve sold", "item sold", "sale completed"].forEach(term => terms.add(term));
+  if (classifyQueryIntent(values) === "sold") ["sold", "you've sold", "you’ve sold", "item sold", "sale completed"].forEach(term => terms.add(term));
   if (/\b(?:order|purchase|preorder)\b/i.test(intent)) {
     const orderTerms = /\bconfirm(?:ed|ation)?s?\b/i.test(intent)
       ? ["confirmed", "confirmation", "thank you for", "order received", "order", "purchase", "order details", "receipt"]

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { isPurchaseConfirmationSubject } from "./classify";
+import { isPurchaseConfirmationSubject } from "@/lib/email/classify";
 
 const candidateSchema = z.object({
   yahoo_message_id: z.string().min(1), email_date: z.string().datetime(), sender: z.string().min(1), subject: z.string().min(1),

@@ -6,7 +6,7 @@ import { searchYahoo, countYahoo, getYahooEmail, yahooMetadataId } from "@/lib/y
 import { supabaseRequest } from "@/lib/supabase";
 import { resultMatchesQueryEntity } from "@/lib/yahoo/query-relevance";
 import { countIndex, hasCoverage, queryIndex } from "@/lib/email-index/query";
-import type { IndexedEmailType } from "@/lib/email-index/classify";
+import type { EmailType } from "@/lib/email/classify";
 import { planEmailQuery } from "@/lib/yahoo/query-plan";
 
 const purchaseSearchSchema = z.object({ term: z.string().trim().max(200).optional(), startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), limit: z.coerce.number().int().min(1).max(50).default(20) }).strict();
@@ -64,7 +64,7 @@ export async function runAssistant(message: string, ownerId?: string) {
   const countRequest = plan.operation === "count";
   const dateRange = plan.startDate && plan.endDate ? { startDate: plan.startDate, endDate: plan.endDate } : null;
   const intent = plan.intent;
-  const indexedType = intent === "general" ? undefined : intent as IndexedEmailType;
+  const indexedType = intent === "other" ? undefined : intent as EmailType;
   const indexedCoverage = ownerId && dateRange ? await hasCoverage(ownerId, dateRange.startDate, dateRange.endDate) : false;
   if (countRequest && entityTokens.length && plan.transactional) {
     if (ownerId && indexedCoverage) {

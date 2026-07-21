@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/auth/server"; import { safeApiError } from "@/lib/auth/api";
 import { getYahooEmails, scanYahooMetadata, yahooMetadataId } from "@/lib/yahoo/client"; import { parseVintedEmail } from "@/lib/vinted/parser";
 import { parseGeneralPurchaseEmail } from "@/lib/purchase-import/parser"; import { planEmailQuery } from "@/lib/yahoo/query-plan";
-import { shouldInspectPurchaseHeader } from "@/lib/purchase-import/classify";
+import { shouldInspectPurchaseHeader } from "@/lib/email/classify";
 import { supabaseRequest } from "@/lib/supabase"; import { audit, enforceRateLimit } from "@/lib/security/activity"; import { z } from "zod";
 export const runtime = "nodejs"; export const maxDuration = 60;
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);

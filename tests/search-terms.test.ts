@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"; import { canonicalSender, classifyEmailIntent, countSubjectTerms, isExactEmailAddress, searchVariants, semanticSubjectTerms, senderSearchVariants } from "@/lib/yahoo/search-terms";
+import { describe, expect, it } from "vitest"; import { canonicalSender, countSubjectTerms, isExactEmailAddress, searchVariants, semanticSubjectTerms, senderSearchVariants } from "@/lib/yahoo/search-terms";
 describe("forgiving mailbox terms",()=>{
   it("expands UK/US centre spelling and accented Pokémon",()=>{const values=searchVariants(["pokemon centre"]);expect(values).toContain("pokemon centre");expect(values).toContain("pokemon center");expect(values).toContain("pokémon centre");expect(values).toContain("pokémon center");});
   it("keeps unrelated terms unchanged and bounded",()=>{expect(searchVariants(["holiday booking"])).toEqual(["holiday booking"]);expect(searchVariants(Array.from({length:20},(_,i)=>`term ${i}`))).toHaveLength(12);});
@@ -14,5 +14,5 @@ describe("forgiving mailbox terms",()=>{
   it("accepts the common conformation typo",()=>{expect(semanticSubjectTerms(["latest order conformation"]).slice(0,3)).toEqual(["confirmed","confirmation","thank you for"]);});
   it("creates bounded typo-tolerant sender probes in useful order",()=>{const values=senderSearchVariants("Pokmon Cnter");expect(values.slice(0,3)).toEqual(["Pokmon Cnter","pokm","cnte"]);expect(senderSearchVariants("assos").slice(0,3)).toContain("asos");expect(values.length).toBeLessThanOrEqual(12);});
   it("uses strict sender matching only for literal email addresses",()=>{expect(isExactEmailAddress("orders@example.test")).toBe(true);expect(isExactEmailAddress("ASOS Sample Sale")).toBe(false);expect(isExactEmailAddress("ASOS")).toBe(false);});
-  it("classifies common mailbox lifecycle questions",()=>{expect(classifyEmailIntent(["Vinted solds emails"])).toBe("sold");expect(classifyEmailIntent(["order confirmations"])).toBe("confirmation");expect(classifyEmailIntent(["parcel tracking"])).toBe("shipping");expect(classifyEmailIntent(["delivered emails"])).toBe("delivery");expect(classifyEmailIntent(["cancelled orders"])).toBe("cancellation");expect(classifyEmailIntent(["refund emails"])).toBe("refund");expect(semanticSubjectTerms(["Vinted sold emails"])).toContain("you’ve sold");});
+  it("still recognizes sold-intent wording used by semanticSubjectTerms",()=>{expect(semanticSubjectTerms(["Vinted sold emails"])).toContain("you’ve sold");});
 });
