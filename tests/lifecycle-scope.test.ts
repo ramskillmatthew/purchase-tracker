@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diversifyByLifecycleStage, lifecycleTypeFilter } from "@/lib/yahoo/lifecycle-scope";
+import { diversifyByLifecycleStage, lifecycleTypeFilter, reconstructionTypeFilter } from "@/lib/yahoo/lifecycle-scope";
 
 describe("lifecycleTypeFilter", () => {
   it("retrieves the whole forward lifecycle for a dated status question using the indexed path", () => {
@@ -21,9 +21,10 @@ describe("lifecycleTypeFilter", () => {
     expect(lifecycleTypeFilter("confirmation", "find my dimplex receipt from last week")).toBe("confirmation");
   });
 
-  it("keeps cancellation, refund, and sold as their own narrow types — a different outcome, not another lifecycle stage", () => {
+  it("keeps cancellation, refund, return, and sold as their own narrow types — a different outcome, not another lifecycle stage", () => {
     expect(lifecycleTypeFilter("cancellation", "was my dimplex order cancelled last week")).toBe("cancellation");
     expect(lifecycleTypeFilter("refund", "did I get a refund for my dimplex order")).toBe("refund");
+    expect(lifecycleTypeFilter("return", "show me my recent return emails")).toBe("return");
     expect(lifecycleTypeFilter("sold", "what did I sell on vinted last week")).toBe("sold");
   });
 
@@ -44,6 +45,35 @@ describe("lifecycleTypeFilter", () => {
 
   it("keeps a narrow delivery question scoped to the forward lifecycle even though it shares wording with history questions", () => {
     expect(lifecycleTypeFilter("delivery", "Did my Meaco order arrive?")).toEqual(["confirmation", "shipping", "delivery"]);
+  });
+});
+
+describe("reconstructionTypeFilter", () => {
+  it("REGRESSION: applies no type filter for a generic order-cost question, so reconstruction can see a later cancellation/refund and report the correct status", () => {
+    expect(reconstructionTypeFilter("confirmation", "Which Meaco order cost £539.99?")).toBeUndefined();
+  });
+
+  it("applies no type filter for a dated status question either, unlike lifecycleTypeFilter's forward-only narrowing", () => {
+    expect(reconstructionTypeFilter("delivery", "did my dimplex order arrive last week")).toBeUndefined();
+    expect(reconstructionTypeFilter("shipping", "has my dimplex parcel been dispatched this week")).toBeUndefined();
+    expect(reconstructionTypeFilter("confirmation", "how is my dimplex order getting on last week")).toBeUndefined();
+  });
+
+  it("still keeps an explicit confirmation/receipt/invoice document request narrow to that one type", () => {
+    expect(reconstructionTypeFilter("confirmation", "find my dimplex order confirmation from last week")).toBe("confirmation");
+    expect(reconstructionTypeFilter("confirmation", "show my dimplex invoice from last week")).toBe("confirmation");
+  });
+
+  it("still keeps cancellation, refund, and sold as their own narrow types", () => {
+    expect(reconstructionTypeFilter("cancellation", "was my dimplex order cancelled last week")).toBe("cancellation");
+    expect(reconstructionTypeFilter("refund", "did I get a refund for my dimplex order")).toBe("refund");
+    expect(reconstructionTypeFilter("sold", "what did I sell on vinted last week")).toBe("sold");
+  });
+
+  it("returns undefined for unclassified queries and broad-history/comparison questions, same as lifecycleTypeFilter", () => {
+    expect(reconstructionTypeFilter("other", "dimplex")).toBeUndefined();
+    expect(reconstructionTypeFilter("confirmation", "What happened with my Meaco orders?")).toBeUndefined();
+    expect(reconstructionTypeFilter("confirmation", "Compare my five Meaco orders.")).toBeUndefined();
   });
 });
 

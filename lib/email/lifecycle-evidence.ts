@@ -29,6 +29,17 @@ const REFUND_ACTION = /(?:has|have|had)\s+been\s+refunded|(?:is|are|was|were)\s+
 const REFUND_KEYWORD = /\b(?:refund|refunds|refunded|money back|reimbursement)\b/i;
 const REFUND_BOILERPLATE = /\b(?:refund polic(?:y|ies)|right to a refund|eligible for a refund|refund eligib\w*|how to request a refund|refunds? may take)\b/i;
 
+// Mirrors the cancellation/refund action-vs-boilerplate split above: a bare
+// "return" keyword fires on standard returns-policy footer text present in
+// almost every ordinary confirmation/shipping email ("free returns within
+// 30 days", "see our returns policy"), so genuine return evidence is
+// primarily matched on an actual event/state having occurred. RMA is
+// included as a keyword since retailers often label the whole flow with
+// that abbreviation instead of the word "return" itself.
+const RETURN_ACTION = /(?:has|have|had)\s+been\s+returned|return\s+(?:has\s+been\s+|was\s+)?(?:received|initiated|accepted|approved|confirmed|requested)|we(?:'|’|\s)?ve\s+received\s+your\s+return|we\s+have\s+received\s+your\s+return|your\s+return\s+(?:is|has)\s+(?:on\s+its\s+way|been\s+received)|return\s+label\s+(?:attached|enclosed|is\s+ready|has\s+been\s+sent)|start(?:ed)?\s+(?:a|your)\s+return|initiat(?:e|ed)\s+(?:a|your)\s+return|return\s+authoris\w*|return\s+authoriz\w*|rma\s+(?:number|reference|confirm(?:ed|ation))/i;
+const RETURN_KEYWORD = /\b(?:return|returns|returned|returning|rma)\b/i;
+const RETURN_BOILERPLATE = /\b(?:return polic(?:y|ies)|returns? (?:policy|period|window|portal)|free returns?|how to return|eligible for (?:a )?return|return (?:this|your) item within|\d+[- ]day returns?|right to return)\b/i;
+
 // Callers may pass either raw text or text already run through a normalizer
 // that strips punctuation to spaces (e.g. "you've" -> "you ve"), so the
 // apostrophe in "you've sold" is optional and may be a literal space.
@@ -45,6 +56,11 @@ function hasRefundEvidence(content: string): boolean {
   return REFUND_KEYWORD.test(content) && !REFUND_BOILERPLATE.test(content);
 }
 
+function hasReturnEvidence(content: string): boolean {
+  if (RETURN_ACTION.test(content)) return true;
+  return RETURN_KEYWORD.test(content) && !RETURN_BOILERPLATE.test(content);
+}
+
 /**
  * Whether subject+body content contains real evidence of a given lifecycle
  * type. Used so a generic subject line (e.g. "Order update") whose actual
@@ -56,6 +72,7 @@ function hasRefundEvidence(content: string): boolean {
 export function matchesLifecycleEvidence(type: EmailType, content: string): boolean {
   if (type === "cancellation") return hasCancellationEvidence(content);
   if (type === "refund") return hasRefundEvidence(content);
+  if (type === "return") return hasReturnEvidence(content);
   if (type === "sold") return SOLD_EVIDENCE.test(content);
   if (type === "shipping" || type === "delivery") return FORWARD_LIFECYCLE_EVIDENCE.test(content);
   if (type === "confirmation") return CONFIRMATION_EVIDENCE.test(content) || FORWARD_LIFECYCLE_EVIDENCE.test(content) || /\border\b/i.test(content);

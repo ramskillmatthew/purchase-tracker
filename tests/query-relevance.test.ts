@@ -215,6 +215,66 @@ describe("deterministic result relevance",()=>{
     });
   });
 
+  describe("lifecycle status regression: a generic attribute/status question must still see reversal evidence for the order it names (REGRESSION)", () => {
+    const meacoConfirmed = result("Meaco <orders@meaco.com>", "Your Meaco order MC-5005 confirmed", "Order details. Total paid £539.99");
+    const meacoCancelled = result("Meaco <orders@meaco.com>", "Your Meaco order MC-5005 has been cancelled", "");
+    const meacoRefunded = result("Meaco <orders@meaco.com>", "Refund confirmed for order MC-5005", "£539.99 has been refunded");
+
+    it("REGRESSION: 'Which Meaco order cost £539.99?' finds the cancellation and refund evidence too, not just the confirmation", () => {
+      const query = "Which Meaco order cost £539.99?";
+      expect(resultMatchesQueryEntity(query, meacoConfirmed)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(true);
+    });
+
+    it("still keeps an explicit document request ('find my Meaco order confirmation') narrow, excluding the reversal emails", () => {
+      const query = "Find my Meaco order confirmation";
+      expect(resultMatchesQueryEntity(query, meacoConfirmed)).toBe(true);
+      expect(resultMatchesQueryEntity(query, meacoCancelled)).toBe(false);
+      expect(resultMatchesQueryEntity(query, meacoRefunded)).toBe(false);
+    });
+
+    it("a delivery/shipping-intent status question is unaffected by this change and still excludes an unrelated reversal", () => {
+      expect(resultMatchesQueryEntity("Did my Meaco order arrive?", meacoCancelled)).toBe(false);
+    });
+  });
+
+  describe("return query precision: a 'return' query matches genuine return logistics, not collection/cancellation noise (REGRESSION)", () => {
+    const returnReceived = result("ASOS <no-reply@asos.com>", "Your return has been received", "");
+    const returnRequested = result("ASOS <no-reply@asos.com>", "We've received your return request", "Your return label is attached.");
+    const parcelCollection = result("Dimplex <orders@dimplex.co.uk>", "Your parcel is ready for collection", "Collect it from your local store.");
+    const cancelledOrder = result("Dimplex <orders@dimplex.co.uk>", "Your order has been cancelled", "");
+    const confirmationWithReturnsBoilerplate = result("ASOS <no-reply@asos.com>", "Thank you for your order", "Order details. Total paid £45.00. Free returns within 30 days — see our returns policy.");
+
+    it("REGRESSION: 'Show me my recent return emails' matches genuine return evidence", () => {
+      const query = "Show me my recent return emails";
+      expect(resultMatchesQueryEntity(query, returnReceived)).toBe(true);
+      expect(resultMatchesQueryEntity(query, returnRequested)).toBe(true);
+    });
+
+    it("REGRESSION: the same query excludes a plain parcel-collection (delivery) notification unrelated to any return", () => {
+      expect(resultMatchesQueryEntity("Show me my recent return emails", parcelCollection)).toBe(false);
+    });
+
+    it("REGRESSION: the same query excludes a plain order cancellation, since cancellation is a different outcome than a return", () => {
+      expect(resultMatchesQueryEntity("Show me my recent return emails", cancelledOrder)).toBe(false);
+    });
+
+    it("REGRESSION: the same query excludes an ordinary confirmation whose standard returns-policy footer merely mentions returns generically", () => {
+      expect(resultMatchesQueryEntity("Show me my recent return emails", confirmationWithReturnsBoilerplate)).toBe(false);
+    });
+
+    it("still finds return emails for a narrower, retailer-scoped return query", () => {
+      expect(resultMatchesQueryEntity("find my asos returns", returnReceived)).toBe(true);
+      expect(resultMatchesQueryEntity("find my asos returns", parcelCollection)).toBe(false);
+    });
+
+    it("a broad-history question still retrieves cancellation and return evidence together, unaffected by the narrower return-intent path", () => {
+      const query = "What happened with my Dimplex order?";
+      expect(resultMatchesQueryEntity(query, cancelledOrder)).toBe(true);
+    });
+  });
+
   describe("preferLifecycleEvidence", () => {
     const accountEmail = result("ASOS <noreply@asos.com>", "Your ASOS account is set up", "Welcome! Track your orders, manage your wishlist and more.");
     const marketingEmail = result("ASOS <noreply@asos.com>", "20% off everything this weekend", "Shop the sale now");

@@ -25,7 +25,27 @@ export function lifecycleTypeFilter(intent: EmailType, message: string): EmailTy
   return intent;
 }
 
-const STAGE_ORDER: EmailType[] = ["confirmation", "shipping", "delivery", "cancellation", "refund", "sold", "other"];
+/**
+ * Like lifecycleTypeFilter, but for the candidate set that feeds order
+ * reconstruction (see lib/orders/reconstruct.ts), not a bare typed count.
+ * lifecycleTypeFilter's FORWARD_LIFECYCLE_TYPES narrowing is correct for a
+ * count ("how many order confirmations do I have") but wrong here: a
+ * status/attribute question about a specific order ("what did it cost",
+ * "is my order dispatched") needs to know about a later cancellation,
+ * refund, or return to report the order's true current status — narrowing
+ * away from that evidence reconstructs a stale, incomplete order (e.g. the
+ * exact reported bug: a "cost" question about a cancelled order silently
+ * excluding its cancellation email, so the rebuilt order reads "Ordered"
+ * instead of "Cancelled"). An explicit document request (find my
+ * confirmation/receipt/invoice) still narrows, since that's a literal
+ * document lookup, not a status question.
+ */
+export function reconstructionTypeFilter(intent: EmailType, message: string): EmailType | EmailType[] | undefined {
+  const filtered = lifecycleTypeFilter(intent, message);
+  return filtered === FORWARD_LIFECYCLE_TYPES ? undefined : filtered;
+}
+
+const STAGE_ORDER: EmailType[] = ["confirmation", "shipping", "delivery", "cancellation", "return", "refund", "sold", "other"];
 
 /**
  * Picks up to `limit` items, guaranteeing at least one representative from

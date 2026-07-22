@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractAmount, extractItems, extractMerchant, extractOrderReference, extractTrackingNumbers, parseSenderDisplay } from "@/lib/orders/extract";
+import { extractAmount, extractItems, extractMerchant, extractOrderReference, extractPaymentCards, extractRecipientName, extractTrackingNumbers, looksLikePreorder, parseSenderDisplay } from "@/lib/orders/extract";
 
 describe("extractOrderReference", () => {
   it("extracts a reference following 'order'/'ref' from the subject", () => {
@@ -43,12 +43,88 @@ describe("extractAmount", () => {
 describe("extractTrackingNumbers", () => {
   it("extracts a tracking number when labelled", () => { expect(extractTrackingNumbers("Your tracking number: ABC123XYZ9")).toEqual(["ABC123XYZ9"]); });
   it("does not treat an order reference or unrelated code as a tracking number without the word 'tracking' nearby", () => { expect(extractTrackingNumbers("Order MC-1001 confirmed. Reference ABC123XYZ9.")).toEqual([]); });
+
+  describe("REGRESSION: never captures the label word itself as a placeholder value when no real code follows", () => {
+    it.each([
+      "Tracking Number",
+      "Tracking number",
+      "Tracking information",
+      "Tracking details",
+      "Your tracking information will be sent separately.",
+      "Tracking Number: your parcel is on its way",
+    ])("returns no tracking number for: %s", text => {
+      expect(extractTrackingNumbers(text)).toEqual([]);
+    });
+
+    it("still extracts a real digit-bearing tracking number even when the label word immediately precedes it", () => {
+      expect(extractTrackingNumbers("Tracking Number: TN482910537")).toEqual(["TN482910537"]);
+    });
+  });
 });
 
 describe("extractItems", () => {
-  it("extracts an 'Item:' labelled line", () => { expect(extractItems("Order details\nItem: Poké Ball Plus\nQuantity: 1")).toContain("Poké Ball Plus"); });
-  it("extracts 'N x <item>' patterns", () => { expect(extractItems("1 x Dimplex Heater\n2 x Remote Control")).toEqual(expect.arrayContaining(["Dimplex Heater", "Remote Control"])); });
+  it("extracts an 'Item:' labelled line with a default quantity of 1", () => {
+    expect(extractItems("Order details\nItem: Poké Ball Plus\nQuantity: 1")).toEqual([{ name: "Poké Ball Plus", quantity: 1 }]);
+  });
+  it("extracts 'N x <item>' patterns with their quantities", () => {
+    expect(extractItems("1 x Dimplex Heater\n2 x Remote Control")).toEqual(expect.arrayContaining([
+      { name: "Dimplex Heater", quantity: 1 },
+      { name: "Remote Control", quantity: 2 },
+    ]));
+  });
+  it("sums same-named lines found within one email", () => {
+    expect(extractItems("1 x Product A\n2 x Product A")).toEqual([{ name: "Product A", quantity: 3 }]);
+  });
   it("returns an empty array when nothing matches", () => { expect(extractItems("Thank you for your order.")).toEqual([]); });
+});
+
+describe("extractPaymentCards", () => {
+  it("extracts a card ending mention", () => {
+    expect(extractPaymentCards("Refunded to card ending 0428")).toEqual(["0428"]);
+  });
+  it("extracts every distinct card, in order of first appearance, deduped", () => {
+    expect(extractPaymentCards("Paid with card ending 0428. Refunded to card ending 1234. Also see card ending 0428 above.")).toEqual(["0428", "1234"]);
+  });
+  it("recognizes visa/mastercard/amex wording", () => {
+    expect(extractPaymentCards("Visa ending in 4321")).toEqual(["4321"]);
+    expect(extractPaymentCards("Mastercard ending 8765")).toEqual(["8765"]);
+  });
+  it("returns an empty array when no card is mentioned", () => {
+    expect(extractPaymentCards("Thank you for your order.")).toEqual([]);
+  });
+});
+
+describe("extractRecipientName", () => {
+  it("extracts a name following a delivery/recipient label", () => {
+    expect(extractRecipientName("Deliver to: John Smith")).toBe("John Smith");
+    expect(extractRecipientName("Shipping to Jane Doe")).toBe("Jane Doe");
+    expect(extractRecipientName("Recipient: Alex Turner")).toBe("Alex Turner");
+  });
+  it("returns null when there is no recipient label", () => {
+    expect(extractRecipientName("Thank you for your order.")).toBeNull();
+  });
+});
+
+describe("looksLikePreorder", () => {
+  it.each([
+    "Your order is a pre-order and will ship when available.",
+    "This item is a preorder — thanks for your patience.",
+    "You have purchased a pre-ordered item.",
+    "This item ships after 12th August.",
+    "Available for dispatch after the release date.",
+    "Release date: 12th August 2026.",
+  ])("recognizes: %s", text => {
+    expect(looksLikePreorder(text)).toBe(true);
+  });
+
+  it.each([
+    "Preorder now for our new collection!",
+    "Check out our preorder page for upcoming releases.",
+    "Terms and conditions apply to all pre-order purchases generally.",
+    "Thank you for your order.",
+  ])("does not fire on a bare 'preorder'/'pre-order' mention or generic marketing copy: %s", text => {
+    expect(looksLikePreorder(text)).toBe(false);
+  });
 });
 
 describe("parseSenderDisplay", () => {

@@ -5,8 +5,9 @@ import type { OrderSourceEmail, ReconstructedOrder } from "@/lib/orders/model";
 const email = (id: string, sender: string, subject: string, date: string, text = ""): OrderSourceEmail => ({ id, sender, subject, date, text, html: "" });
 
 const baseOrder: ReconstructedOrder = {
-  orderId: "MC-1001", merchant: "meaco", purchaseDate: "2026-07-01T10:00:00Z", status: "delivered",
-  items: ["Dimplex Heater"], trackingNumbers: ["ABC123XYZ9"], purchaseAmount: null, refundAmount: null, currency: null,
+  orderId: "MC-1001", merchant: "meaco", purchaseDate: "2026-07-01T10:00:00Z", status: "delivered", isPreorder: false,
+  items: [{ name: "Dimplex Heater", quantity: 1 }], trackingNumbers: ["ABC123XYZ9"], purchaseAmount: null, refundAmount: null, currency: null,
+  paymentCards: [], recipientName: null, notes: [],
   timeline: [
     { type: "ordered", date: "2026-07-01T10:00:00Z", sourceEmailId: "1" },
     { type: "dispatched", date: "2026-07-02T10:00:00Z", sourceEmailId: "2" },
@@ -70,13 +71,44 @@ describe("renderOrdersForSynthesis", () => {
   });
 
   it("handles an order with no timeline events and no order reference gracefully", () => {
-    const empty: ReconstructedOrder = { orderId: null, merchant: "unknown", purchaseDate: null, status: "unknown", items: [], trackingNumbers: [], purchaseAmount: null, refundAmount: null, currency: null, timeline: [], sourceEmails: [], confidence: 0.4 };
+    const empty: ReconstructedOrder = { orderId: null, merchant: "unknown", purchaseDate: null, status: "unknown", isPreorder: false, items: [], trackingNumbers: [], purchaseAmount: null, refundAmount: null, currency: null, paymentCards: [], recipientName: null, notes: [], timeline: [], sourceEmails: [], confidence: 0.4 };
     expect(() => renderOrdersForSynthesis([empty], new Map())).not.toThrow();
     expect(renderOrdersForSynthesis([empty], new Map())).toContain("Unknown");
   });
 
   it("returns an empty string for no orders", () => {
     expect(renderOrdersForSynthesis([], new Map())).toBe("");
+  });
+
+  describe("timeline parity: Claude's evidence never omits what the card/timeline already shows (REGRESSION)", () => {
+    it("includes a 'Pre-order: yes' line when isPreorder is true, matching the card's Pre-order badge", () => {
+      const preorder = { ...baseOrder, isPreorder: true };
+      expect(renderOrdersForSynthesis([preorder], new Map())).toContain("Pre-order: yes");
+    });
+
+    it("omits the pre-order line entirely when isPreorder is false, rather than stating 'Pre-order: no'", () => {
+      expect(renderOrdersForSynthesis([baseOrder], new Map())).not.toContain("Pre-order");
+    });
+
+    it("every timeline event the card/badge would show also appears as an evidence line for synthesis, so the two views can never disagree", () => {
+      const withRefund: ReconstructedOrder = {
+        ...baseOrder,
+        status: "refund_processed",
+        timeline: [
+          { type: "ordered", date: "2026-07-01T10:00:00Z", sourceEmailId: "1" },
+          { type: "cancelled", date: "2026-07-03T10:00:00Z", sourceEmailId: "2" },
+          { type: "refund_processed", date: "2026-07-05T10:00:00Z", sourceEmailId: "3" },
+        ],
+      };
+      const rendered = renderOrdersForSynthesis([withRefund], new Map());
+      for (const event of withRefund.timeline) {
+        const label = { ordered: "Ordered", cancelled: "Cancelled", refund_processed: "Refund processed" }[event.type as "ordered" | "cancelled" | "refund_processed"];
+        expect(rendered).toContain(label);
+      }
+      // The order's overall Status line is also the same last-event label —
+      // the same source of truth the card's status badge reads from.
+      expect(rendered).toContain("Status: Refund processed");
+    });
   });
 
   describe("computed refund totals", () => {
@@ -120,8 +152,9 @@ describe("renderOrdersForSynthesis", () => {
 
 describe("formatRefundTotalsSummary", () => {
   const baseOrder: ReconstructedOrder = {
-    orderId: null, merchant: "meaco", purchaseDate: null, status: "refund_processed", items: [], trackingNumbers: [],
-    purchaseAmount: null, refundAmount: null, currency: null, timeline: [], sourceEmails: [], confidence: 0.95,
+    orderId: null, merchant: "meaco", purchaseDate: null, status: "refund_processed", isPreorder: false, items: [], trackingNumbers: [],
+    purchaseAmount: null, refundAmount: null, currency: null, paymentCards: [], recipientName: null, notes: [],
+    timeline: [], sourceEmails: [], confidence: 0.95,
   };
 
   it("produces the exact expected user-facing line for the reported Meaco figures", () => {

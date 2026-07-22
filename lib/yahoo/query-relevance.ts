@@ -49,14 +49,11 @@ function resultMatchesQueryIntent(query: string, result: SearchResultText) {
   const content = normalize(`${result.subject} ${result.excerpt}`);
   const intent = classifyQueryIntent([requested]);
 
-  if (intent === "sold" || intent === "shipping" || intent === "delivery" || intent === "cancellation" || intent === "refund") return matchesLifecycleEvidence(intent, content);
+  if (intent === "sold" || intent === "shipping" || intent === "delivery" || intent === "cancellation" || intent === "refund" || intent === "return") return matchesLifecycleEvidence(intent, content);
 
   if (intent === "confirmation") {
     const reversalOnly = /\b(cancelled|canceled|cancellation|refund|refunded|return|returned)\b/;
     const requestedReversal = /\b(cancel|cancelled|canceled|cancellation|refund|refunded|return|returned)\b/.test(requested);
-    if (!requestedReversal && reversalOnly.test(subject)) return false;
-
-    const transactionEvidence = /\b(receipt|invoice|payment (?:has been )?(?:received|confirmed)|purchase confirmation|order confirmation|order (?:has been )?(?:confirmed|received|placed)|(?:we(?: ve)?|we have) (?:got|received) your order|thank you for (?:placing )?(?:an? )?order|thanks for (?:placing )?(?:an? )?order|order details|date ordered|paid|total paid|proof of purchase)\b/;
 
     // An explicit ask for the confirmation/receipt/invoice document itself
     // ("find my order confirmation", "show my invoice") stays narrow to that
@@ -67,6 +64,21 @@ function resultMatchesQueryIntent(query: string, result: SearchResultText) {
     // accepts evidence from any forward-lifecycle stage too, not only the
     // confirmation receipt.
     const explicitDocumentRequest = /\b(receipt|invoice|confirmation|confirmations|confirmed)\b/.test(requested);
+
+    // Excluding a reversal-subject email here is only correct for a literal
+    // document request — that genuinely wants the receipt, not a later
+    // cancellation notice. Any other confirmation-intent question (a
+    // generic status/attribute question like "what did my order cost")
+    // reached "confirmation" only via the bare order/purchase fallback and
+    // needs to know about a later cancellation or refund to answer
+    // correctly; excluding it here reconstructs an incomplete, stale order
+    // (the exact reported bug — a "cost" question silently excluding the
+    // order's cancellation email, so status shows "Ordered" instead of the
+    // true "Cancelled").
+    if (!requestedReversal && explicitDocumentRequest && reversalOnly.test(subject)) return false;
+
+    const transactionEvidence = /\b(receipt|invoice|payment (?:has been )?(?:received|confirmed)|purchase confirmation|order confirmation|order (?:has been )?(?:confirmed|received|placed)|(?:we(?: ve)?|we have) (?:got|received) your order|thank you for (?:placing )?(?:an? )?order|thanks for (?:placing )?(?:an? )?order|order details|date ordered|paid|total paid|proof of purchase)\b/;
+
     if (!explicitDocumentRequest) return transactionEvidence.test(content) || FORWARD_LIFECYCLE_EVIDENCE.test(content) || /\border\b/.test(subject);
 
     const lifecycleOnly = /\b(shipment|shipped|shipping|dispatch|dispatched|tracking|on (?:the|its) way|out for delivery|due (?:to be )?delivered|delivered|will arrive)\b/;

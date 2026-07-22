@@ -53,8 +53,15 @@ export function renderOrdersForSynthesis(orders: ReconstructedOrder[], emailsByI
       ? `Timeline:\n${order.timeline.map(event => `- ${EVENT_LABELS[event.type]}${event.date ? ` (${event.date})` : ""}`).join("\n")}`
       : "Timeline: no dated lifecycle events found.";
     const meta = [
-      order.items.length ? `Items: ${order.items.join(", ")}` : null,
+      // Kept in sync with the card badge (see lib/orders/view.ts's
+      // statusBadge, which shows "Pre-order" instead of "Ordered" from this
+      // same flag) so Claude's narrative never contradicts what the
+      // structured card displays.
+      order.isPreorder ? "Pre-order: yes" : null,
+      order.items.length ? `Items: ${order.items.map(item => `${item.quantity} x ${item.name}`).join(", ")}` : null,
       order.trackingNumbers.length ? `Tracking: ${order.trackingNumbers.join(", ")}` : null,
+      order.paymentCards.length ? `Payment card${order.paymentCards.length === 1 ? "" : "s"}: ${order.paymentCards.map(card => `ending ${card}`).join(", ")}` : null,
+      order.recipientName ? `Recipient: ${order.recipientName}` : null,
       // Kept as two distinct, separately labelled fields — never merge them
       // into one generic "amount". A refund being known does not mean the
       // purchase price is known, and vice versa; conflating them is exactly
@@ -62,6 +69,7 @@ export function renderOrdersForSynthesis(orders: ReconstructedOrder[], emailsByI
       // exists" when a refund amount was in fact known.
       order.purchaseAmount !== null && order.currency !== null ? `Purchase price: ${formatMoney(order.purchaseAmount, order.currency)}` : null,
       order.refundAmount !== null && order.currency !== null ? `Refund amount: ${formatMoney(order.refundAmount, order.currency)}` : null,
+      order.notes.length ? `Notes: ${order.notes.join(" ")}` : null,
     ].filter(Boolean).join("\n");
     const rawEmails = order.sourceEmails
       .map(id => emailsById.get(id))

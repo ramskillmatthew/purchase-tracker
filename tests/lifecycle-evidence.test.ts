@@ -115,6 +115,46 @@ describe("matchesLifecycleEvidence", () => {
     });
   });
 
+  describe("return: distinguishes genuine return logistics from policy boilerplate and unrelated delivery/cancellation mail (REGRESSION)", () => {
+    it("does not count standard returns-policy boilerplate on an ordinary confirmation or shipping email", () => {
+      expect(matchesLifecycleEvidence("return", "Order details. Total paid £45.00. Free returns within 30 days — see our returns policy for details.")).toBe(false);
+      expect(matchesLifecycleEvidence("return", "Your order has been dispatched. Not the right fit? You can return this item within 30 days.")).toBe(false);
+    });
+
+    it.each([
+      ["returns policy alone", "See our returns policy for details."],
+      ["returns period wording", "You are within the returns period for this item."],
+      ["free returns wording", "Enjoy free returns on all orders."],
+      ["eligible for a return", "This item is eligible for a return within 14 days."],
+      ["day-returns wording", "This item qualifies for 30-day returns."],
+    ])("returns false for %s", (_label, text) => {
+      expect(matchesLifecycleEvidence("return", text)).toBe(false);
+    });
+
+    it.each([
+      ["has been returned", "Your item has been returned to us."],
+      ["return received", "We've received your return."],
+      ["return label sent", "Your return label has been sent — attach it to your parcel."],
+      ["return confirmed", "Return confirmed for order PC-4471."],
+      ["started a return", "You started a return for this order."],
+      ["RMA reference", "Your RMA reference is RMA-8821."],
+    ])("returns true for a genuine event: %s", (_label, text) => {
+      expect(matchesLifecycleEvidence("return", text)).toBe(true);
+    });
+
+    it("REGRESSION: a genuine parcel-collection (delivery) notification is not counted as return evidence, since it never mentions a return at all", () => {
+      expect(matchesLifecycleEvidence("return", "Your parcel is ready for collection from your local store.")).toBe(false);
+    });
+
+    it("REGRESSION: a plain order cancellation is not counted as return evidence, since it never mentions a return at all", () => {
+      expect(matchesLifecycleEvidence("return", "Your order has been cancelled.")).toBe(false);
+    });
+
+    it("a collection notification that genuinely is about return logistics (the courier collecting a returned item) is still counted", () => {
+      expect(matchesLifecycleEvidence("return", "Your return has been collected by the courier and is on its way back to us.")).toBe(true);
+    });
+  });
+
   describe("Pokémon Center fixture: only genuine cancellations are counted among a mixed mailbox", () => {
     const mailbox = [
       fixture.confirmation,

@@ -1,4 +1,4 @@
-export type EmailType = "confirmation" | "sold" | "shipping" | "delivery" | "cancellation" | "refund" | "other";
+export type EmailType = "confirmation" | "sold" | "shipping" | "delivery" | "cancellation" | "refund" | "return" | "other";
 
 // Shared lifecycle rules used identically for real subject lines and for the
 // user's free-text query wording. Each branch is the union of the two regex
@@ -6,10 +6,15 @@ export type EmailType = "confirmation" | "sold" | "shipping" | "delivery" | "can
 // lib/yahoo/search-terms.ts, so nothing either one recognized is lost.
 // Delivery is checked before shipping: text mentioning both (e.g.
 // "dispatched and now out for delivery") is treated as the more specific,
-// later lifecycle state.
+// later lifecycle state. "return" is checked before "delivery" so return-
+// specific collection wording ("your return has been collected") isn't
+// swallowed by delivery's own "collect(?:ed|ion)" pattern, which is meant
+// for a parcel being collected BY the customer, not a return being
+// collected FROM them.
 const lifecyclePatterns: [Exclude<EmailType, "confirmation" | "other">, RegExp][] = [
   ["cancellation", /\b(cancel(?:led|ed|lations?)?|voided)\b/i],
   ["refund", /\b(refund(?:ed|s)?|money back|reimbursement)\b/i],
+  ["return", /\b(returns?|returned|returning|rma)\b/i],
   ["sold", /\b(you(?:'|’)?ve sold|item sold|sale confirmed|sold an item|solds?|sale made|sales made|items? i sold|my sales)\b/i],
   ["delivery", /\b(deliver(?:ed|y)|arriv(?:e|es|ed|ing)|collect(?:ed|ion))\b/i],
   ["shipping", /\b(shipp(?:ed|ing|ment)|dispatch(?:ed)?|on (?:its|the) way|tracking)\b/i],
@@ -58,7 +63,7 @@ export function isPurchaseConfirmationSubject(subject: string) {
 
 export function isPurchaseLifecycleSubject(subject: string) {
   const type = classifySubject(subject);
-  return type === "shipping" || type === "delivery" || type === "cancellation" || type === "refund" || type === "sold";
+  return type === "shipping" || type === "delivery" || type === "cancellation" || type === "refund" || type === "return" || type === "sold";
 }
 
 // This gate is intentionally looser than isPurchaseConfirmationSubject: it

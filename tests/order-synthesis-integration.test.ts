@@ -51,6 +51,48 @@ describe("backward compatibility: the hybrid count-prefix line still counts emai
   });
 });
 
+describe("lifecycle status regression fix: reconstruction never uses the count-narrowed type filter", () => {
+  it("the bare-count branch still uses indexedType (a typed count is correctly narrow)", () => {
+    expect(bareCountBranch).toContain("type: indexedType");
+  });
+
+  it("the hybrid/search branch's indexed reconstruction path uses reconstructionTypeFilter, not indexedType, so a status question still sees reversal evidence", () => {
+    expect(hybridSearchBranch).toContain("type: reconstructionTypeFilter(intent, message)");
+    expect(hybridSearchBranch).not.toContain("type: indexedType");
+  });
+});
+
+describe("single-order queries: the orders array is narrowed for display via selectRelevantOrders, not the retrieval or synthesis evidence", () => {
+  it("both hybrid/search call sites derive their display orders via selectForDisplay, which selects on the internal orders before converting to the public DTO", () => {
+    const calls = [...hybridSearchBranch.matchAll(/selectForDisplay\(message, synthesized\?\.orders \?\? \[\]\)/g)];
+    expect(calls.length).toBe(2);
+  });
+
+  it("selectForDisplay itself selects via selectRelevantOrders before mapping to the public DTO with toPublicOrder", () => {
+    const selectForDisplayFn = source.slice(source.indexOf("function selectForDisplay"), source.indexOf("function selectForDisplay") + 400);
+    expect(selectForDisplayFn).toContain("selectRelevantOrders(message, orders)");
+    expect(selectForDisplayFn).toContain("selected.map(toPublicOrder)");
+  });
+});
+
+describe("sidebar relevance: usedEmailIds reflects exactly the source emails behind the displayed orders, and recall is never reduced", () => {
+  it("selectForDisplay derives usedEmailIds from the selected orders' own sourceEmails, deduplicated", () => {
+    const selectForDisplayFn = source.slice(source.indexOf("function selectForDisplay"), source.indexOf("function selectForDisplay") + 400);
+    expect(selectForDisplayFn).toContain("selected.flatMap(order => order.sourceEmails)");
+  });
+
+  it("every runAssistant return branch includes usedEmailIds, so the API response shape is always consistent", () => {
+    const returnStatements = [...source.matchAll(/return \{ answer:[^;]*?\};/g)].map(match => match[0]);
+    expect(returnStatements.length).toBeGreaterThan(0);
+    for (const statement of returnStatements) expect(statement).toContain("usedEmailIds");
+  });
+
+  it("emailResults (the raw sidebar list) is never filtered down using usedEmailIds — only orders/usedEmailIds are derived from selection, emailResults always comes straight from retrieval", () => {
+    expect(hybridSearchBranch).toContain("emailResults: indexed");
+    expect(hybridSearchBranch).toContain("emailResults: deterministic");
+  });
+});
+
 describe("backward compatibility: the tool-loop path is untouched", () => {
   it("the tool-loop never calls synthesizeAnswer or reconstructOrders — it has no hook point for the new layer", () => {
     expect(toolLoop).not.toContain("synthesizeAnswer(");
@@ -61,6 +103,23 @@ describe("backward compatibility: the tool-loop path is untouched", () => {
 describe("'most recent'/'latest' selection prefers genuine order-lifecycle evidence before picking a single result", () => {
   it("relevantResults narrows via preferLifecycleEvidence before the recency slice", () => {
     expect(relevantResultsFn).toContain("preferLifecycleEvidence(relevant).slice(0, 1)");
+  });
+});
+
+describe("ASOS reconstruction-merge regression fix: the live hybrid/search branch never slices the candidate pool down to one email before synthesis", () => {
+  it("the live branch builds its candidate set via matchingResults, not relevantResults, so a purchase's confirmation can't be stranded from a later shipment/delivery notice", () => {
+    expect(hybridSearchBranch).toContain("const deterministic = matchingResults(message, initial.results);");
+    expect(hybridSearchBranch).not.toContain("relevantResults(message, initial.results)");
+  });
+
+  it("matchingResults itself never slices to a single result, unlike relevantResults", () => {
+    const matchingResultsFn = source.slice(source.indexOf("function matchingResults"), source.indexOf("function matchingResults") + 400);
+    expect(matchingResultsFn).not.toContain(".slice(0, 1)");
+  });
+
+  it("relevantResults is still used for its other, non-reconstruction callers (unchanged)", () => {
+    const toolLoopAndFallback = source.slice(source.indexOf("const messages: Anthropic.MessageParam[]"));
+    expect(toolLoopAndFallback).toContain("relevantResults(message, emailResults)");
   });
 });
 
@@ -76,7 +135,7 @@ describe("the deterministic refund total is appended to the answer text in code,
   it("synthesizeAnswer appends formatRefundTotalsSummary to the returned text when appendRefundTotal is set, including in the Claude-call-failure fallback", () => {
     expect(synthesizeAnswerFn).toContain("formatRefundTotalsSummary(orders)");
     expect(synthesizeAnswerFn).toContain("[text, refundTotalLine].filter(Boolean).join");
-    expect(synthesizeAnswerFn).toContain("catch { return { text: refundTotalLine, orderCount: orders.length }; }");
+    expect(synthesizeAnswerFn).toContain("catch { return { text: refundTotalLine, orderCount: orders.length, orders }; }");
   });
 
   it("both hybrid/search call sites gate appendRefundTotal on the query's classified intent being \"refund\"", () => {
