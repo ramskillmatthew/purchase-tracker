@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/auth/server"; import { safeApiError } from "@/lib/auth/api";
-import { getYahooEmails, scanYahooMetadata, yahooMetadataId } from "@/lib/yahoo/client"; import { parseVintedEmail } from "@/lib/vinted/parser";
+import { scanYahooMetadata, yahooMetadataId } from "@/lib/yahoo/client"; import { parseVintedEmail } from "@/lib/vinted/parser";
+import { scanGmailMetadata } from "@/lib/gmail/client"; import { getMails } from "@/lib/email/client";
 import { parseGeneralPurchaseEmail } from "@/lib/purchase-import/parser"; import { planEmailQuery } from "@/lib/yahoo/query-plan";
 import { shouldInspectPurchaseHeader } from "@/lib/email/classify";
 import { supabaseRequest } from "@/lib/supabase"; import { audit, enforceRateLimit } from "@/lib/security/activity"; import { z } from "zod";
@@ -22,13 +23,15 @@ export async function POST(request: Request) { let syncId: string | null = null;
   // For a named retailer, let IMAP select every sender match first. This avoids
   // exhausting the scan budget on unrelated mailbox traffic and avoids making
   // subject wording a prerequisite for discovery.
-  const metadata = await scanYahooMetadata(startDate, endDate, 5000, entity || undefined);
-  const candidates = metadata.rows
+  const yahooMetadata = await scanYahooMetadata(startDate, endDate, 5000, entity || undefined);
+  let gmailMetadata:{rows:Awaited<ReturnType<typeof scanGmailMetadata>>["rows"];truncated:boolean}={rows:[],truncated:false};try{gmailMetadata=await scanGmailMetadata(user.id,startDate,endDate,5000,entity||undefined);}catch{}
+  const metadataRows = [...yahooMetadata.rows.map(row=>({...row,provider:"yahoo" as const})),...gmailMetadata.rows.map(row=>({...row,provider:"gmail" as const}))];
+  const candidates = metadataRows
     .filter(row => (!entity || metadataMatchesEntity(entity,row)) && (vintedOnly ? /vinted/i.test(`${row.sender_name||""} ${row.sender_address||""}`) : true) && shouldInspectPurchaseHeader(row.subject, Boolean(entity)))
     .sort((a,b)=>b.email_date.localeCompare(a.email_date));
-  const found = { results: await Promise.all(candidates.map(async row => ({ id: await yahooMetadataId(row.folder,row.yahoo_uid,row.uid_validity), sender: [row.sender_name,row.sender_address].filter(Boolean).join(" <"), recipient:"", subject:row.subject, date:row.email_date, folder:row.folder, excerpt:"", whyMatched:"Purchase-confirmation header matched.", hasAttachments:row.has_attachments, attachmentFilenames:[], unread:row.unread }))), nextCursor: null };
+  const found = { results: await Promise.all(candidates.map(async row => ({ id: row.provider==="gmail"?row.id:await yahooMetadataId(row.folder,row.yahoo_uid,row.uid_validity), sender: [row.sender_name,row.sender_address].filter(Boolean).join(" <"), recipient:"", subject:row.subject, date:row.email_date, folder:row.provider==="gmail"?"Gmail":row.folder, excerpt:"", whyMatched:"Purchase-confirmation header matched.", hasAttachments:row.has_attachments, attachmentFilenames:[], unread:row.unread }))), nextCursor: null };
   let parsed = 0, uncertain = 0;
-  const emails = await getYahooEmails(found.results.map(result => result.id));
+  const emails = await getMails(user.id,found.results.map(result => result.id));
   const records = [];
   for (const email of emails) { const vinted = parseVintedEmail(email); const generic = vinted ? null : parseGeneralPurchaseEmail(email); const candidate = vinted || generic; if (!candidate) continue;
     const uncertainty = vinted ? [!vinted.item_title && "Item name could not be extracted.", vinted.price_paid === null && "Price could not be extracted.", !vinted.item_size && "Size could not be extracted."].filter((item): item is string => Boolean(item)) : generic!.uncertainty_reasons;
@@ -36,5 +39,5 @@ export async function POST(request: Request) { let syncId: string | null = null;
   }
   if (records.length) await supabaseRequest("vinted_import_candidates?on_conflict=yahoo_message_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(records) });
   if (syncId) await supabaseRequest(`yahoo_sync_history?id=eq.${syncId}`, { method: "PATCH", body: JSON.stringify({ status: "completed", messages_scanned: found.results.length, candidates_parsed: parsed, completed_at: new Date().toISOString() }) });
-  await audit(user.id, "purchase_email_sync_completed", { scanned: metadata.rows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, startDate, endDate, entity, truncated: metadata.truncated }); return NextResponse.json({ scanned: metadata.rows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, truncated: metadata.truncated, nextCursor: found.nextCursor, startDate, endDate });
+  await audit(user.id, "purchase_email_sync_completed", { scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, startDate, endDate, entity, providers:["yahoo",...(gmailMetadata.rows.length?["gmail"]:[])], truncated: yahooMetadata.truncated||gmailMetadata.truncated }); return NextResponse.json({ scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, truncated: yahooMetadata.truncated||gmailMetadata.truncated, nextCursor: found.nextCursor, startDate, endDate });
 } catch (error) { if (syncId) try { await supabaseRequest(`yahoo_sync_history?id=eq.${syncId}`, { method: "PATCH", body: JSON.stringify({ status: "failed", completed_at: new Date().toISOString(), safe_error: "Sync failed safely." }) }); } catch {} return safeApiError(error, "Purchase email sync could not be completed safely."); } }

@@ -3,7 +3,7 @@ import { ImapFlow, type SearchObject } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { EmailSearch } from "@/lib/validation/email";
 import { excerpt, sanitizeEmailHtml } from "./sanitize";
-import { signEmailId, verifyEmailId } from "./tokens";
+import { signEmailId, verifyYahooEmailId } from "./tokens";
 import { senderSearchVariants } from "./search-terms";
 import { imapQueries, countQueries } from "./imap-queries";
 import { createHash } from "node:crypto";
@@ -260,7 +260,7 @@ export async function scanYahooMetadata(startDate: string, endDate: string, limi
 }
 
 export async function getYahooEmail(id: string) {
-  const safe = await verifyEmailId(id);
+  const safe = await verifyYahooEmailId(id);
   return withClient(async imap => {
     const folders = await imap.list();
     if (!folders.some(x => x.path === safe.folder && !x.flags?.has("\\Noselect"))) throw new Error("Email is no longer available.");
@@ -276,7 +276,7 @@ export async function getYahooEmail(id: string) {
 }
 
 export async function getYahooEmails(ids: string[]) {
-  const requested = await Promise.all(ids.map(async id => ({ id, safe: await verifyEmailId(id) })));
+  const requested = await Promise.all(ids.map(async id => ({ id, safe: await verifyYahooEmailId(id) })));
   return withClient(async imap => {
     const folders = await imap.list();
     const available = new Set(folders.filter(x => !x.flags?.has("\\Noselect")).map(x => x.path));

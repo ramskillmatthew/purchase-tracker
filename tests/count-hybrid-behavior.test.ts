@@ -12,7 +12,7 @@ const hybridSearchBranch = assistantSource.slice(assistantSource.indexOf("if (en
 
 describe("count fallback preserves the sender and the originally classified intent", () => {
   it("passes `sender` and `intent` (never dropping either) to both the narrow and broadened live-IMAP count attempts", () => {
-    const countCalls = [...bareCountBranch.matchAll(/countYahoo\(\{([^)]*)\},\s*intent\)/g)];
+    const countCalls = [...bareCountBranch.matchAll(/countMail\(ownerId!,\s*\{([^)]*)\},\s*intent\)/g)];
     expect(countCalls.length).toBe(2);
     for (const call of countCalls) expect(call[1]).toContain("sender");
   });
@@ -66,7 +66,7 @@ describe("indexed and live-IMAP count/hybrid paths share one verification helper
 
   it("the indexed verification helper fetches real sanitized content rather than trusting the SQL type filter alone", () => {
     const helper = assistantSource.slice(assistantSource.indexOf("async function verifiedIndexedMatches"), assistantSource.indexOf("export async function runAssistant"));
-    expect(helper).toContain("getYahooEmails(");
+    expect(helper).toContain("getMails(params.ownerId");
     expect(helper).not.toContain("type: params.type");
   });
 

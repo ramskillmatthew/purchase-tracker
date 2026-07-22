@@ -2,7 +2,8 @@ import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { emailSearchSchema, getEmailSchema } from "@/lib/validation/email";
-import { searchYahoo, countYahoo, getYahooEmail, getYahooEmails, yahooMetadataId } from "@/lib/yahoo/client";
+import { yahooMetadataId } from "@/lib/yahoo/client";
+import { searchMail, countMail, getMail, getMails } from "@/lib/email/client";
 import { supabaseRequest } from "@/lib/supabase";
 import { preferLifecycleEvidence, resultMatchesQueryEntity } from "@/lib/yahoo/query-relevance";
 import { countIndexRanked, hasCoverage, queryIndex, searchIndexRanked } from "@/lib/email-index/query";
@@ -31,7 +32,7 @@ const tools: Anthropic.Tool[] = [
   { name: "prepare_purchase_import", description: "Prepare a review-only import proposal. Never inserts data.", input_schema: { type: "object", properties: { candidateIds: { type: "array", items: { type: "string" } } }, required: ["candidateIds"], additionalProperties: false } },
 ];
 
-type SearchResult = Awaited<ReturnType<typeof searchYahoo>>["results"][number];
+type SearchResult = Awaited<ReturnType<typeof searchMail>>["results"][number];
 type IndexRow = { folder: unknown; yahoo_uid: unknown; uid_validity: unknown; sender_name: unknown; sender_address: unknown; subject: unknown; email_date: unknown; has_attachments: unknown; unread: unknown };
 // Indexed metadata never includes a body excerpt (privacy-first index — no
 // message body is stored), so results carry a placeholder excerpt; opening
@@ -87,6 +88,7 @@ function combinedQueryText(criteria: z.infer<typeof emailSearchSchema>) {
 }
 
 async function execute(name: string, input: unknown, collected: SearchResult[], ownerId?: string) {
+  if (!ownerId) throw new Error("Mailbox owner is required.");
   if (name === "search_emails") {
     const criteria = emailSearchSchema.parse(input);
     if (ownerId && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
@@ -95,7 +97,7 @@ async function execute(name: string, input: unknown, collected: SearchResult[], 
       collected.push(...results);
       return { results, nextCursor: null };
     }
-    let found = await searchYahoo(criteria); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchYahoo({ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined }); } if (!found.results.length && criteria.sender) { found = await searchYahoo({ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined }); } collected.push(...found.results); return found;
+    let found = await searchMail(ownerId,criteria); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchMail(ownerId,{ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined }); } if (!found.results.length && criteria.sender) { found = await searchMail(ownerId,{ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined }); } collected.push(...found.results); return found;
   }
   if (name === "count_emails") {
     const criteria = emailSearchSchema.parse({ ...(input as object), maxResults: 1 });
@@ -103,9 +105,9 @@ async function execute(name: string, input: unknown, collected: SearchResult[], 
       const count = await countIndexRanked({ ownerId, query: combinedQueryText(criteria) || undefined, startDate: criteria.startDate, endDate: criteria.endDate });
       return { count, foldersSearched: 0 };
     }
-    return countYahoo(criteria);
+    return countMail(ownerId,criteria);
   }
-  if (name === "get_email") return getYahooEmail(getEmailSchema.parse(input).id);
+  if (name === "get_email") return getMail(ownerId,getEmailSchema.parse(input).id);
   if (name === "search_purchases") {
     const value = purchaseSearchSchema.parse(input); const filters = ["select=*", "order=order_date.desc", `limit=${value.limit}`];
     if (value.startDate) filters.push(`order_date=gte.${value.startDate}`); if (value.endDate) filters.push(`order_date=lte.${value.endDate}`);
@@ -159,7 +161,7 @@ const SYNTHESIS_SYSTEM_PROMPT = "You are a private read-only email assistant. Yo
  * never does that conversion, keeping the internal-vs-public boundary at
  * the call site in `runAssistant`.
  */
-async function synthesizeAnswer(client: Anthropic, model: string, message: string, results: SearchResult[], options: { appendRefundTotal?: boolean } = {}): Promise<{ text: string | null; orderCount: number; orders: ReconstructedOrder[] } | null> {
+async function synthesizeAnswer(client: Anthropic, model: string, ownerId: string, message: string, results: SearchResult[], options: { appendRefundTotal?: boolean } = {}): Promise<{ text: string | null; orderCount: number; orders: ReconstructedOrder[] } | null> {
   if (!results.length) return null;
   // Guarantee at least one representative of every lifecycle stage present
   // (confirmation, shipping, delivery, ...) before a second email from any
@@ -169,8 +171,8 @@ async function synthesizeAnswer(client: Anthropic, model: string, message: strin
   // the synthesis prompt reads naturally.
   const subset = diversifyByLifecycleStage(results, result => result.subject, result => result.date, SYNTHESIS_MAX_EMAILS)
     .sort((a, b) => Date.parse(a.date || "") - Date.parse(b.date || ""));
-  let emails: Awaited<ReturnType<typeof getYahooEmails>>;
-  try { emails = await getYahooEmails(subset.map(result => result.id)); }
+  let emails: Awaited<ReturnType<typeof getMails>>;
+  try { emails = await getMails(ownerId,subset.map(result => result.id)); }
   catch { return null; }
   if (!emails.length) return null;
   const orders = reconstructOrders(emails);
@@ -198,7 +200,7 @@ async function verifiedIndexedMatches(params: { ownerId: string; entity: string;
   const candidates = await Promise.all(rows.map(row => indexRowToResult(row as unknown as IndexRow)));
   if (!params.type) return candidates;
   const types = Array.isArray(params.type) ? params.type : [params.type];
-  const emails = await getYahooEmails(candidates.map(candidate => candidate.id));
+  const emails = await getMails(params.ownerId, candidates.map(candidate => candidate.id));
   const contentById = new Map(emails.map(email => [email.id, `${email.subject} ${email.text || email.html || ""}`]));
   return candidates.filter(candidate => types.some(type => matchesLifecycleEvidence(type, contentById.get(candidate.id) || candidate.subject)));
 }
@@ -254,17 +256,17 @@ export async function runAssistant(message: string, ownerId?: string) {
     // range, and the originally classified intent all stay fixed across
     // both attempts, and both are verified against real content, not
     // subject alone.
-    let counted = await countYahoo({ terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
+    let counted = await countMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
     if (!counted.count) {
-      counted = await countYahoo({ terms: [], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
+      counted = await countMail(ownerId!, { terms: [], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
     }
     // Separately fetch a bounded, already body-verified sample purely so the
     // user has something to inspect — the same retrieval+relevance logic as
     // an ordinary search, capped for the UI. This capped fetch never feeds
     // back into `counted`, which already scanned every matched UID above.
-    let evidence = await searchYahoo({ terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
+    let evidence = await searchMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
     if (!evidence.results.length) {
-      evidence = await searchYahoo({ terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
+      evidence = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
     }
     const supporting = relevantResults(message, evidence.results);
     return { answer: `You have ${counted.count} matching email${counted.count === 1 ? "" : "s"}${period}.`, emailResults: supporting, totalMatches: counted.count, orders: [], usedEmailIds: [], usage: null };
@@ -290,28 +292,28 @@ export async function runAssistant(message: string, ownerId?: string) {
       // See reconstructionTypeFilter's doc comment for the exact bug this
       // fixes.
       const indexed = await verifiedIndexedMatches({ ownerId, entity: sender, type: reconstructionTypeFilter(intent, message), startDate: dateRange?.startDate, endDate: dateRange?.endDate });
-      const synthesized = await synthesizeAnswer(client, model, message, indexed, { appendRefundTotal: intent === "refund" });
+      const synthesized = await synthesizeAnswer(client, model, ownerId!, message, indexed, { appendRefundTotal: intent === "refund" });
       const prefix = countPrefix(indexed.length);
       const orderCount = synthesized?.orderCount ?? indexed.length;
       const fallback = indexed.length ? `${prefix}Found ${orderCount} order${orderCount === 1 ? "" : "s"}.` : `${prefix}No related emails were found in the indexed date range.`;
       const display = selectForDisplay(message, synthesized?.orders ?? []);
       return { answer: synthesized?.text ? `${prefix}${synthesized.text}` : fallback, emailResults: indexed, totalMatches: indexed.length, orders: display.orders, usedEmailIds: display.usedEmailIds, usage: null };
     }
-    let initial = await searchYahoo({ terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+    let initial = await searchMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
     if (!initial.results.length) {
       // The sender + assumed-subject-wording search found nothing; broaden to
       // a plain keyword search over just the extracted entity terms so a real
       // subject that doesn't match the assumed phrasing is still found. The
       // relevance filter below still narrows the final answer using the
       // original message's full intent.
-      initial = await searchYahoo({ terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+      initial = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
     }
     // matchingResults, not relevantResults — reconstruction must see every
     // matching email (confirmation, shipment, ...), not just the single
     // newest one; see matchingResults' doc comment for the exact bug this
     // avoids.
     const deterministic = matchingResults(message, initial.results);
-    const synthesized = await synthesizeAnswer(client, model, message, deterministic, { appendRefundTotal: intent === "refund" });
+    const synthesized = await synthesizeAnswer(client, model, ownerId!, message, deterministic, { appendRefundTotal: intent === "refund" });
     const prefix = countPrefix(deterministic.length);
     const orderCount = synthesized?.orderCount ?? deterministic.length;
     const fallback = deterministic.length ? `${prefix}Found ${orderCount} order${orderCount === 1 ? "" : "s"}.` : `${prefix}No related emails were found${dateRange ? " in the requested date range" : ""}.`;
