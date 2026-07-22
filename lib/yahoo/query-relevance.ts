@@ -1,4 +1,4 @@
-import { classifyQueryIntent } from "@/lib/email/classify";
+import { classifyQueryIntent, classifySubject } from "@/lib/email/classify";
 import { FORWARD_LIFECYCLE_EVIDENCE, matchesLifecycleEvidence } from "@/lib/email/lifecycle-evidence";
 
 // Pronouns and instruction words ("they", "them", "who", "list", ...) show up
@@ -10,7 +10,13 @@ import { FORWARD_LIFECYCLE_EVIDENCE, matchesLifecycleEvidence } from "@/lib/emai
 // as two tokens ("they"+"re" / "they"+"ve") — "re"/"ve" are listed too so
 // the leftover fragment doesn't leak through as its own bogus entity token,
 // alongside the merged "theyre"/"theyve" spellings some clients might send.
-const ignored = new Set(["find", "show", "tell", "get", "give", "import", "imports", "importing", "list", "me", "my", "your", "their", "the", "a", "an", "this", "that", "these", "those", "they", "them", "theyre", "theyve", "it", "who", "which", "re", "ve", "most", "recent", "latest", "last", "past", "previous", "ago", "newest", "how", "what", "when", "where", "many", "count", "number", "is", "are", "was", "were", "there", "did", "do", "does", "will", "would", "could", "should", "can", "have", "has", "happened", "status", "history", "story", "whole", "full", "everything", "between", "and", "during", "over", "within", "so", "far", "receive", "received", "email", "emails", "message", "messages", "from", "about", "relating", "related", "to", "for", "in", "containing", "contains", "with", "of", "please", "all", "every", "any", "purchase", "purchases", "order", "orders", "confirmation", "confirmations", "confirmed", "receipt", "receipts", "invoice", "invoices", "sold", "solds", "sale", "sales", "item", "items", "tracking", "delivery", "delivered", "arrive", "arrives", "arriving", "arrived", "dispatch", "dispatched", "shipping", "shipped", "refund", "refunds", "refunded", "return", "returns", "returned", "cancellation", "cancellations", "cancelled", "canceled", "unread", "read", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "day", "days", "week", "weeks", "month", "months", "year", "years", "today", "yesterday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]);
+// Comparison/summarization instruction words ("compare", "summarise") and
+// generic attribute-descriptor words ("card", "ending", "cost") show up in
+// natural queries the same way pronouns and hybrid-trigger words did before
+// — none of them ever identify a retailer, so they must never survive into
+// an entity/sender string either. Numeric values (card digits, prices) are
+// already excluded separately by queryEntityTokens' digit-only filter.
+const ignored = new Set(["find", "show", "tell", "get", "give", "import", "imports", "importing", "list", "compare", "summarise", "summarize", "me", "my", "your", "their", "the", "a", "an", "this", "that", "these", "those", "they", "them", "theyre", "theyve", "it", "who", "which", "re", "ve", "most", "recent", "latest", "last", "past", "previous", "ago", "newest", "how", "what", "when", "where", "many", "count", "number", "is", "are", "was", "were", "there", "did", "do", "does", "will", "would", "could", "should", "can", "have", "has", "happened", "status", "history", "story", "whole", "full", "everything", "between", "and", "during", "over", "within", "so", "far", "receive", "received", "email", "emails", "message", "messages", "from", "about", "relating", "related", "to", "for", "in", "containing", "contains", "with", "of", "please", "all", "every", "any", "purchase", "purchases", "order", "orders", "confirmation", "confirmations", "confirmed", "receipt", "receipts", "invoice", "invoices", "sold", "solds", "sale", "sales", "item", "items", "tracking", "delivery", "delivered", "arrive", "arrives", "arriving", "arrived", "dispatch", "dispatched", "shipping", "shipped", "refund", "refunds", "refunded", "return", "returns", "returned", "cancellation", "cancellations", "cancelled", "canceled", "card", "ending", "cost", "unread", "read", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "day", "days", "week", "weeks", "month", "months", "year", "years", "today", "yesterday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]);
 
 function normalize(value: string) { return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\b(?:centre|cente)\b/g, "center").replace(/\bconformation\b/g, "confirmation").replace(/[^a-z0-9@]+/g, " ").trim(); }
 export function queryEntityTokens(query: string) { return normalize(query).split(" ").filter(token => token.length > 1 && !ignored.has(token) && !/^\d+(?:st|nd|rd|th)?$/.test(token)).slice(0, 8); }
@@ -21,13 +27,20 @@ export function queryRequestsTransaction(query: string) {
 }
 
 // A request for the whole narrative ("what happened", "tell me about",
-// "history of", "whole/full story", "everything about") is fundamentally
-// different from a status question or an explicit document request: it
-// wants every significant event, including reversals. This is checked
-// before intent classification so it overrides every type-specific branch
-// below, rather than adding another special case inside them — a broad
-// history question never narrows to one lifecycle type.
-export const BROAD_HISTORY_QUESTION = /\b(what happened|tell me about|history of|whole story|full story|everything about)\b/i;
+// "history of", "whole/full story", "everything about") — or a request to
+// compare/summarize multiple orders, which equally needs every order's
+// complete outcome to be meaningful — is fundamentally different from a
+// status question or an explicit document request: it wants every
+// significant event, including reversals. Without this, "compare my five
+// Meaco orders" gets classified as a plain "confirmation" intent (via the
+// bare word "orders"), and the confirmation branch's reversal-exclusion
+// guard below then strips out every cancelled/refunded order, leaving only
+// "Ordered" for all of them — the same gap "what happened" was fixed for.
+// This is checked before intent classification so it overrides every
+// type-specific branch below, rather than adding another special case
+// inside them — a broad/comparison question never narrows to one lifecycle
+// type.
+export const BROAD_HISTORY_QUESTION = /\b(what happened|tell me about|history of|whole story|full story|everything about|compare|summari[sz]e)\b/i;
 
 function resultMatchesQueryIntent(query: string, result: SearchResultText) {
   const requested = normalize(query);
@@ -89,4 +102,28 @@ export function resultMatchesQueryEntity(query: string, result: SearchResultText
     return Math.abs(word.length - token.length) <= allowance && distance(token, word) <= allowance;
   });
   return tokens.every(tokenMatches) && resultMatchesQueryIntent(query, result);
+}
+
+/**
+ * Narrows to results that carry recognized order-lifecycle evidence
+ * (confirmation/shipping/delivery/cancellation/refund/sold — anything but
+ * "other"), falling back to the full set only when none of the candidates
+ * qualify (e.g. a generic "show me my most recent unread email" with no
+ * purchase intent at all, where narrowing would incorrectly return nothing).
+ *
+ * This exists specifically for "most recent"/"latest"-style queries: a
+ * broad-history question ("what happened", "history of") deliberately
+ * bypasses type-specific filtering so reversal emails aren't excluded (see
+ * BROAD_HISTORY_QUESTION above) — but that bypass also lets completely
+ * unrelated mail (account setup, marketing, newsletters) through as a
+ * "match". Recency-picking a single "most recent" result from an
+ * unfiltered set can then select the newest unrelated email instead of the
+ * genuine order, purely because it happens to be newer. Filtering to
+ * lifecycle-typed candidates first — before picking "the most recent one"
+ * — ensures "most recent purchase" means the most recent genuine order
+ * evidence, not simply the newest email from that sender.
+ */
+export function preferLifecycleEvidence<T extends SearchResultText>(results: T[]): T[] {
+  const lifecycleTyped = results.filter(result => classifySubject(result.subject) !== "other" || classifySubject(result.excerpt) !== "other");
+  return lifecycleTyped.length ? lifecycleTyped : results;
 }

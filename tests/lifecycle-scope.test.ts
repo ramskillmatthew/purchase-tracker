@@ -37,6 +37,11 @@ describe("lifecycleTypeFilter", () => {
     expect(lifecycleTypeFilter("cancellation", "What happened with my Meaco orders?")).toBeUndefined();
   });
 
+  it("applies no type filter for comparison/summary wording either, so a comparison over the indexed path also sees cancellations and refunds", () => {
+    expect(lifecycleTypeFilter("confirmation", "Compare my five Meaco orders.")).toBeUndefined();
+    expect(lifecycleTypeFilter("confirmation", "Summarise my Meaco orders.")).toBeUndefined();
+  });
+
   it("keeps a narrow delivery question scoped to the forward lifecycle even though it shares wording with history questions", () => {
     expect(lifecycleTypeFilter("delivery", "Did my Meaco order arrive?")).toEqual(["confirmation", "shipping", "delivery"]);
   });

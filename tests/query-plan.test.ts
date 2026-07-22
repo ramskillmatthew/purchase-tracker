@@ -88,3 +88,19 @@ describe("specific vs. generic counts — determines whether supporting emailRes
     expect(plan.entity).toBeNull();
   });
 });
+
+describe("comparison/summarization wording resolves to the same entity as the equivalent broad-history question", () => {
+  const now = new Date("2026-07-20T12:00:00Z");
+  it("'Compare my five Meaco orders.' preserves the same entity as 'What happened with my Meaco orders?', so it retrieves the same evidence", () => {
+    const broadHistory = planEmailQuery("What happened with my Meaco orders?", now);
+    const compare = planEmailQuery("Compare my five Meaco orders.", now);
+    const compareNoCount = planEmailQuery("Compare my Meaco orders.", now);
+    const summarise = planEmailQuery("Summarise my five Meaco orders.", now);
+    expect(broadHistory.entity).toBe("meaco");
+    expect(compare.entity).toBe("meaco");
+    expect(compareNoCount.entity).toBe("meaco");
+    expect(summarise.entity).toBe("meaco");
+    expect(compare.transactional).toBe(true);
+    expect(summarise.transactional).toBe(true);
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"; import { queryEntityTokens, queryRequestsTransaction, resultMatchesQueryEntity } from "@/lib/yahoo/query-relevance";
+import { describe, expect, it } from "vitest"; import { preferLifecycleEvidence, queryEntityTokens, queryRequestsTransaction, resultMatchesQueryEntity } from "@/lib/yahoo/query-relevance";
 const result=(sender:string,subject:string,excerpt="")=>({sender,subject,excerpt});
 describe("deterministic result relevance",()=>{
   it("keeps a broader branded division while excluding unrelated retailers",()=>{const query="find my most recent asos purchase";expect(queryEntityTokens(query)).toEqual(["asos"]);expect(resultMatchesQueryEntity(query,result("ASOS Sample Sale <orders@example.test>","We received your order"))).toBe(true);expect(resultMatchesQueryEntity(query,result("Just Eat <news@example.test>","Score 50% off"))).toBe(false);});
@@ -125,6 +125,27 @@ describe("deterministic result relevance",()=>{
     });
   });
 
+  describe("comparison/summary questions also retrieve reversals, not just confirmations", () => {
+    const cancelled = result("Meaco <orders@meaco.com>", "Your Meaco order MC-2002 has been cancelled", "");
+    const refunded = result("Meaco <orders@meaco.com>", "Refund confirmed for order MC-2002", "£629.99 has been refunded");
+    const confirmed = result("Meaco <orders@meaco.com>", "Your Meaco order MC-1001 confirmed", "Order details. Total paid £629.99");
+
+    it.each([
+      "Compare my five Meaco orders.",
+      "Compare my Meaco orders.",
+      "Summarise my five Meaco orders.",
+      "Summarize my Meaco orders.",
+    ])("finds cancellation, refund, and confirmation evidence alike for: %s", query => {
+      expect(resultMatchesQueryEntity(query, cancelled)).toBe(true);
+      expect(resultMatchesQueryEntity(query, refunded)).toBe(true);
+      expect(resultMatchesQueryEntity(query, confirmed)).toBe(true);
+    });
+
+    it("still excludes an unrelated reversal from a normal narrow status question (comparison wording doesn't loosen every query)", () => {
+      expect(resultMatchesQueryEntity("Did my Meaco order arrive?", cancelled)).toBe(false);
+    });
+  });
+
   describe("hybrid count+explain phrasing never leaks pronouns/instruction words into the entity", () => {
     it("extracts only the retailer from the exact failing hybrid query, matching its bare-count counterpart", () => {
       const bareCount = "How many Meaco cancellation emails did I receive";
@@ -172,6 +193,58 @@ describe("deterministic result relevance",()=>{
       expect(queryEntityTokens("Pokémon Center")).toEqual(["pokemon", "center"]);
       expect(queryEntityTokens("Pokemon Center")).toEqual(["pokemon", "center"]);
       expect(queryEntityTokens("List them for Pokémon Center")).toEqual(queryEntityTokens("List them for Pokemon Center"));
+    });
+  });
+
+  describe("comparison/summarization wording never leaks into the entity, matching the exact failing query", () => {
+    it.each([
+      "Compare my five Meaco orders.",
+      "Compare my Meaco orders.",
+      "Summarise my five Meaco orders.",
+    ])("preserves Meaco as the sole entity for: %s", message => {
+      expect(queryEntityTokens(message)).toEqual(["meaco"]);
+    });
+  });
+
+  describe("generic attribute-descriptor wording never leaks into the entity", () => {
+    it.each([
+      "Which Meaco order was refunded to card ending 0428?",
+      "Which Meaco order cost £539.99?",
+    ])("preserves Meaco as the sole entity for: %s", message => {
+      expect(queryEntityTokens(message)).toEqual(["meaco"]);
+    });
+  });
+
+  describe("preferLifecycleEvidence", () => {
+    const accountEmail = result("ASOS <noreply@asos.com>", "Your ASOS account is set up", "Welcome! Track your orders, manage your wishlist and more.");
+    const marketingEmail = result("ASOS <noreply@asos.com>", "20% off everything this weekend", "Shop the sale now");
+    const genuineOrder = result("ASOS Sample Sale <orders@asos.com>", "Your ASOS order AC-563216", "Order details. Total paid £24.00");
+
+    it("keeps only the genuine order when a newer account-setup email is also present", () => {
+      expect(preferLifecycleEvidence([accountEmail, genuineOrder])).toEqual([genuineOrder]);
+    });
+
+    it("keeps only the genuine order when a newer marketing email is also present", () => {
+      expect(preferLifecycleEvidence([marketingEmail, genuineOrder])).toEqual([genuineOrder]);
+    });
+
+    it("falls back to the full set when every candidate is unrelated (nothing to narrow to)", () => {
+      expect(preferLifecycleEvidence([accountEmail, marketingEmail])).toEqual([accountEmail, marketingEmail]);
+    });
+
+    it("returns the set unchanged when every candidate already carries lifecycle evidence", () => {
+      const dispatched = result("Meaco <orders@meaco.com>", "Your Meaco order has been dispatched", "");
+      expect(preferLifecycleEvidence([genuineOrder, dispatched])).toEqual([genuineOrder, dispatched]);
+    });
+
+    it("broad-history wording and direct 'most recent purchase' wording resolve to the same genuine order out of the same candidate pool", () => {
+      const candidates = [accountEmail, genuineOrder];
+      const broadHistory = "What's the history of my most recent ASOS purchase?";
+      const direct = "Find my most recent ASOS purchase";
+      const forBroadHistory = preferLifecycleEvidence(candidates.filter(candidate => resultMatchesQueryEntity(broadHistory, candidate)));
+      const forDirect = preferLifecycleEvidence(candidates.filter(candidate => resultMatchesQueryEntity(direct, candidate)));
+      expect(forBroadHistory).toEqual([genuineOrder]);
+      expect(forDirect).toEqual([genuineOrder]);
     });
   });
 });
