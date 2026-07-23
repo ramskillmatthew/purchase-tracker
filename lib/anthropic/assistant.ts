@@ -23,8 +23,8 @@ const candidateSchema = z.object({ startDate: z.string().regex(/^\d{4}-\d{2}-\d{
 const prepareSchema = z.object({ candidateIds: z.array(z.string().uuid()).min(1).max(100) }).strict();
 
 const tools: Anthropic.Tool[] = [
-  { name: "search_emails", description: "Search Yahoo Mail using controlled validated criteria. Use metadata search before get_email.", input_schema: { type: "object", properties: { terms: { type: "array", items: { type: "string" } }, exactPhrase: { type: "string" }, sender: { type: "string" }, recipient: { type: "string" }, subject: { type: "string" }, startDate: { type: "string" }, endDate: { type: "string" }, folder: { type: "string" }, readStatus: { type: "string", enum: ["read", "unread", "any"] }, hasAttachments: { type: "boolean" }, attachmentFilename: { type: "string" }, maxResults: { type: "integer", minimum: 1, maximum: 25 }, cursor: { type: "string" } }, additionalProperties: false } },
-  { name: "count_emails", description: "Count all Yahoo emails matching controlled criteria without returning or reading their bodies. Use this whenever the user asks how many, a count, or a number of emails. Put an explicitly named company or retailer in sender and the requested email type in terms.", input_schema: { type: "object", properties: { terms: { type: "array", items: { type: "string" } }, exactPhrase: { type: "string" }, sender: { type: "string" }, recipient: { type: "string" }, subject: { type: "string" }, startDate: { type: "string" }, endDate: { type: "string" }, folder: { type: "string" }, readStatus: { type: "string", enum: ["read", "unread", "any"] } }, additionalProperties: false } },
+  { name: "search_emails", description: "Search the user's connected Yahoo and Gmail accounts using controlled validated criteria. The calling workflow handles provider selection; Gmail and Yahoo are account names, not sender or keyword filters. Use metadata search before get_email.", input_schema: { type: "object", properties: { terms: { type: "array", items: { type: "string" } }, exactPhrase: { type: "string" }, sender: { type: "string" }, recipient: { type: "string" }, subject: { type: "string" }, startDate: { type: "string" }, endDate: { type: "string" }, folder: { type: "string" }, readStatus: { type: "string", enum: ["read", "unread", "any"] }, hasAttachments: { type: "boolean" }, attachmentFilename: { type: "string" }, maxResults: { type: "integer", minimum: 1, maximum: 25 }, cursor: { type: "string" } }, additionalProperties: false } },
+  { name: "count_emails", description: "Count emails matching controlled criteria across the user's selected connected accounts without returning or reading their bodies. Gmail and Yahoo are account names, not sender or keyword filters. Use this whenever the user asks how many, a count, or a number of emails. Put an explicitly named company or retailer in sender and the requested email type in terms.", input_schema: { type: "object", properties: { terms: { type: "array", items: { type: "string" } }, exactPhrase: { type: "string" }, sender: { type: "string" }, recipient: { type: "string" }, subject: { type: "string" }, startDate: { type: "string" }, endDate: { type: "string" }, folder: { type: "string" }, readStatus: { type: "string", enum: ["read", "unread", "any"] } }, additionalProperties: false } },
   { name: "get_email", description: "Read one sanitized email using only an opaque id returned by search_emails.", input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false } },
   { name: "search_purchases", description: "Search saved purchase records deterministically.", input_schema: { type: "object", properties: { term: { type: "string" }, startDate: { type: "string" }, endDate: { type: "string" }, limit: { type: "integer" } }, additionalProperties: false } },
   { name: "calculate_purchase_totals", description: "Calculate totals in application code for specified purchase UUIDs.", input_schema: { type: "object", properties: { purchaseIds: { type: "array", items: { type: "string" } } }, required: ["purchaseIds"], additionalProperties: false } },
@@ -87,25 +87,26 @@ function combinedQueryText(criteria: z.infer<typeof emailSearchSchema>) {
   return [...criteria.terms, criteria.sender, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)).join(" ");
 }
 
-async function execute(name: string, input: unknown, collected: SearchResult[], ownerId?: string) {
+type MailProvider = "yahoo" | "gmail";
+async function execute(name: string, input: unknown, collected: SearchResult[], ownerId: string | undefined, providers: MailProvider[]) {
   if (!ownerId) throw new Error("Mailbox owner is required.");
   if (name === "search_emails") {
     const criteria = emailSearchSchema.parse(input);
-    if (ownerId && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
+    if (providers.length === 1 && providers[0] === "yahoo" && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
       const rows = await searchIndexRanked({ ownerId, query: combinedQueryText(criteria) || undefined, startDate: criteria.startDate, endDate: criteria.endDate, limit: criteria.maxResults });
       const results = await Promise.all(rows.map(row => indexRowToResult(row as unknown as IndexRow)));
       collected.push(...results);
       return { results, nextCursor: null };
     }
-    let found = await searchMail(ownerId,criteria); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchMail(ownerId,{ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined }); } if (!found.results.length && criteria.sender) { found = await searchMail(ownerId,{ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined }); } collected.push(...found.results); return found;
+    let found = await searchMail(ownerId,criteria,providers); if (!found.results.length && (criteria.subject || criteria.exactPhrase)) { const broadTerms = [...criteria.terms, criteria.subject, criteria.exactPhrase].filter((value): value is string => Boolean(value)); found = await searchMail(ownerId,{ ...criteria, terms: broadTerms, subject: undefined, exactPhrase: undefined },providers); } if (!found.results.length && criteria.sender) { found = await searchMail(ownerId,{ ...criteria, terms: [...criteria.terms, criteria.sender], sender: undefined, subject: undefined, exactPhrase: undefined },providers); } collected.push(...found.results); return found;
   }
   if (name === "count_emails") {
     const criteria = emailSearchSchema.parse({ ...(input as object), maxResults: 1 });
-    if (ownerId && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
+    if (providers.length === 1 && providers[0] === "yahoo" && indexCanServe(criteria) && await hasCoverage(ownerId, criteria.startDate, criteria.endDate)) {
       const count = await countIndexRanked({ ownerId, query: combinedQueryText(criteria) || undefined, startDate: criteria.startDate, endDate: criteria.endDate });
       return { count, foldersSearched: 0 };
     }
-    return countMail(ownerId,criteria);
+    return countMail(ownerId,criteria,undefined,providers);
   }
   if (name === "get_email") return getMail(ownerId,getEmailSchema.parse(input).id);
   if (name === "search_purchases") {
@@ -229,13 +230,15 @@ export async function runAssistant(message: string, ownerId?: string) {
   if (!apiKey || !model) throw new Error("Anthropic is not configured.");
   const client = new Anthropic({ apiKey });
   const emailResults: SearchResult[] = [];
-  const plan = planEmailQuery(message);
-  const entityTokens = plan.entity ? plan.entity.split(" ") : [];
+  const providers: MailProvider[] = /\bgmail\b/i.test(message) ? ["gmail"] : /\byahoo(?:\s+mail)?\b/i.test(message) ? ["yahoo"] : ["yahoo", "gmail"];
+  const providerNeutralMessage = message.replace(/\b(?:gmail|yahoo(?:\s+mail)?)\b/gi, " ").replace(/\s+/g, " ").trim() || "email";
+  const plan = planEmailQuery(providerNeutralMessage);
+  const entityTokens = plan.entity ? plan.entity.split(" ").filter(token => !/^(?:gmail|yahoo)$/i.test(token)) : [];
   const countRequest = plan.operation === "count";
   const dateRange = plan.startDate && plan.endDate ? { startDate: plan.startDate, endDate: plan.endDate } : null;
   const intent = plan.intent;
   const indexedType = lifecycleTypeFilter(intent, message);
-  const indexedCoverage = ownerId && dateRange ? await hasCoverage(ownerId, dateRange.startDate, dateRange.endDate) : false;
+  const indexedCoverage = providers.length === 1 && providers[0] === "yahoo" && ownerId && dateRange ? await hasCoverage(ownerId, dateRange.startDate, dateRange.endDate) : false;
   if (countRequest && entityTokens.length && plan.transactional && !plan.hybrid) {
     const sender = entityTokens.join(" ");
     const period = dateRange ? ` between ${dateRange.startDate} and ${dateRange.endDate}` : "";
@@ -256,17 +259,17 @@ export async function runAssistant(message: string, ownerId?: string) {
     // range, and the originally classified intent all stay fixed across
     // both attempts, and both are verified against real content, not
     // subject alone.
-    let counted = await countMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
+    let counted = await countMail(ownerId!, { terms: [providerNeutralMessage], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent, providers);
     if (!counted.count) {
-      counted = await countMail(ownerId!, { terms: [], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent);
+      counted = await countMail(ownerId!, { terms: [], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 1 }, intent, providers);
     }
     // Separately fetch a bounded, already body-verified sample purely so the
     // user has something to inspect — the same retrieval+relevance logic as
     // an ordinary search, capped for the UI. This capped fetch never feeds
     // back into `counted`, which already scanned every matched UID above.
-    let evidence = await searchMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
+    let evidence = await searchMail(ownerId!, { terms: [providerNeutralMessage], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT }, providers);
     if (!evidence.results.length) {
-      evidence = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT });
+      evidence = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: EVIDENCE_DISPLAY_LIMIT }, providers);
     }
     const supporting = relevantResults(message, evidence.results);
     return { answer: `You have ${counted.count} matching email${counted.count === 1 ? "" : "s"}${period}.`, emailResults: supporting, totalMatches: counted.count, orders: [], usedEmailIds: [], usage: null };
@@ -299,14 +302,14 @@ export async function runAssistant(message: string, ownerId?: string) {
       const display = selectForDisplay(message, synthesized?.orders ?? []);
       return { answer: synthesized?.text ? `${prefix}${synthesized.text}` : fallback, emailResults: indexed, totalMatches: indexed.length, orders: display.orders, usedEmailIds: display.usedEmailIds, usage: null };
     }
-    let initial = await searchMail(ownerId!, { terms: [message], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+    let initial = await searchMail(ownerId!, { terms: [providerNeutralMessage], sender, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 }, providers);
     if (!initial.results.length) {
       // The sender + assumed-subject-wording search found nothing; broaden to
       // a plain keyword search over just the extracted entity terms so a real
       // subject that doesn't match the assumed phrasing is still found. The
       // relevance filter below still narrows the final answer using the
       // original message's full intent.
-      initial = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 });
+      initial = await searchMail(ownerId!, { terms: entityTokens, startDate: dateRange?.startDate, endDate: dateRange?.endDate, readStatus: "any", maxResults: 25 }, providers);
     }
     // matchingResults, not relevantResults — reconstruction must see every
     // matching email (confirmation, shipment, ...), not just the single
@@ -335,7 +338,7 @@ export async function runAssistant(message: string, ownerId?: string) {
     }
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const call of calls) {
-      try { results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(await execute(call.name, call.input, emailResults, ownerId)) }); }
+      try { results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(await execute(call.name, call.input, emailResults, ownerId, providers)) }); }
       catch (error) { results.push({ type: "tool_result", tool_use_id: call.id, is_error: true, content: error instanceof z.ZodError ? "Tool arguments failed validation." : "Tool request could not be completed safely." }); }
     }
     messages.push({ role: "user", content: results });
