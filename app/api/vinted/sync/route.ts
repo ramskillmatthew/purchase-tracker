@@ -4,6 +4,7 @@ import { scanYahooMetadata, yahooMetadataId } from "@/lib/yahoo/client"; import 
 import { scanGmailMetadata } from "@/lib/gmail/client"; import { getMails } from "@/lib/email/client"; import { gmailAccounts } from "@/lib/gmail/oauth";
 import { parseGeneralPurchaseEmail } from "@/lib/purchase-import/parser"; import { planEmailQuery } from "@/lib/yahoo/query-plan";
 import { extractOrderWithAi } from "@/lib/purchase-import/ai-extract";
+import { resolveOrderForEmail, type AiAttempt } from "@/lib/purchase-import/ai-schema";
 import { expandOrderToRows } from "@/lib/purchase-import/allocate";
 import { sourceItemKey } from "@/lib/purchase-import/identity";
 import { resolveSourceProvider, resolveSourceAccount } from "@/lib/purchase-import/provider";
@@ -53,6 +54,13 @@ export async function POST(request: Request) { let syncId: string | null = null;
   const found = { results: await Promise.all(candidates.map(async row => ({ id: row.provider==="gmail"?row.id:await yahooMetadataId(row.folder,row.yahoo_uid,row.uid_validity), sender: [row.sender_name,row.sender_address].filter(Boolean).join(" <"), recipient:"", subject:row.subject, date:row.email_date, folder:row.provider==="gmail"?"Gmail":row.folder, provider: row.provider, excerpt:"", whyMatched:"Purchase-confirmation header matched.", hasAttachments:row.has_attachments, attachmentFilenames:[], unread:row.unread }))), nextCursor: null };
   const providerById = new Map(found.results.map(result => [result.id, result.provider]));
   let parsed = 0, uncertain = 0, aiAssisted = 0;
+  // Safe, aggregate-only diagnostics for why AI-assisted extraction did or
+  // didn't produce a usable order this run — never raw error text, model
+  // output, tokens, or credentials, only counts (see AiExtractionOutcome
+  // and describeAiFailure in lib/purchase-import/ai-schema.ts). Returned in
+  // the response below so the review UI can explain why some candidates
+  // need manual attention.
+  const aiDiagnostics = { success: 0, not_configured: 0, request_failed: 0, no_tool_call: 0, invalid_output: 0, unsupported_currency: 0, limit_reached: 0 };
   const emails = await getMails(user.id,found.results.map(result => result.id));
   const records: Record<string, unknown>[] = [];
   for (const email of emails) {
@@ -63,23 +71,36 @@ export async function POST(request: Request) { let syncId: string | null = null;
     // never silently defaults to "yahoo" — the email is skipped instead.
     const provider = resolveSourceProvider(email.id, providerById);
     if (!provider) continue;
+    // yahoo_message_id is a required, not-null identity column — without
+    // one there is no stable key to store any candidate row under at all,
+    // deterministic or fallback, so this one case must still be skipped.
+    if (!email.messageId) continue;
     const vinted = parseVintedEmail(email);
     const generic = vinted ? null : parseGeneralPurchaseEmail(email);
-    let order: ParsedOrder | null = vinted || generic;
-    if (needsAiFallback(order) && aiAssisted < AI_EXTRACTION_LIMIT && email.messageId) {
-      const vintedSender = /@(?:email\.)?vinted\.(?:com|co\.uk|fr|de|nl|es|it)/i.test(email.sender) || /\bvinted\b/i.test(email.sender);
-      const aiOrder = await extractOrderWithAi(
-        { messageId: email.messageId || "", sender: email.sender, subject: email.subject, date: email.date || new Date().toISOString(), text: email.text },
-        { candidateType: vintedSender ? "vinted" : "general", fallbackPurchasedFrom: vintedSender ? "Vinted" : "Unknown retailer" },
-      );
-      aiAssisted++;
-      // Only ever replaces a missing/uncertain deterministic result — never
-      // overrides a deterministic parse that was already confident and
-      // complete, and never inserted if the model's own output failed
-      // strict schema validation (extractOrderWithAi returns null then).
-      if (aiOrder) order = aiOrder;
+    const deterministicOrder: ParsedOrder | null = vinted || generic;
+    const vintedSender = /@(?:email\.)?vinted\.(?:com|co\.uk|fr|de|nl|es|it)/i.test(email.sender) || /\bvinted\b/i.test(email.sender);
+    const aiContext = { candidateType: (vintedSender ? "vinted" : "general") as "vinted" | "general", fallbackPurchasedFrom: vintedSender ? "Vinted" : "Unknown retailer" };
+    const emailForAi = { messageId: email.messageId, sender: email.sender, subject: email.subject, date: email.date || new Date().toISOString(), text: email.text };
+    let aiAttempt: AiAttempt = { status: "not_attempted" };
+    if (needsAiFallback(deterministicOrder)) {
+      if (aiAssisted < AI_EXTRACTION_LIMIT) {
+        aiAttempt = await extractOrderWithAi(emailForAi, aiContext);
+        aiAssisted++;
+        aiDiagnostics[aiAttempt.status]++;
+      } else {
+        aiAttempt = { status: "limit_reached" };
+        aiDiagnostics.limit_reached++;
+      }
     }
-    if (!order) continue;
+    // REGRESSION: previously an email where both deterministic parsing and
+    // AI extraction failed was silently `continue`d past entirely — the
+    // reviewer never saw it and had no way to know it existed.
+    // resolveOrderForEmail always returns a usable order now: AI's result
+    // when it succeeded, the deterministic result otherwise, or — only
+    // when both came back empty — a low-confidence fallback candidate
+    // (subject as a provisional description, every other field left
+    // blank, never invented, and impossible to import until reviewed).
+    const order = resolveOrderForEmail(deterministicOrder, aiAttempt, emailForAi, aiContext);
     const sourceAccount = resolveSourceAccount(provider, { gmailAccountEmail, yahooEmail: process.env.YAHOO_EMAIL || null });
     const expansion = expandOrderToRows(order.items.map(item => ({ description: item.description, size: item.size, condition: item.condition, quantity: item.quantity, linePricePence: item.linePricePence })), order.totalPaidPence);
     const rowUncertainty = [...order.uncertaintyReasons, ...(expansion.reason ? [expansion.reason] : [])];
@@ -126,5 +147,5 @@ export async function POST(request: Request) { let syncId: string | null = null;
   }
   if (records.length) await supabaseRequest("vinted_import_candidates?on_conflict=source_item_key", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(records) });
   if (syncId) await supabaseRequest(`yahoo_sync_history?id=eq.${syncId}`, { method: "PATCH", body: JSON.stringify({ status: "completed", messages_scanned: found.results.length, candidates_parsed: parsed, completed_at: new Date().toISOString() }) });
-  await audit(user.id, "purchase_email_sync_completed", { scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, aiAssisted, startDate, endDate, entity, providers:["yahoo",...(gmailMetadata.rows.length?["gmail"]:[])], truncated: yahooMetadata.truncated||gmailMetadata.truncated }); return NextResponse.json({ scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, aiAssisted, truncated: yahooMetadata.truncated||gmailMetadata.truncated, nextCursor: found.nextCursor, startDate, endDate });
+  await audit(user.id, "purchase_email_sync_completed", { scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, aiAssisted, aiDiagnostics, startDate, endDate, entity, providers:["yahoo",...(gmailMetadata.rows.length?["gmail"]:[])], truncated: yahooMetadata.truncated||gmailMetadata.truncated }); return NextResponse.json({ scanned: metadataRows.length, shortlisted: found.results.length, parsed, rejected: found.results.length-parsed, uncertain, aiAssisted, aiDiagnostics, truncated: yahooMetadata.truncated||gmailMetadata.truncated, nextCursor: found.nextCursor, startDate, endDate });
 } catch (error) { if (syncId) try { await supabaseRequest(`yahoo_sync_history?id=eq.${syncId}`, { method: "PATCH", body: JSON.stringify({ status: "failed", completed_at: new Date().toISOString(), safe_error: "Sync failed safely." }) }); } catch {} return safeApiError(error, "Purchase email sync could not be completed safely."); } }

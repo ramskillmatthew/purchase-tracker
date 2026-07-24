@@ -78,14 +78,26 @@ describe("sync route: multi-item expansion and AI fallback are wired in", () => 
   });
 
   it("only calls the AI fallback when the deterministic parse is missing or genuinely ambiguous, and bounds it per sync run", () => {
-    expect(syncSource).toContain("needsAiFallback(order)");
+    expect(syncSource).toContain("needsAiFallback(deterministicOrder)");
     expect(syncSource).toMatch(/aiAssisted\s*<\s*AI_EXTRACTION_LIMIT/);
     expect(syncSource).toContain("extractOrderWithAi(");
   });
 
-  it("never lets the AI fallback override an already-complete deterministic parse", () => {
-    const fallbackBlock = syncSource.slice(syncSource.indexOf("if (needsAiFallback"), syncSource.indexOf("if (!order) continue;"));
-    expect(fallbackBlock).toContain("if (aiOrder) order = aiOrder;");
+  it("REGRESSION: never silently drops a shortlisted email — the final order is always decided by the pure, independently-tested resolveOrderForEmail, never an inline `if (!order) continue`", () => {
+    expect(syncSource).toContain('import { resolveOrderForEmail, type AiAttempt } from "@/lib/purchase-import/ai-schema"');
+    expect(syncSource).toContain("const order = resolveOrderForEmail(deterministicOrder, aiAttempt, emailForAi, aiContext);");
+    expect(syncSource).not.toMatch(/if \(!order\) continue;/);
+  });
+
+  it("tracks a distinct limit_reached diagnostic when AI is skipped for hitting this run's per-sync budget, still going through resolveOrderForEmail rather than continuing past the email", () => {
+    expect(syncSource).toContain('aiAttempt = { status: "limit_reached" };');
+    expect(syncSource).toContain("aiDiagnostics.limit_reached++");
+  });
+
+  it("returns the safe, count-only aiDiagnostics object in both the audit log and the response, never raw error/model text", () => {
+    expect(syncSource).toContain("const aiDiagnostics = { success: 0, not_configured: 0, request_failed: 0, no_tool_call: 0, invalid_output: 0, unsupported_currency: 0, limit_reached: 0 };");
+    expect(syncSource).toMatch(/audit\(user\.id, "purchase_email_sync_completed", \{[^}]*aiDiagnostics/);
+    expect(syncSource).toMatch(/return NextResponse\.json\(\{[^}]*aiDiagnostics/);
   });
 });
 

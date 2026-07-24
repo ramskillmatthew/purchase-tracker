@@ -47,7 +47,14 @@ export default function PurchaseImportPage() {
       const r = await fetch("/api/vinted/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const body = await r.json();
       if (r.ok) {
-        setMessage(`Searched ${body.startDate} to ${body.endDate}. Scanned ${body.scanned} email headers; shortlisted ${body.shortlisted}; accepted ${body.parsed}; rejected ${body.rejected} non-purchases; ${body.uncertain || 0} accepted emails need review${body.aiAssisted ? ` (${body.aiAssisted} used AI-assisted extraction)` : ""}.${body.truncated ? " The mailbox scan reached its 5,000-email safety limit." : ""}`);
+        // Surfaces why some candidates need review — e.g. AI-assisted
+        // extraction not configured, failed, or hit an unsupported
+        // currency — from the safe, count-only diagnostics the sync route
+        // returns (see AiExtractionOutcome in lib/purchase-import/ai-schema.ts).
+        const diagnosticLabels: Record<string, string> = { not_configured: "AI extraction unavailable", request_failed: "AI request failed", no_tool_call: "AI returned no structured result", invalid_output: "AI result failed validation", unsupported_currency: "unsupported currency", limit_reached: "AI extraction limit reached" };
+        const diagnostics = body.aiDiagnostics as Record<string, number> | undefined;
+        const failureNotes = diagnostics ? Object.entries(diagnostics).filter(([key, count]) => key !== "success" && count > 0).map(([key, count]) => `${count} ${diagnosticLabels[key] || key}`) : [];
+        setMessage(`Searched ${body.startDate} to ${body.endDate}. Scanned ${body.scanned} email headers; shortlisted ${body.shortlisted}; accepted ${body.parsed}; rejected ${body.rejected} non-purchases; ${body.uncertain || 0} accepted emails need review${body.aiAssisted ? ` (${body.aiAssisted} used AI-assisted extraction)` : ""}.${failureNotes.length ? ` Needs manual review: ${failureNotes.join(", ")}.` : ""}${body.truncated ? " The mailbox scan reached its 5,000-email safety limit." : ""}`);
         await load();
       } else setError(body.error || "Sync failed.");
     } catch { setError("The email search was interrupted. Please try again."); }

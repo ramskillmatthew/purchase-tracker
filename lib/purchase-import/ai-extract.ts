@@ -1,7 +1,8 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
-import type { ParsedOrder } from "./types";
-import { AI_SYSTEM_PROMPT, aiOrderSchema, toParsedOrder } from "./ai-schema";
+import { AI_SYSTEM_PROMPT, EXTRACT_PURCHASE_ORDER_TOOL, aiOrderSchema, isSupportedCurrency, toParsedOrder, type AiExtractionOutcome } from "./ai-schema";
+
+export type { AiExtractionOutcome };
 
 /**
  * Claude-based structured-extraction fallback — used only when the
@@ -12,32 +13,52 @@ import { AI_SYSTEM_PROMPT, aiOrderSchema, toParsedOrder } from "./ai-schema";
  * email it's called with — the sync route decides which shortlisted
  * emails are ambiguous enough to warrant this call.
  *
- * Malformed or invalid model output is rejected by the strict
- * `aiOrderSchema` (see lib/purchase-import/ai-schema.ts) and this function
- * returns `null` — callers must fall through to human review rather than
- * trust an unvalidated shape.
+ * REGRESSION: this used to ask Claude to return free-form JSON text in its
+ * message content and parse it with JSON.parse — nothing actually
+ * constrained the model to that shape despite the system prompt asking
+ * for it, and in a real-mailbox run every single AI-assisted email was
+ * rejected as a result. It now forces exactly one call to the
+ * `extract_purchase_order` tool via `tool_choice` — the model can only
+ * ever respond with a structured `tool_use` block, never prose. The
+ * returned `input` is still re-validated against the same strict
+ * `aiOrderSchema` before use; a well-formed tool call is not itself
+ * trusted, only a tool call that also passes validation is.
+ *
+ * The email's own content (subject/body) is passed only inside the user
+ * turn's data, never as instructions — AI_SYSTEM_PROMPT explicitly tells
+ * the model to treat it as untrusted data and never obey anything it says.
  */
 export async function extractOrderWithAi(
   email: { messageId: string; sender: string; subject: string; date: string; text: string },
   context: { candidateType: "vinted" | "general"; fallbackPurchasedFrom: string },
-): Promise<ParsedOrder | null> {
+): Promise<AiExtractionOutcome> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   const model = process.env.ANTHROPIC_MODEL;
-  if (!apiKey || !model) return null;
+  if (!apiKey || !model) return { status: "not_configured" };
 
-  let raw: string;
+  let response: Anthropic.Message;
   try {
     const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
+    response = await client.messages.create({
       model, max_tokens: 1200, system: AI_SYSTEM_PROMPT,
+      tools: [EXTRACT_PURCHASE_ORDER_TOOL],
+      tool_choice: { type: "tool", name: EXTRACT_PURCHASE_ORDER_TOOL.name },
       messages: [{ role: "user", content: `From: ${email.sender}\nSubject: ${email.subject}\nDate: ${email.date}\n\n${email.text.slice(0, 6000)}` }],
     });
-    raw = response.content.filter((block): block is Anthropic.TextBlock => block.type === "text").map(block => block.text).join("\n").trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
-  } catch { return null; }
+  } catch {
+    // Never log the raw error — it can carry request/response details.
+    return { status: "request_failed" };
+  }
 
-  let parsedJson: unknown;
-  try { parsedJson = JSON.parse(raw); } catch { return null; }
-  const extractionResult = aiOrderSchema.safeParse(parsedJson);
-  if (!extractionResult.success) return null;
-  return toParsedOrder(email, extractionResult.data, context);
+  const toolUse = response.content.find((block): block is Anthropic.ToolUseBlock => block.type === "tool_use" && block.name === EXTRACT_PURCHASE_ORDER_TOOL.name);
+  if (!toolUse) return { status: "no_tool_call" };
+
+  const extractionResult = aiOrderSchema.safeParse(toolUse.input);
+  if (!extractionResult.success) return { status: "invalid_output" };
+
+  if (!isSupportedCurrency(extractionResult.data.currency)) return { status: "unsupported_currency" };
+
+  const order = toParsedOrder(email, extractionResult.data, context);
+  if (!order) return { status: "invalid_output" };
+  return { status: "success", order };
 }
