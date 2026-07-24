@@ -3,10 +3,12 @@ import { ImapFlow, type SearchObject } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { EmailSearch } from "@/lib/validation/email";
 import { excerpt, sanitizeEmailHtml } from "./sanitize";
-import { signEmailId, verifyEmailId } from "./tokens";
-import { canonicalSender, countSubjectTerms, isExactEmailAddress, searchVariants, semanticSubjectTerms, senderSearchVariants } from "./search-terms";
+import { signEmailId, verifyYahooEmailId } from "./tokens";
+import { senderSearchVariants } from "./search-terms";
+import { imapQueries, countQueries } from "./imap-queries";
 import { createHash } from "node:crypto";
-import { classifySubject, classifyQueryIntent } from "@/lib/email/classify";
+import { classifyQueryIntent, type EmailType } from "@/lib/email/classify";
+import { matchesLifecycleEvidence } from "@/lib/email/lifecycle-evidence";
 
 const CONNECT_TIMEOUT = 8_000;
 const SOCKET_TIMEOUT = 15_000;
@@ -27,63 +29,6 @@ async function withClient<T>(operation: (imap: ImapFlow) => Promise<T>) {
 }
 export async function testYahooConnection() { return withClient(async imap => { await imap.list(); return true; }); }
 
-function imapQuery(criteria: EmailSearch): SearchObject {
-  const query: SearchObject = {};
-  const intentSubjects = semanticSubjectTerms(criteria.terms);
-  if (criteria.sender && isExactEmailAddress(criteria.sender)) query.from = criteria.sender.trim();
-  else if (criteria.sender && intentSubjects.length) {
-    // Match the named company and any generalized lifecycle wording together.
-    // This mirrors a mailbox search such as "ASOS order" without requiring a
-    // retailer-specific receipt subject.
-    const entities = senderSearchVariants(criteria.sender);
-    query.or = entities.flatMap(text => intentSubjects.flatMap(intent => [{ text, subject: intent }, { text, body: intent }])).slice(0, 36);
-  } else if (criteria.sender) {
-    const entities = senderSearchVariants(criteria.sender);
-    query.or = entities.flatMap(value => [{ from: canonicalSender(value) }, { text: value }]).slice(0, 24);
-  }
-  if (criteria.recipient) query.to = criteria.recipient;
-  if (criteria.subject) query.subject = criteria.subject;
-  if (criteria.startDate) query.since = new Date(`${criteria.startDate}T00:00:00Z`);
-  if (criteria.endDate) { const before = new Date(`${criteria.endDate}T00:00:00Z`); before.setUTCDate(before.getUTCDate() + 1); query.before = before; }
-  if (criteria.readStatus === "read") query.seen = true;
-  if (criteria.readStatus === "unread") query.seen = false;
-  const freeText = searchVariants(criteria.terms);
-  if (criteria.exactPhrase) query.text = criteria.exactPhrase;
-  else if (intentSubjects.length && !criteria.sender) query.or = intentSubjects.flatMap(intent => [{ subject: intent }, { body: intent }]);
-  else if (intentSubjects.length && criteria.sender) { /* entity + intent query is already applied above */ }
-  else if (freeText.length === 1) query.text = freeText[0];
-  else if (freeText.length > 1) query.or = freeText.map(text => ({ text }));
-  return query;
-}
-
-function imapQueries(criteria: EmailSearch): SearchObject[] {
-  const intents = semanticSubjectTerms(criteria.terms);
-  if (!criteria.sender || isExactEmailAddress(criteria.sender) || !intents.length) return [imapQuery(criteria)];
-
-  // Yahoo handles several small searches more reliably than one deeply nested
-  // OR expression. Each query requires both the retailer and one intent term.
-  const base = imapQuery({ ...criteria, sender: undefined, terms: [] });
-  // Cover several likely sender spellings across the strongest intent terms;
-  // allowing one intent to consume the entire query budget causes timeouts.
-  // The UI confirms uncertain spelling before this point, so use the accepted
-  // sender directly instead of multiplying every search by typo probes.
-  const senders = senderSearchVariants(criteria.sender).slice(0, 1);
-  return intents.slice(0, 6).flatMap(intent => senders.map(sender => (
-    { ...base, from: canonicalSender(sender), subject: intent }
-  ))).slice(0, 12);
-}
-
-function countQueries(criteria: EmailSearch): SearchObject[] {
-  const base = imapQuery({ ...criteria, sender: undefined, terms: [] });
-  const intents = countSubjectTerms(criteria.terms).slice(0, 12);
-  if (criteria.sender) {
-    if (isExactEmailAddress(criteria.sender)) base.from = criteria.sender.trim();
-    else base.text = canonicalSender(criteria.sender);
-  }
-  if (intents.length) return intents.map(subject => ({ ...base, subject }));
-  if (criteria.terms.length) base.text = criteria.terms.join(" ");
-  return [base];
-}
 function address(list: { name?: string; address?: string }[] | undefined) { return list?.map(x => x.name ? `${x.name} <${x.address || ""}>` : x.address).filter(Boolean).join(", ") || "Unknown sender"; }
 function attachments(node: unknown): string[] {
   const found: string[] = [];
@@ -141,7 +86,21 @@ export async function searchYahoo(criteria: EmailSearch) {
   });
 }
 
-export async function countYahoo(criteria: EmailSearch) {
+/**
+ * Counts matching mail. `expectedType`, when supplied, is trusted as the
+ * caller's already-classified intent for final verification — it is never
+ * recomputed from `criteria.terms`, so a caller that broadens the IMAP
+ * search text (e.g. dropping a subject-line requirement to also catch a
+ * body-only cancellation notice) cannot accidentally broaden what gets
+ * counted by losing track of the original intent. When omitted, falls back
+ * to classifying `criteria.terms` directly (used by the tool-loop's
+ * count_emails, where the terms already carry the caller's own wording).
+ * Verification examines subject plus a body excerpt (not subject alone), via
+ * the same matchesLifecycleEvidence helper the search path uses, so a
+ * generic subject line whose cancellation/refund/etc. is only stated in the
+ * body is still counted correctly.
+ */
+export async function countYahoo(criteria: EmailSearch, expectedType?: EmailType) {
   return withClient(async imap => {
     const listed = await imap.list();
     const selectable = listed.filter(folder => !folder.flags?.has("\\Noselect") && !/(?:^|[\\/])(sent|drafts?|spam|junk|trash|deleted(?: items)?)$/i.test(folder.path));
@@ -149,6 +108,7 @@ export async function countYahoo(criteria: EmailSearch) {
     const folders = criteria.folder ? selectable.filter(folder => folder.path.toLowerCase() === criteria.folder!.toLowerCase()) : prioritized.slice(0, MAX_FOLDERS);
     if (criteria.folder && !folders.length) throw new Error("Requested folder is unavailable.");
     let count = 0;
+    const expected = expectedType ?? classifyQueryIntent(criteria.terms);
     for (const folder of folders) {
       const lock = await imap.getMailboxLock(folder.path, { readOnly: true });
       try {
@@ -157,12 +117,14 @@ export async function countYahoo(criteria: EmailSearch) {
           const ids = await imap.search(query, { uid: true });
           if (ids) ids.forEach(uid => matched.add(uid));
         }
-        const expected = classifyQueryIntent(criteria.terms);
         if (expected === "other") count += matched.size;
         else {
-          for (const chunk of Array.from(matched).reduce<number[][]>((groups, uid, index) => { if (index % 250 === 0) groups.push([]); groups[groups.length - 1].push(uid); return groups; }, [])) {
-            for await (const message of imap.fetch(chunk.join(","), { envelope: true }, { uid: true })) {
-              if (classifySubject(message.envelope?.subject || "") === expected) count += 1;
+          for (const chunk of Array.from(matched).reduce<number[][]>((groups, uid, index) => { if (index % 100 === 0) groups.push([]); groups[groups.length - 1].push(uid); return groups; }, [])) {
+            const fetched = await imap.fetchAll(chunk.join(","), { envelope: true, source: { maxLength: 80_000 } }, { uid: true });
+            for (const message of fetched) {
+              const parsed = message.source ? await simpleParser(message.source) : undefined;
+              const content = `${message.envelope?.subject || ""} ${excerpt(parsed?.text || parsed?.html || "", 2_000)}`;
+              if (matchesLifecycleEvidence(expected, content)) count += 1;
             }
           }
         }
@@ -298,7 +260,7 @@ export async function scanYahooMetadata(startDate: string, endDate: string, limi
 }
 
 export async function getYahooEmail(id: string) {
-  const safe = await verifyEmailId(id);
+  const safe = await verifyYahooEmailId(id);
   return withClient(async imap => {
     const folders = await imap.list();
     if (!folders.some(x => x.path === safe.folder && !x.flags?.has("\\Noselect"))) throw new Error("Email is no longer available.");
@@ -314,7 +276,7 @@ export async function getYahooEmail(id: string) {
 }
 
 export async function getYahooEmails(ids: string[]) {
-  const requested = await Promise.all(ids.map(async id => ({ id, safe: await verifyEmailId(id) })));
+  const requested = await Promise.all(ids.map(async id => ({ id, safe: await verifyYahooEmailId(id) })));
   return withClient(async imap => {
     const folders = await imap.list();
     const available = new Set(folders.filter(x => !x.flags?.has("\\Noselect")).map(x => x.path));

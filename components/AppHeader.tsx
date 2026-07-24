@@ -3,9 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import type { Task } from "@/lib/types";
+import { isTaskActionableToday, TASKS_CHANGED_EVENT } from "@/lib/tasks";
 
 const links = [
   { label: "Home", href: "/", icon: "home" },
+  { label: "Tasks", href: "/tasks", icon: "tasks" },
   { label: "Purchases", href: "/purchases", icon: "bag" },
   { label: "Bulk Input", href: "/bulk-input", icon: "rows" },
   { label: "Email Assistant", href: "/email-assistant", icon: "mail" },
@@ -18,6 +21,7 @@ const links = [
 function Icon({ name }: { name: string }) {
   const paths: Record<string, React.ReactNode> = {
     home: <><path d="m4 10 8-6 8 6" /><path d="M6.5 9v10.5h11V9M10 19v-6h4v6" /></>,
+    tasks: <><rect x="4" y="5" width="16" height="15" rx="2.5" /><path d="M8 3.5v3M16 3.5v3" /><path d="m8 12.5 2.3 2.3L16 9.5" /></>,
     bag: <><path d="M6.5 8.5h11l1 11h-13l1-11Z" /><path d="M9 9V6.5a3 3 0 0 1 6 0V9" /></>,
     rows: <><path d="M5 6h14M5 12h14M5 18h14" /><path d="M8 4v4M13 10v4M17 16v4" /></>,
     mail: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/></>,
@@ -34,6 +38,7 @@ function Icon({ name }: { name: string }) {
 export default function AppHeader() {
   const pathname = usePathname();
   const [dark, setDark] = useState(false);
+  const [taskBadgeCount, setTaskBadgeCount] = useState(0);
 
   useEffect(() => {
     const syncTheme = () => setDark(document.documentElement.classList.contains("dark"));
@@ -41,6 +46,26 @@ export default function AppHeader() {
     window.addEventListener("purchase-theme-change", syncTheme);
     return () => window.removeEventListener("purchase-theme-change", syncTheme);
   }, []);
+
+  useEffect(() => {
+    if (pathname === "/login") return;
+    let cancelled = false;
+    async function loadBadge() {
+      try {
+        const r = await fetch("/api/tasks");
+        if (!r.ok || cancelled) return;
+        const rows = (await r.json()) as Task[];
+        if (!cancelled) setTaskBadgeCount(rows.filter(task => isTaskActionableToday(task)).length);
+      } catch { /* badge is a convenience — a failed refresh just leaves the previous count showing */ }
+    }
+    loadBadge();
+    // Other pages/components dispatch this after any create/complete/
+    // uncomplete/delete (see lib/tasks.ts's broadcastTasksChanged) so the
+    // nav badge stays live without a shared store — mirrors the existing
+    // "purchase-theme-change" pattern just above.
+    window.addEventListener(TASKS_CHANGED_EVENT, loadBadge);
+    return () => { cancelled = true; window.removeEventListener(TASKS_CHANGED_EVENT, loadBadge); };
+  }, [pathname]);
 
   function toggleTheme() {
     const next = !dark;
@@ -51,6 +76,9 @@ export default function AppHeader() {
   }
 
   const isActive = (href: string) => pathname === href || (href === "/purchases" && pathname.startsWith("/purchases/"));
+  // Reuses the existing .record-count pill (already used identically on
+  // the Tasks page header) rather than inventing a new badge style.
+  const badgeLabel = taskBadgeCount > 99 ? "99+" : String(taskBadgeCount);
 
   if (pathname === "/login") return null;
 
@@ -62,7 +90,10 @@ export default function AppHeader() {
       </Link>
       <div className="sidebar-label">Workspace</div>
       <nav className="sidebar-nav">
-        {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "sidebar-link sidebar-link-active" : "sidebar-link"}><Icon name={link.icon} /><span>{link.label}</span></Link>)}
+        {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "sidebar-link sidebar-link-active" : "sidebar-link"}>
+          <Icon name={link.icon} /><span>{link.label}</span>
+          {link.href === "/tasks" && taskBadgeCount > 0 && <span className="record-count sidebar-badge">{badgeLabel}</span>}
+        </Link>)}
       </nav>
       <div className="sidebar-spacer" />
       <div className="workspace-card"><span className="workspace-dot" /><div><strong>Personal workspace</strong><small>Private database</small></div></div>
@@ -75,7 +106,13 @@ export default function AppHeader() {
     </header>
 
     <nav className="mobile-nav">
-      {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "mobile-nav-link mobile-nav-active" : "mobile-nav-link"}><Icon name={link.icon} /><span>{link.label}</span></Link>)}
+      {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "mobile-nav-link mobile-nav-active" : "mobile-nav-link"}>
+        <span className="mobile-nav-icon-wrap">
+          <Icon name={link.icon} />
+          {link.href === "/tasks" && taskBadgeCount > 0 && <span className="record-count mobile-nav-badge">{badgeLabel}</span>}
+        </span>
+        <span>{link.label}</span>
+      </Link>)}
     </nav>
   </>;
 }
