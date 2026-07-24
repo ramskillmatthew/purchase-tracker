@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Expense, Purchase } from "@/lib/types";
+import TodaysTasksCard from "@/components/TodaysTasksCard";
 
 type Period = "month" | "last-month" | "three-months" | "year";
 
@@ -105,6 +106,8 @@ export default function HomePage() {
       <article><span>Business expenses</span><strong>{loading ? "—" : money.format(report.expenseSpend)}</strong><small>Expenses in period</small></article>
       <article className="summary-total"><span>Total spend</span><strong>{loading ? "—" : money.format(report.stockSpend + report.expenseSpend)}</strong><small>Stock + expenses</small></article>
     </div>
+
+    <TodaysTasksCard />
 
     <div className="home-content-grid">
       <section className="home-panel money-panel">

@@ -666,6 +666,116 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .index-controls small { grid-column: 1 / -1; color: var(--muted); font-size: 8px; }
 .status-off i { background: var(--subtle) !important; }
 
+/* --- Tasks --------------------------------------------------------- */
+.task-tabs { display: inline-flex; overflow-x: auto; margin-bottom: 12px; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.task-tab { display: flex; min-height: 30px; padding: 0 12px; align-items: center; gap: 6px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.task-tab:hover { color: var(--text); background: var(--surface-2); }
+.task-tab-active { color: var(--primary); background: var(--primary-soft); }
+.task-tab i { color: var(--subtle); font-style: normal; font-size: 9px; font-weight: 700; }
+.task-tab-active i { color: var(--primary); }
+
+/* v1.1: header subtitle line ("8 active · 3 due today · 1 overdue"),
+   copying .bulk-header > div > span's existing values verbatim since this
+   is the same "subtitle under an H1" pattern in a different location. */
+.tasks-header-stats { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; font-weight: 600; }
+.tasks-stat-overdue { color: var(--danger); font-weight: 700; }
+
+/* v1.1: Quick Add — a persistent row at the bottom of the page, separate
+   from the existing Add Task modal. */
+.quick-add { display: flex; margin-top: 12px; gap: 8px; }
+.quick-add .input { flex: 1; }
+.quick-add-submit { display: grid; width: 40px; height: 40px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 8px; color: white; background: var(--primary); font-size: 20px; font-weight: 400; line-height: 1; transition: background 140ms ease; }
+.quick-add-submit:hover:not(:disabled) { background: var(--primary-strong); }
+.quick-add-submit:disabled { cursor: not-allowed; opacity: .5; }
+
+/* v1.1: double-click-to-edit affordance on the row title. */
+.task-title-editable:hover { cursor: pointer; text-decoration: underline; text-decoration-color: var(--line-strong); }
+
+/* v1.1: nav badge — reuses .record-count's own appearance (border, radius,
+   colours, font) unchanged; only positioning is adapted per context so it
+   never disturbs the sidebar/mobile-nav's existing layout. */
+.sidebar-badge { margin-left: auto; }
+.mobile-nav-icon-wrap { position: relative; display: inline-flex; }
+.mobile-nav-badge.record-count { position: absolute; top: -6px; right: -9px; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 999px; font-size: 7px; }
+
+/* v1.1: completion toast — no notification component existed before this;
+   built to match the app's existing surface/shadow/button tokens. */
+.task-toast { position: fixed; left: 50%; bottom: 24px; z-index: 200; display: flex; min-width: 200px; padding: 10px 14px; align-items: center; gap: 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); transform: translateX(-50%); animation: taskToastIn 180ms ease-out; }
+.task-toast span { color: var(--text); font-size: 12px; font-weight: 620; white-space: nowrap; }
+.task-toast button { border: 0; background: none; color: var(--primary); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.task-toast button:hover { text-decoration: underline; }
+@keyframes taskToastIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+.task-list { display: flex; flex-direction: column; }
+.task-row { display: flex; max-height: 120px; padding: 12px 14px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); transition: opacity 260ms ease, max-height 260ms ease, padding 260ms ease, margin 260ms ease; }
+.task-list .task-row:last-child { border-bottom: 0; }
+.task-row:hover { background: color-mix(in srgb, var(--primary) 3%, var(--surface)); }
+.task-row-collapsing { overflow: hidden; padding-top: 0 !important; padding-bottom: 0 !important; margin: 0 !important; max-height: 0 !important; opacity: 0; pointer-events: none; }
+.task-row-completed .task-title { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+
+.task-circle { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border: 2px solid var(--line-strong); border-radius: 50%; color: transparent; background: var(--surface); transition: border-color 160ms ease, background 160ms ease, transform 120ms ease; }
+.task-circle:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary) 55%, var(--line-strong)); transform: scale(1.06); }
+.task-circle:active:not(:disabled) { transform: scale(.93); }
+.task-circle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(.5); transition: opacity 180ms ease, transform 180ms ease; }
+.task-circle-done { color: white; border-color: var(--primary); background: var(--primary); }
+.task-circle-done svg { opacity: 1; transform: scale(1); }
+
+.task-row-body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.task-title { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.task-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.task-row-error { color: var(--danger); font-size: 9px; }
+
+.task-category-badge { display: inline-flex; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 650; white-space: nowrap; }
+.task-priority-badge { display: inline-flex; padding: 3px 8px; border-radius: 999px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.task-priority-low { color: var(--muted); background: var(--surface-3); }
+.task-priority-medium { color: #8a6d1d; background: color-mix(in srgb, #d9a441 16%, transparent); }
+.task-priority-high { color: var(--danger); background: var(--danger-soft); }
+.task-due { color: var(--muted); font-size: 9px; font-weight: 600; white-space: nowrap; }
+.task-due-overdue { color: var(--danger); font-weight: 700; }
+.task-completed-time { color: var(--subtle); font-size: 9px; white-space: nowrap; }
+
+.task-menu-wrap { position: relative; flex: 0 0 auto; }
+.task-menu-trigger { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; font-size: 16px; line-height: 1; transition: background 140ms ease, border-color 140ms ease; }
+.task-menu-trigger:hover, .task-menu-trigger[aria-expanded="true"] { border-color: var(--line); background: var(--surface-2); color: var(--text); }
+.task-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; overflow: hidden; width: 172px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-lg); animation: dialogFade 120ms ease-out; }
+.task-menu button { display: flex; width: 100%; min-height: 32px; padding: 0 9px; align-items: center; border: 0; border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; font-weight: 600; text-align: left; }
+.task-menu button:hover { background: var(--surface-2); }
+.task-menu-danger { color: var(--danger) !important; }
+.task-menu-danger:hover { background: var(--danger-soft) !important; }
+
+.task-completed-group + .task-completed-group { border-top: 1px solid var(--line); }
+.task-completed-heading { margin: 0; padding: 9px 14px; color: var(--muted); font-size: 10px; font-weight: 760; letter-spacing: .06em; text-transform: uppercase; background: var(--surface-2); }
+
+/* Today's Tasks — Home dashboard card */
+.tasks-panel .task-list-compact .task-row { padding: 9px 11px; gap: 9px; }
+.tasks-panel .task-list-compact .task-circle { width: 26px; height: 26px; }
+.tasks-panel .task-list-compact .task-title { font-size: 11px; }
+.tasks-empty-inline { display: flex; min-height: 96px; padding: 18px; flex-direction: column; align-items: center; justify-content: center; gap: 4px; text-align: center; }
+.tasks-empty-inline strong { color: var(--text); font-size: 12px; }
+.tasks-empty-inline span { color: var(--muted); font-size: 10px; }
+.tasks-panel-footer { display: flex; min-height: 42px; padding: 0 11px; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); }
+.tasks-panel-footer a { color: var(--primary); font-size: 10px; font-weight: 700; text-decoration: none; }
+.tasks-panel-footer a:hover { text-decoration: underline; }
+.tasks-panel-footer .button-secondary { min-height: 28px; padding: 0 10px; font-size: 9px; }
+
+/* Add/Edit Task modal */
+.task-modal { overflow: hidden; width: min(480px, 100%); padding: 0; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.task-modal-heading { display: flex; min-height: 52px; padding: 10px 16px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.task-modal-heading h2 { margin: 0; font-size: 15px; }
+.task-modal-heading button { width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--muted); background: var(--surface-3); font-size: 18px; }
+.task-modal-body { display: flex; padding: 14px 16px; flex-direction: column; gap: 12px; }
+.task-modal-body textarea.input { min-height: 70px; padding: 8px 10px; resize: vertical; }
+.task-modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.task-priority-select { display: inline-flex; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.task-priority-option { flex: 1; min-height: 32px; padding: 0 10px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 650; transition: background 140ms ease, color 140ms ease; }
+.task-priority-option:hover { color: var(--text); background: var(--surface-3); }
+.task-priority-option-active.task-priority-option-low { color: var(--text); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.task-priority-option-active.task-priority-option-medium { color: #8a6d1d; background: color-mix(in srgb, #d9a441 20%, transparent); }
+.task-priority-option-active.task-priority-option-high { color: var(--danger); background: var(--danger-soft); }
+.task-modal-error { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 7px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
+.task-modal-actions { display: flex; min-height: 54px; padding: 10px 16px; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--line); background: var(--surface); }
+.empty-check { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
 @media (max-width: 900px) {
   .sidebar { display: none; }
   .mobile-topbar { position: sticky; top: 0; z-index: 50; display: flex; min-height: 56px; padding: 0 14px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(18px); }
@@ -674,10 +784,18 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .mobile-topbar .product-logo strong { font-size: 13px; }
   .mobile-topbar .product-logo small { color: var(--muted); }
   .mobile-theme { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--surface); }
-  .mobile-nav { position: fixed; inset: auto 10px 10px; z-index: 60; display: grid; height: 60px; padding: 5px; grid-template-columns: repeat(8, 1fr); border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: 0 14px 46px rgba(0,0,0,.18); backdrop-filter: blur(18px); }
-  .mobile-nav-link { display: flex; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 12px; color: var(--muted); font-size: 9px; font-weight: 700; text-decoration: none; }
-  .mobile-nav-link .app-icon { width: 19px; height: 19px; }
+  /* 9 nav items (Tasks added) at phone widths: sized down slightly from the
+     original 8-item bar, and the label is defensively truncated with an
+     ellipsis rather than wrapping — the two longest labels ("Email
+     Assistant", "Purchase Import") can't fit on one line at this width
+     regardless of font size, so truncation is what keeps the fixed-height
+     bar from breaking, not just cosmetic. */
+  .mobile-nav { position: fixed; inset: auto 10px 10px; z-index: 60; display: grid; height: 60px; padding: 5px; grid-template-columns: repeat(9, 1fr); border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: 0 14px 46px rgba(0,0,0,.18); backdrop-filter: blur(18px); }
+  .mobile-nav-link { display: flex; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 12px; color: var(--muted); font-size: 8.2px; font-weight: 700; text-decoration: none; }
+  .mobile-nav-link .app-icon { width: 17px; height: 17px; }
+  .mobile-nav-link span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-nav-active { color: var(--primary); background: var(--primary-soft); }
+  .task-toast { bottom: 82px; }
   .global-search-shell { inset: 56px 0 auto; height: 54px; padding: 8px 14px; }
   .global-search-inner { width: 100%; }
   .app-main { width: 100%; margin-left: 0; padding: 128px 16px 88px; }
@@ -749,6 +867,9 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .yahoo-settings { flex-direction: column; }
   .yahoo-status { width: 100%; align-items: flex-start; }
   .index-controls { width: 100%; min-width: 0; }
+  .task-modal-grid { grid-template-columns: 1fr; }
+  .task-row { padding: 11px 12px; gap: 10px; }
+  .task-menu { width: 154px; }
 }
 .search-suggestion{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 22px;margin-top:12px;border-color:var(--accent,#7c72ff)}
 .search-suggestion p{margin:6px 0 0;font-size:1.05rem}
