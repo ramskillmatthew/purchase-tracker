@@ -145,7 +145,10 @@ export default function TasksPage() {
     if (!title || quickAddSaving) return;
     setQuickAddSaving(true);
     try {
-      const r = await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, category: "General", priority: "Medium", due_date: null }) });
+      // Quick Add always sets today's due date — without one the task would
+      // only ever show up under All, never Today or the Home task card,
+      // which defeats the point of quickly capturing something to do today.
+      const r = await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, category: "General", priority: "Medium", due_date: todayDateString() }) });
       if (r.ok) {
         setQuickAddValue("");
         await load();
