@@ -4,46 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Expense, Purchase } from "@/lib/types";
 import TodaysTasksCard from "@/components/TodaysTasksCard";
-
-type Period = "month" | "last-month" | "three-months" | "year";
-
-const periods: { value: Period; label: string }[] = [
-  { value: "month", label: "This Month" },
-  { value: "last-month", label: "Last Month" },
-  { value: "three-months", label: "Last 3 Months" },
-  { value: "year", label: "This Year" },
-];
+import { computeHomeReport, periods, type Period } from "@/lib/home-report";
 
 const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const shortMoney = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
-
-function dateKey(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function rangeFor(period: Period) {
-  const now = new Date();
-  if (period === "last-month") return {
-    start: dateKey(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
-    end: dateKey(new Date(now.getFullYear(), now.getMonth(), 1)),
-  };
-  if (period === "three-months") return {
-    start: dateKey(new Date(now.getFullYear(), now.getMonth() - 2, 1)),
-    end: dateKey(new Date(now.getFullYear(), now.getMonth() + 1, 1)),
-  };
-  if (period === "year") return {
-    start: dateKey(new Date(now.getFullYear(), 0, 1)),
-    end: dateKey(new Date(now.getFullYear() + 1, 0, 1)),
-  };
-  return {
-    start: dateKey(new Date(now.getFullYear(), now.getMonth(), 1)),
-    end: dateKey(new Date(now.getFullYear(), now.getMonth() + 1, 1)),
-  };
-}
-
-function inRange(value: string, start: string, end: string) {
-  return value >= start && value < end;
-}
 
 export default function HomePage() {
   const router = useRouter();
@@ -65,29 +29,7 @@ export default function HomePage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const report = useMemo(() => {
-    const { start, end } = rangeFor(period);
-    const periodPurchases = purchases.filter(row => inRange(row.order_date, start, end));
-    const periodExpenses = expenses.filter(row => inRange(row.purchase_date, start, end));
-    const stockSpend = periodPurchases.reduce((total, row) => total + Number(row.price_purchased || 0), 0);
-    const expenseSpend = periodExpenses.reduce((total, row) => total + Number(row.cost || 0), 0);
-    const sourceMap = new Map<string, { spend: number; purchases: number }>();
-    periodPurchases.forEach(row => {
-      const source = row.purchased_from?.trim() || "Other";
-      const current = sourceMap.get(source) || { spend: 0, purchases: 0 };
-      current.spend += Number(row.price_purchased || 0);
-      current.purchases += 1;
-      sourceMap.set(source, current);
-    });
-    const sources = Array.from(sourceMap, ([source, values]) => ({
-      source,
-      ...values,
-      percentage: stockSpend ? (values.spend / stockSpend) * 100 : 0,
-      average: values.purchases ? values.spend / values.purchases : 0,
-    })).sort((a, b) => b.spend - a.spend);
-    const recent = [...periodPurchases].sort((a, b) => b.order_date.localeCompare(a.order_date) || b.created_at.localeCompare(a.created_at)).slice(0, 10);
-    return { periodPurchases, stockSpend, expenseSpend, sources, recent };
-  }, [period, purchases, expenses]);
+  const report = useMemo(() => computeHomeReport(period, purchases, expenses), [period, purchases, expenses]);
 
   return <section className="page-shell home-page">
     <header className="home-header">
@@ -102,8 +44,8 @@ export default function HomePage() {
 
     <div className="summary-grid" aria-busy={loading}>
       <article><span>Purchases</span><strong>{loading ? "—" : report.periodPurchases.length.toLocaleString("en-GB")}</strong><small>{periods.find(item => item.value === period)?.label}</small></article>
-      <article><span>Stock spend</span><strong>{loading ? "—" : money.format(report.stockSpend)}</strong><small>Purchases in period</small></article>
-      <article><span>Business expenses</span><strong>{loading ? "—" : money.format(report.expenseSpend)}</strong><small>Expenses in period</small></article>
+      <article><span>Stock spend</span><strong>{loading ? "—" : money.format(report.stockSpend)}</strong><small>{period === "all-time" ? "Purchases across all time" : "Purchases in period"}</small></article>
+      <article><span>Business expenses</span><strong>{loading ? "—" : money.format(report.expenseSpend)}</strong><small>{period === "all-time" ? "Expenses across all time" : "Expenses in period"}</small></article>
       <article className="summary-total"><span>Total spend</span><strong>{loading ? "—" : money.format(report.stockSpend + report.expenseSpend)}</strong><small>Stock + expenses</small></article>
     </div>
 

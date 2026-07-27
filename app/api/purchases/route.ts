@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
-import { supabaseRequest } from "@/lib/supabase";
+import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { purchaseInputSchema } from "@/lib/validation/purchase";
+import type { Purchase } from "@/lib/types";
 
 export async function GET() {
-  try { await requireOwner(); const r = await supabaseRequest("purchases?select=*&order=order_date.desc,created_at.desc"); return NextResponse.json(await r.json()); }
+  // A single unbounded request here used to be silently capped at
+  // PostgREST's configured db-max-rows (1000) — every purchase beyond
+  // that was invisible to the Home dashboard and Purchases page alike.
+  // supabaseRequestAll pages through the full table instead.
+  try { await requireOwner(); const rows = await supabaseRequestAll<Purchase>("purchases?select=*&order=order_date.desc,created_at.desc"); return NextResponse.json(rows); }
   catch (e) { return safeApiError(e); }
 }
 

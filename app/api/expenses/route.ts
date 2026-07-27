@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
-import { supabaseRequest } from "@/lib/supabase";
+import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { expenseInputSchema } from "@/lib/validation/purchase";
+import type { Expense } from "@/lib/types";
 
 export async function GET() {
+  // See app/api/purchases/route.ts — same PostgREST db-max-rows truncation
+  // risk applies here, even though the expenses table is currently smaller.
   try {
     await requireOwner();
-    const response = await supabaseRequest("expenses?select=*&order=purchase_date.desc,created_at.desc");
-    return NextResponse.json(await response.json());
+    const rows = await supabaseRequestAll<Expense>("expenses?select=*&order=purchase_date.desc,created_at.desc");
+    return NextResponse.json(rows);
   } catch (e) { return safeApiError(e); }
 }
 
