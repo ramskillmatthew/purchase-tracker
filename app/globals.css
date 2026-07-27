@@ -496,6 +496,69 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .bulk-failures > div:last-child { border-bottom: 0; }
 .bulk-failures span { color: var(--muted); }
 
+/* --- Purchase spreadsheet import --- */
+.purchase-topbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.import-dialog { overflow: auto; width: min(880px, 100%); max-height: calc(100vh - 40px); padding: 20px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.import-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.import-dialog-heading h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+.import-dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.import-template-link { display: inline-flex; margin: 14px 0; min-height: 36px; padding: 0 14px; align-items: center; font-size: 11px; text-decoration: none; }
+.import-dropzone { display: flex; min-height: 130px; padding: 20px; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1.5px dashed var(--line-strong); border-radius: 11px; text-align: center; cursor: pointer; background: var(--surface-2); transition: border-color 130ms ease, background 130ms ease; }
+.import-dropzone:hover { border-color: color-mix(in srgb, var(--primary) 40%, var(--line-strong)); background: var(--surface-3); }
+.import-dropzone:focus-within { border-color: var(--primary); background: var(--surface); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent); }
+.import-dropzone-active { border-color: var(--primary); background: var(--primary-soft); }
+.import-dropzone input[type="file"] { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; overflow: hidden; }
+.import-dropzone-title { color: var(--text); font-size: 12px; font-weight: 700; }
+.import-dropzone-hint { color: var(--muted); font-size: 10px; }
+.import-select-error { margin-top: 10px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 8px; color: var(--danger); background: var(--danger-soft); font-size: 10px; font-weight: 600; }
+.import-loading { margin-top: 10px; color: var(--muted); font-size: 11px; }
+.import-summary { display: flex; margin-top: 16px; padding: 10px 12px; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.import-summary > div:first-child { display: flex; flex-direction: column; gap: 2px; }
+.import-summary strong { font-size: 12px; }
+.import-summary > div:first-child span { color: var(--muted); font-size: 10px; }
+.import-counts { display: flex; gap: 12px; font-size: 10px; font-weight: 700; }
+.import-count-valid { color: #16845d; }
+.import-count-invalid { color: var(--danger); }
+.import-note { margin: 8px 0 0; color: var(--muted); font-size: 10px; }
+.import-preview-scroll { max-height: 320px; margin-top: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
+.import-preview-table { width: 100%; min-width: 760px; border-collapse: separate; border-spacing: 0; }
+.import-preview-table th { position: sticky; top: 0; z-index: 1; padding: 8px 10px; border-bottom: 1px solid var(--line-strong); color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 760; letter-spacing: .06em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.import-preview-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 11px; white-space: nowrap; vertical-align: top; }
+.import-preview-table tr:last-child td { border-bottom: 0; }
+.import-row-invalid td { background: color-mix(in srgb, var(--danger) 5%, transparent); }
+.import-row-status { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; font-weight: 700; }
+.import-row-status-ok { color: #16845d; }
+.import-row-status-error { color: var(--danger); }
+.import-cell-error { border-left: 2px solid var(--danger); color: var(--danger); font-weight: 600; }
+.import-cell-error-note { margin-top: 3px; color: var(--danger); font-size: 9px; font-weight: 600; white-space: normal; }
+/* View toggle — visually mirrors .task-tabs/.task-tab (same scale/values) so it reads as the same control family elsewhere in the app. */
+.import-view-tabs { display: inline-flex; overflow-x: auto; margin-top: 12px; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.import-view-tab { display: flex; min-height: 30px; padding: 0 12px; align-items: center; gap: 6px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.import-view-tab:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+.import-view-tab:disabled { opacity: .45; cursor: default; }
+.import-view-tab-active { color: var(--primary); background: var(--primary-soft); }
+.import-view-tab i { color: var(--subtle); font-style: normal; font-size: 9px; font-weight: 700; }
+.import-view-tab-active i { color: var(--primary); }
+.import-error-list { max-height: 240px; margin-top: 12px; padding: 10px 12px; overflow-y: auto; overflow-x: hidden; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 9px; background: var(--danger-soft); }
+.import-error-list > strong { display: block; color: var(--danger); font-size: 11px; }
+.import-error-list > strong::before { content: "⚠ "; }
+.import-error-hint { margin: 3px 0 8px; color: var(--danger); font-size: 10px; }
+.import-error-rows { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.import-error-row { padding-top: 6px; border-top: 1px solid color-mix(in srgb, var(--danger) 18%, transparent); }
+.import-error-row:first-child { padding-top: 0; border-top: 0; }
+.import-error-row-number { display: block; margin-bottom: 3px; color: var(--danger); font-size: 10px; font-weight: 760; }
+.import-error-row ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding-left: 16px; color: var(--danger); font-size: 10px; line-height: 1.5; }
+.import-error-value { color: color-mix(in srgb, var(--danger) 80%, var(--muted)); font-style: italic; }
+.import-error-fallback { margin: 0; color: var(--danger); font-size: 10px; font-weight: 600; }
+.import-disabled-reason { margin: 10px 0 0; color: var(--danger); font-size: 10px; font-weight: 600; text-align: right; }
+.import-dialog-actions { display: flex; margin-top: 10px; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.import-dialog-actions .button, .import-dialog-actions .button-secondary { min-height: 38px; font-size: 11px; }
+.import-success { padding: 24px 8px; text-align: center; }
+.import-success > span { display: inline-grid; width: 40px; height: 40px; place-items: center; border-radius: 10px; color: #16845d; background: rgba(38,190,131,.12); font-size: 19px; font-weight: 800; }
+.import-success h3 { margin: 14px 0 0; font-size: 16px; }
+.import-success p { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.import-success .import-dialog-actions { justify-content: center; }
+
 .login-shell { display: grid; min-height: 100vh; padding: 24px; place-items: center; }
 .login-card { width: min(420px, 100%); padding: 28px; }
 .login-card h1 { margin: 6px 0; }
@@ -839,8 +902,13 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .data-panel { border-radius: 10px; }
   .table-toolbar { min-height: 54px; padding: 9px 12px; }
   .empty-state { min-height: 130px; padding: 18px 12px; }
-  .purchase-topbar { grid-template-columns: 1fr auto; gap: 10px; }
+  .purchase-topbar { grid-template-columns: 1fr; gap: 10px; }
   .purchase-topbar h1 { font-size: 1.45rem; }
+  .purchase-topbar-actions { justify-content: flex-start; }
+  .import-dialog { padding: 14px; }
+  .import-dialog-actions { flex-direction: column-reverse; align-items: stretch; }
+  .import-dialog-actions .button, .import-dialog-actions .button-secondary { width: 100%; }
+  .import-disabled-reason { text-align: left; }
   .empty-left { justify-content: flex-start; padding-left: 12px; }
   .home-header { align-items: stretch; flex-direction: column; }
   .period-control { align-items: stretch; flex-direction: column; gap: 5px; }

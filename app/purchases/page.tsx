@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import PurchaseForm from "@/components/PurchaseForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import PurchaseImportDialog from "@/components/PurchaseImportDialog";
 import type { Purchase } from "@/lib/types";
 
 type SortKey = "order_date" | "seller_name" | "item_description" | "item_size" | "price_purchased" | "sku" | "arrived" | "purchased_from";
@@ -21,6 +22,7 @@ const columns: { label: string; key: SortKey }[] = [
 export default function PurchasesPage() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<Purchase | undefined>();
   const [rows, setRows] = useState<Purchase[]>([]);
   const [error, setError] = useState("");
@@ -67,18 +69,21 @@ export default function PurchasesPage() {
 
   return <section className="page-shell">
     <header className="purchase-topbar">
-      <div className="title-row"><h1>Purchases</h1><span className="record-count">{rows.length}</span></div>
-      <button className={`button page-action purchase-toggle ${open && !editing ? "purchase-toggle-close" : ""}`} onClick={() => { if (open && !editing) setOpen(false); else { setEditing(undefined); setOpen(true); } }}>
-        <span className="purchase-toggle-icon" aria-hidden="true">{open && !editing ? "×" : "+"}</span>
-        <span className="purchase-toggle-label">{open && !editing ? "Close form" : "Add purchase"}</span>
-      </button>
+      <div className="title-row"><h1>Purchases</h1><span className="record-count">{rows.length.toLocaleString("en-GB")}</span></div>
+      <div className="purchase-topbar-actions">
+        <button type="button" className="button-secondary" onClick={() => setImportOpen(true)}>Import spreadsheet</button>
+        <button className={`button page-action purchase-toggle ${open && !editing ? "purchase-toggle-close" : ""}`} onClick={() => { if (open && !editing) setOpen(false); else { setEditing(undefined); setOpen(true); } }}>
+          <span className="purchase-toggle-icon" aria-hidden="true">{open && !editing ? "×" : "+"}</span>
+          <span className="purchase-toggle-label">{open && !editing ? "Close form" : "Add purchase"}</span>
+        </button>
+      </div>
     </header>
 
     {open && <div className="form-region"><PurchaseForm key={editing?.id ?? "new"} purchase={editing} onCancel={() => { setEditing(undefined); setOpen(false); }} onSaved={() => { setEditing(undefined); setOpen(false); load(); }} /></div>}
 
     <div className="data-panel">
       <div className="grid-toolbar">
-        <div><strong>{rows.length} rows</strong><span>Page {Math.min(page, totalPages)} of {totalPages}</span></div>
+        <div><strong>{rows.length.toLocaleString("en-GB")} rows</strong><span>Page {Math.min(page, totalPages)} of {totalPages}</span></div>
         {rows.length > 0 && <button className="button-danger" onClick={() => setConfirmation({ type: "all" })}>Clear all</button>}
       </div>
       <div className="table-scroll purchase-grid-scroll"><table className="purchase-grid"><thead><tr>{columns.map(column => <th key={column.key}><button type="button" onClick={() => changeSort(column.key)}><span>{column.label}</span><i className={sort.key === column.key ? "sort-active" : ""}>{sort.key === column.key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</i></button></th>)}</tr></thead>
@@ -93,8 +98,9 @@ export default function PurchasesPage() {
           <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
         </tr>) : <tr className="grid-empty-row"><td colSpan={8}><div><strong>No purchases yet.</strong><span>{error || "Click Add purchase to add your first item."}</span><button onClick={() => setOpen(true)}>Add purchase</button></div></td></tr>}</tbody>
       </table></div>
-      <div className="pagination-bar"><span>{sortedRows.length ? `${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, sortedRows.length)} of ${sortedRows.length}` : "0 rows"}</span><div><button disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))}>← Previous</button><button disabled={page >= totalPages} onClick={() => setPage(current => Math.min(totalPages, current + 1))}>Next →</button></div></div>
+      <div className="pagination-bar"><span>{sortedRows.length ? `${((page - 1) * pageSize + 1).toLocaleString("en-GB")}–${Math.min(page * pageSize, sortedRows.length).toLocaleString("en-GB")} of ${sortedRows.length.toLocaleString("en-GB")}` : "0 rows"}</span><div><button disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))}>← Previous</button><button disabled={page >= totalPages} onClick={() => setPage(current => Math.min(totalPages, current + 1))}>Next →</button></div></div>
     </div>
-    {confirmation && <ConfirmDialog title={confirmation.type === "all" ? "Clear all purchases?" : "Delete this purchase?"} message={confirmation.type === "all" ? `This will permanently remove all ${rows.length} saved purchase records. This cannot be undone.` : "This purchase will be permanently removed from your history. This cannot be undone."} confirmLabel={confirmation.type === "all" ? "Clear all purchases" : "Delete purchase"} onCancel={() => setConfirmation(null)} onConfirm={() => confirmation.type === "all" ? clearAll() : remove(confirmation.id!)} />}
+    {confirmation && <ConfirmDialog title={confirmation.type === "all" ? "Clear all purchases?" : "Delete this purchase?"} message={confirmation.type === "all" ? `This will permanently remove all ${rows.length.toLocaleString("en-GB")} saved purchase records. This cannot be undone.` : "This purchase will be permanently removed from your history. This cannot be undone."} confirmLabel={confirmation.type === "all" ? "Clear all purchases" : "Delete purchase"} onCancel={() => setConfirmation(null)} onConfirm={() => confirmation.type === "all" ? clearAll() : remove(confirmation.id!)} />}
+    {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
   </section>;
 }

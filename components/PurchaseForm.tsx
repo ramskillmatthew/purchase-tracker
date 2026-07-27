@@ -1,9 +1,9 @@
 "use client";
 import { FormEvent, useRef, useState } from "react";
 import type { Purchase } from "@/lib/types";
+import { conditions, isHistoricalCondition } from "@/lib/validation/purchase";
 
 const platforms = ["Vinted", "eBay", "Facebook", "Depop"];
-const conditions = ["Brand new", "Brand new without tags", "Labelled as very good condition", "Good condition from photos", "Decent condition from photos"];
 
 export default function PurchaseForm({ onSaved, purchase, onCancel }: { onSaved: () => void; purchase?: Purchase; onCancel?: () => void }) {
   const formRef = useRef<HTMLFormElement>(null);
@@ -11,6 +11,7 @@ export default function PurchaseForm({ onSaved, purchase, onCancel }: { onSaved:
   const [source, setSource] = useState(existingPlatform);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const historicalCondition = isHistoricalCondition(purchase?.item_condition) ? purchase!.item_condition : null;
 
   function clear() {
     formRef.current?.reset();
@@ -25,6 +26,12 @@ export default function PurchaseForm({ onSaved, purchase, onCancel }: { onSaved:
     const form = e.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     const { purchased_from_other, ...fields } = values;
+    // An untouched historical condition (e.g. "Holes in heel") must survive
+    // saving other field edits. It's omitted from the PATCH body entirely —
+    // rather than re-sent — so the existing strict, canonical-only
+    // purchaseInputSchema on the PATCH route never has to see it and never
+    // rejects it. Only an actively-chosen (canonical) value is ever sent.
+    if (purchase && historicalCondition && fields.item_condition === historicalCondition) delete fields.item_condition;
     const body = {
       ...fields,
       purchased_from: source === "Other" ? String(purchased_from_other) : source,
@@ -60,7 +67,7 @@ export default function PurchaseForm({ onSaved, purchase, onCancel }: { onSaved:
     <label className="field"><span className="label">Item Description</span><input className="input" name="item_description" defaultValue={purchase?.item_description} required /></label>
     <label className="field"><span className="label">Item Size</span><input className="input" name="item_size" defaultValue={purchase?.item_size} required /></label>
     <label className="field"><span className="label">Quantity</span><input className="input" name="quantity" type="number" min="1" step="1" defaultValue={purchase?.quantity ?? 1} required /></label>
-    <label className="field"><span className="label">Item Condition</span><select className="input" name="item_condition" required defaultValue={purchase?.item_condition ?? ""}><option value="" disabled>Choose condition</option>{conditions.map(x => <option key={x}>{x}</option>)}</select></label>
+    <label className="field"><span className="label">Item Condition</span><select className="input" name="item_condition" required defaultValue={purchase?.item_condition ?? ""}><option value="" disabled>Choose condition</option>{historicalCondition && <option value={historicalCondition}>{`Historical: ${historicalCondition}`}</option>}{conditions.map(x => <option key={x}>{x}</option>)}</select></label>
     <label className="field"><span className="label">Price Purchased</span><input className="input" name="price_purchased" type="number" min="0" step="0.01" defaultValue={purchase?.price_purchased} required /></label>
     <label className="field"><span className="label">Arrived?</span><select className="input" name="arrived" defaultValue={purchase?.arrived === null || purchase?.arrived === undefined ? "" : String(purchase.arrived)}><option value="">Blank</option><option value="true">Yes</option><option value="false">No</option></select></label>
     </div>
