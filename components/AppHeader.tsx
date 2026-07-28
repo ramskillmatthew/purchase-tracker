@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -33,6 +34,24 @@ function Icon({ name }: { name: string }) {
     moon: <path d="M20 15.1A8.5 8.5 0 0 1 8.9 4 8.5 8.5 0 1 0 20 15.1Z" />,
   };
   return <svg className="app-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
+}
+
+// Real text throughout — only the checked cap is an image, and it's purely
+// decorative (alt=""), since the accessible name lives on the wrapping Link.
+function BrandWordmark() {
+  return <Link href="/" className="brand-link" aria-label="Trotter's Attire Trading HQ — Home">
+    <span className="brand-wordmark">
+      <span className="brand-title">
+        {"TROTTER'S ATTIR"}
+        <span className="brand-e-wrap">E<Image src="/branding/trotters-checked-cap.png" alt="" width={90} height={72} className="brand-cap" /></span>
+      </span>
+      <span className="brand-subtitle">
+        <span className="brand-subtitle-line" aria-hidden="true" />
+        <span className="brand-subtitle-text">TRADING HQ</span>
+        <span className="brand-subtitle-line" aria-hidden="true" />
+      </span>
+    </span>
+  </Link>;
 }
 
 export default function AppHeader() {
@@ -84,10 +103,7 @@ export default function AppHeader() {
 
   return <>
     <aside className="sidebar">
-      <Link href="/" className="product-logo">
-        <span className="product-logo-icon">P</span>
-        <span><strong>Purchase</strong><small>Tracker</small></span>
-      </Link>
+      <BrandWordmark />
       <div className="sidebar-label">Workspace</div>
       <nav className="sidebar-nav">
         {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "sidebar-link sidebar-link-active" : "sidebar-link"}>
@@ -101,7 +117,7 @@ export default function AppHeader() {
     </aside>
 
     <header className="mobile-topbar">
-      <Link href="/" className="product-logo"><span className="product-logo-icon">P</span><span><strong>Purchase</strong><small>Tracker</small></span></Link>
+      <BrandWordmark />
       <button type="button" className="mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? "light" : "dark"} mode`}><Icon name={dark ? "sun" : "moon"} /></button>
     </header>
 

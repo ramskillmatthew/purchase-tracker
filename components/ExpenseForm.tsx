@@ -1,6 +1,7 @@
 "use client";
 import { FormEvent, useRef, useState } from "react";
 import type { Expense } from "@/lib/types";
+import { expenseAddedMessage } from "@/lib/success-messages";
 
 export default function ExpenseForm({ onSaved, expense, onCancel }: { onSaved?: () => void; expense?: Expense; onCancel?: () => void }) {
   const formRef = useRef<HTMLFormElement>(null);
@@ -27,7 +28,7 @@ export default function ExpenseForm({ onSaved, expense, onCancel }: { onSaved?: 
     });
     if (res.ok) {
       form.reset();
-      setMessage(expense ? "Expense updated." : "Expense saved.");
+      setMessage(expense ? "Expense updated." : expenseAddedMessage());
       onSaved?.();
     } else {
       setMessage((await res.json()).error || "Could not save expense.");

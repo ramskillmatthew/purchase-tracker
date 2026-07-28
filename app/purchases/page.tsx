@@ -4,7 +4,13 @@ import { useRouter } from "next/navigation";
 import PurchaseForm from "@/components/PurchaseForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import PurchaseImportDialog from "@/components/PurchaseImportDialog";
+import TaskToast from "@/components/TaskToast";
+import PageSizeSelect from "@/components/PageSizeSelect";
+import { purchaseAddedMessage } from "@/lib/success-messages";
+import { DEFAULT_PAGE_SIZE, parseStoredPageSize, totalPagesFor, type PageSize } from "@/lib/pagination";
 import type { Purchase } from "@/lib/types";
+
+const PURCHASES_PAGE_SIZE_KEY = "trotters:purchases-page-size";
 
 type SortKey = "order_date" | "seller_name" | "item_description" | "item_size" | "price_purchased" | "sku" | "arrived" | "purchased_from";
 
@@ -28,8 +34,23 @@ export default function PurchasesPage() {
   const [error, setError] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "order_date", direction: "desc" });
   const [page, setPage] = useState(1);
-  const pageSize = 20;
+  const [pageSize, setPageSizeState] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [confirmation, setConfirmation] = useState<{ type: "one" | "all"; id?: string } | null>(null);
+  const [addedToast, setAddedToast] = useState(false);
+
+  // Restored after mount (not in the initial useState) so the server-rendered
+  // and first-client-render HTML always agree on the default — avoids a
+  // hydration mismatch, matching the existing dark-mode restore pattern in
+  // components/AppHeader.tsx.
+  useEffect(() => {
+    try { setPageSizeState(parseStoredPageSize(window.localStorage.getItem(PURCHASES_PAGE_SIZE_KEY))); }
+    catch { /* localStorage may be unavailable (private browsing) — the default page size still works */ }
+  }, []);
+  function changePageSize(next: PageSize) {
+    setPageSizeState(next);
+    setPage(1);
+    try { window.localStorage.setItem(PURCHASES_PAGE_SIZE_KEY, String(next)); } catch { /* remembering is a convenience, never required */ }
+  }
 
   async function load() {
     const response = await fetch("/api/purchases");
@@ -58,7 +79,7 @@ export default function PurchasesPage() {
       : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
     return sort.direction === "asc" ? result : -result;
   }), [rows, sort]);
-  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
+  const totalPages = totalPagesFor(sortedRows.length, pageSize);
   const pageRows = sortedRows.slice((page - 1) * pageSize, page * pageSize);
   useEffect(() => { setPage(current => Math.min(current, totalPages)); }, [totalPages]);
 
@@ -79,7 +100,11 @@ export default function PurchasesPage() {
       </div>
     </header>
 
-    {open && <div className="form-region"><PurchaseForm key={editing?.id ?? "new"} purchase={editing} onCancel={() => { setEditing(undefined); setOpen(false); }} onSaved={() => { setEditing(undefined); setOpen(false); load(); }} /></div>}
+    {open && <div className="form-region"><PurchaseForm key={editing?.id ?? "new"} purchase={editing} onCancel={() => { setEditing(undefined); setOpen(false); }} onSaved={() => {
+      const wasCreate = editing === undefined;
+      setEditing(undefined); setOpen(false); load();
+      if (wasCreate) setAddedToast(true);
+    }} /></div>}
 
     <div className="data-panel">
       <div className="grid-toolbar">
@@ -98,9 +123,19 @@ export default function PurchasesPage() {
           <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
         </tr>) : <tr className="grid-empty-row"><td colSpan={8}><div><strong>No purchases yet.</strong><span>{error || "Click Add purchase to add your first item."}</span><button onClick={() => setOpen(true)}>Add purchase</button></div></td></tr>}</tbody>
       </table></div>
-      <div className="pagination-bar"><span>{sortedRows.length ? `${((page - 1) * pageSize + 1).toLocaleString("en-GB")}–${Math.min(page * pageSize, sortedRows.length).toLocaleString("en-GB")} of ${sortedRows.length.toLocaleString("en-GB")}` : "0 rows"}</span><div><button disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))}>← Previous</button><button disabled={page >= totalPages} onClick={() => setPage(current => Math.min(totalPages, current + 1))}>Next →</button></div></div>
+      <div className="pagination-bar">
+        <span>{sortedRows.length ? `${((page - 1) * pageSize + 1).toLocaleString("en-GB")}–${Math.min(page * pageSize, sortedRows.length).toLocaleString("en-GB")} of ${sortedRows.length.toLocaleString("en-GB")}` : "0 rows"}</span>
+        <div className="pagination-bar-controls">
+          <PageSizeSelect value={pageSize} onChange={changePageSize} />
+          <div className="pagination-buttons">
+            <button disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))}>← Previous</button>
+            <button disabled={page >= totalPages} onClick={() => setPage(current => Math.min(totalPages, current + 1))}>Next →</button>
+          </div>
+        </div>
+      </div>
     </div>
     {confirmation && <ConfirmDialog title={confirmation.type === "all" ? "Clear all purchases?" : "Delete this purchase?"} message={confirmation.type === "all" ? `This will permanently remove all ${rows.length.toLocaleString("en-GB")} saved purchase records. This cannot be undone.` : "This purchase will be permanently removed from your history. This cannot be undone."} confirmLabel={confirmation.type === "all" ? "Clear all purchases" : "Delete purchase"} onCancel={() => setConfirmation(null)} onConfirm={() => confirmation.type === "all" ? clearAll() : remove(confirmation.id!)} />}
     {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
+    {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
   </section>;
 }

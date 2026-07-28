@@ -1,6 +1,7 @@
 "use client";
 
 import SpreadsheetImportDialog from "@/components/SpreadsheetImportDialog";
+import { purchasesImportedMessage } from "@/lib/success-messages";
 
 const previewColumns = [
   { key: "order_date", label: "Order Date" },
@@ -23,6 +24,7 @@ export default function PurchaseImportDialog({ onClose, onImported }: { onClose:
     columns={previewColumns}
     itemNoun={{ singular: "purchase", plural: "purchases" }}
     successNote="They now appear in your Purchases list."
+    successHeading={purchasesImportedMessage}
     onClose={onClose}
     onImported={onImported}
   />;

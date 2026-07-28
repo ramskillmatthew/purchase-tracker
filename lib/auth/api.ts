@@ -8,6 +8,15 @@ export function safeApiError(error: unknown, fallback = "Request failed.") {
   if (error instanceof Error && "status" in error && error.status === 400 && /column .* does not exist|schema cache/i.test(error.message)) return NextResponse.json({ error: "The purchase-import database update has not been installed. Run the four purchase-import ALTER TABLE statements in the Supabase SQL Editor, then try again." }, { status: 500 });
   if (error instanceof Error && "status" in error && error.status === 429) return NextResponse.json({ error: error.message }, { status: 429 });
   if (error instanceof Error && "status" in error && error.status === 401) return NextResponse.json({ error: "The Supabase server secret was rejected. Replace SUPABASE_SECRET_KEY in .env.local with the secret key from the same Supabase project as NEXT_PUBLIC_SUPABASE_URL, then restart the app." }, { status: 500 });
-  console.error(fallback, error instanceof Error ? error.name : "UnknownError");
+  // Full detail (name, message, and any upstream status) goes to the
+  // server terminal only — never to the browser response below — so a
+  // failure is diagnosable from server logs without exposing anything
+  // to the client.
+  if (error instanceof Error) {
+    const status = "status" in error ? (error as Error & { status?: unknown }).status : undefined;
+    console.error(fallback, error.name, status !== undefined ? `status=${status}` : "", error.message);
+  } else {
+    console.error(fallback, "UnknownError", error);
+  }
   return NextResponse.json({ error: fallback }, { status: 500 });
 }

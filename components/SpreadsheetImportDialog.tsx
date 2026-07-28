@@ -45,7 +45,7 @@ function displayReason(label: string, reason: string): string {
  * domain-specific belongs in the wrapper, not in this file.
  */
 export default function SpreadsheetImportDialog({
-  title, description, templateHref, previewUrl, commitUrl, columns, itemNoun, successNote, onClose, onImported,
+  title, description, templateHref, previewUrl, commitUrl, columns, itemNoun, successNote, successHeading, onClose, onImported,
 }: {
   title: string;
   description: string;
@@ -55,6 +55,10 @@ export default function SpreadsheetImportDialog({
   columns: { key: string; label: string }[];
   itemNoun: { singular: string; plural: string };
   successNote: string;
+  // Optional themed heading for the confirmed-import count (see
+  // lib/success-messages.ts). Falls back to the plain "N item(s) imported."
+  // wording when not supplied, so this dialog stays usable standalone.
+  successHeading?: (count: number) => string;
   onClose: () => void;
   onImported: () => void;
 }) {
@@ -156,7 +160,7 @@ export default function SpreadsheetImportDialog({
       {result ? (
         <div className="import-success">
           <span aria-hidden="true">✓</span>
-          <h3>{result.created} {result.created === 1 ? itemNoun.singular : itemNoun.plural} imported.</h3>
+          <h3>{successHeading ? successHeading(result.created) : `${result.created} ${result.created === 1 ? itemNoun.singular : itemNoun.plural} imported.`}</h3>
           <p>{successNote}</p>
           <div className="import-dialog-actions"><button type="button" className="button" onClick={onClose}>Done</button></div>
         </div>

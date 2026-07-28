@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Task } from "@/lib/types";
-import { broadcastTasksChanged, compareAllTasks, compareCompletedTasks, compareTodayTasks, compareUpcomingTasks, isTaskDueToday, isTaskOverdue, todayDateString } from "@/lib/tasks";
+import { broadcastTasksChanged, compareAllTasks, compareCompletedTasks, compareTodayTasks, compareUpcomingTasks, isTaskActionableToday, isTaskDueToday, isTaskOverdue, todayDateString } from "@/lib/tasks";
+import { allTasksCompletedMessage, taskCompletedMessage, taskRestoredMessage } from "@/lib/success-messages";
 import TaskRow from "@/components/TaskRow";
 import TaskFormModal from "@/components/TaskFormModal";
 import TaskToast from "@/components/TaskToast";
@@ -31,10 +32,10 @@ function CheckIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true" className="empty-check"><path d="M5 12.5 10 17l9-10" /></svg>;
 }
 
-function EmptyState({ tab, onAdd }: { tab: Tab; onAdd: () => void }) {
+function EmptyState({ tab, onAdd, justCompletedAllToday }: { tab: Tab; onAdd: () => void; justCompletedAllToday: boolean }) {
   if (tab === "completed") return <div className="empty-state empty-left"><span className="empty-icon"><CheckIcon /></span><div><h2>No completed tasks yet.</h2></div></div>;
   const copy: Record<Exclude<Tab, "completed">, { title: string; body: string }> = {
-    today: { title: "You’re all caught up.", body: "No outstanding tasks today." },
+    today: justCompletedAllToday ? allTasksCompletedMessage() : { title: "You’re all caught up.", body: "No outstanding tasks today." },
     upcoming: { title: "Nothing scheduled.", body: "You have no upcoming tasks." },
     all: { title: "No active tasks.", body: "Create a task to get started." },
   };
@@ -77,7 +78,11 @@ export default function TasksPage() {
   const [tab, setTab] = useState<Tab>("today");
   const [modalTask, setModalTask] = useState<Task | null | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
-  const [toastTask, setToastTask] = useState<Task | null>(null);
+  const [toast, setToast] = useState<{ kind: "completed"; task: Task } | { kind: "restored" } | null>(null);
+  // Session-local only (per product decision) — true once a completion has
+  // just emptied the actionable-today bucket. Reset on the next full load()
+  // so a refresh always returns to the neutral empty state.
+  const [justClearedToday, setJustClearedToday] = useState(false);
   const [quickAddValue, setQuickAddValue] = useState("");
   const [quickAddSaving, setQuickAddSaving] = useState(false);
   const quickAddRef = useRef<HTMLInputElement>(null);
@@ -87,6 +92,7 @@ export default function TasksPage() {
       const r = await fetch("/api/tasks");
       if (!r.ok) { const body = await r.json().catch(() => ({})); setError(body.error || "Could not load tasks."); return; }
       setTasks(await r.json());
+      setJustClearedToday(false);
       setError("");
     } catch { setError("Could not load tasks."); }
     finally { setLoading(false); }
@@ -117,17 +123,31 @@ export default function TasksPage() {
     } catch { return false; }
   }
   function settle(task: Task, nextCompleted: boolean) {
-    setTasks(current => current.map(item => item.id === task.id ? { ...item, completed: nextCompleted, completed_at: nextCompleted ? new Date().toISOString() : null } : item));
+    setTasks(current => {
+      const next = current.map(item => item.id === task.id ? { ...item, completed: nextCompleted, completed_at: nextCompleted ? new Date().toISOString() : null } : item);
+      if (nextCompleted) {
+        // task still reflects its pre-completion state here, so this checks
+        // whether it was actually part of today's actionable set before the
+        // update, and whether completing it just emptied that set.
+        const today = todayDateString();
+        const wasActionable = isTaskActionableToday(task, today);
+        const stillActionable = next.some(item => isTaskActionableToday(item, today));
+        if (wasActionable && !stillActionable) setJustClearedToday(true);
+      } else {
+        setJustClearedToday(false);
+      }
+      return next;
+    });
     broadcastTasksChanged();
     // Only a fresh completion offers Undo — reversing via the row menu's
     // own "Mark as not done" is already an intentional action, not
     // something that needs a second confirmation path.
-    if (nextCompleted) setToastTask(task);
+    setToast(nextCompleted ? { kind: "completed", task } : { kind: "restored" });
   }
   async function undoComplete() {
-    if (!toastTask) return;
-    const target = toastTask;
-    setToastTask(null);
+    if (toast?.kind !== "completed") return;
+    const target = toast.task;
+    setToast(null);
     const ok = await toggle(target, false);
     if (ok) settle(target, false);
     else setError("Could not undo — please try again.");
@@ -187,7 +207,7 @@ export default function TasksPage() {
 
       <div className="data-panel">
         {!loading && list.length === 0 ? (
-          <EmptyState tab={tab} onAdd={() => setModalTask(null)} />
+          <EmptyState tab={tab} onAdd={() => setModalTask(null)} justCompletedAllToday={justClearedToday} />
         ) : tab === "completed" ? (
           <CompletedGroups tasks={list} handlers={handlers} />
         ) : (
@@ -204,7 +224,8 @@ export default function TasksPage() {
 
       {modalTask !== undefined && <TaskFormModal task={modalTask} onClose={() => setModalTask(undefined)} onSaved={load} />}
       {deleteTarget && <ConfirmDialog title="Delete this task?" message={`"${deleteTarget.title}" will be permanently deleted. This cannot be undone.`} confirmLabel="Delete task" onConfirm={confirmDelete} onCancel={() => setDeleteTarget(null)} />}
-      {toastTask && <TaskToast message="✓ Task completed" actionLabel="Undo" onAction={() => void undoComplete()} onDismiss={() => setToastTask(null)} />}
+      {toast?.kind === "completed" && <TaskToast message={taskCompletedMessage()} actionLabel="Undo" onAction={() => void undoComplete()} onDismiss={() => setToast(null)} />}
+      {toast?.kind === "restored" && <TaskToast message={taskRestoredMessage()} onDismiss={() => setToast(null)} />}
     </section>
   );
 }

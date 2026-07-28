@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { draftFor, type Draft, type Edit } from "@/lib/purchase-import/draft";
 import { poundsToPence } from "@/lib/purchase-import/allocate";
+import { purchasesAddedMessage } from "@/lib/success-messages";
 
 const conditions = ["Brand new", "Brand new without tags", "Labelled as very good condition", "Good condition from photos", "Decent condition from photos"];
 
@@ -172,7 +173,11 @@ export default function PurchaseImportPage() {
     const body = await r.json();
     if (r.ok) {
       const blockedNote = body.blocked ? ` ${body.blocked} blocked (${(body.blockedReasons || []).join(", ") || "conflict"}) — see the order(s) above for details.` : "";
-      setMessage(`Imported ${body.inserted}; duplicates excluded ${body.duplicates}; total £${body.total}.${blockedNote}`);
+      // Only genuinely-saved records earn the catchphrase — a batch that
+      // resolved to zero inserted rows (e.g. all duplicates) keeps the
+      // plain, professional wording instead.
+      const headline = body.inserted > 0 ? purchasesAddedMessage(body.inserted) : `Imported ${body.inserted}`;
+      setMessage(`${headline}; duplicates excluded ${body.duplicates}; total £${body.total}.${blockedNote}`);
       setLastBatchIds(body.insertedIds || []); await load();
     } else setError(body.error || "Import failed.");
     setBusy(false);

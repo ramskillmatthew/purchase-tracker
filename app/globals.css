@@ -58,11 +58,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .app-icon { width: 20px; height: 20px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 50; display: flex; width: 232px; padding: 20px 14px 14px; flex-direction: column; color: var(--sidebar-text); background: var(--sidebar); }
-.product-logo { display: flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; }
-.product-logo-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; color: white; font-size: 14px; font-weight: 800; background: linear-gradient(145deg, #7c74ff, #5046e5); box-shadow: 0 8px 22px rgba(99, 91, 255, .28); }
-.product-logo > span:last-child { display: flex; flex-direction: column; line-height: 1; }
-.product-logo strong { font-size: 15px; letter-spacing: -.02em; }
-.product-logo small { margin-top: 5px; color: #858b9b; font-size: 10px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+.brand-link { display: block; padding: 4px 11px 6px; color: inherit; text-decoration: none; }
+.brand-wordmark { display: flex; flex-direction: column; gap: 6px; }
+.brand-title { position: relative; overflow: visible; color: #ffffff; font-size: 19px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
+.brand-e-wrap { position: relative; display: inline-block; }
+.brand-cap { position: absolute; top: -7px; right: -9px; width: 23px; max-width: none; height: auto; pointer-events: none; }
+.brand-subtitle { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.brand-subtitle-line { width: 32px; height: 1.75px; flex: 0 0 auto; background: rgba(201,167,107,.7); }
+.brand-subtitle-text { color: var(--muted); font-size: 10.5px; font-weight: 650; letter-spacing: .3em; white-space: nowrap; }
 .sidebar-label { margin: 28px 10px 8px; color: #626878; font-size: 9px; font-weight: 750; letter-spacing: .16em; text-transform: uppercase; }
 .sidebar-nav { display: flex; flex-direction: column; gap: 5px; }
 .sidebar-link { position: relative; display: flex; min-height: 40px; padding: 0 11px; align-items: center; gap: 11px; border-radius: 9px; color: #989eae; font-size: 13px; font-weight: 620; text-decoration: none; transition: color 150ms ease, background 150ms ease, transform 150ms ease; }
@@ -175,12 +178,15 @@ h1 { margin: 0; color: var(--text); font-size: 1.65rem; font-weight: 710; letter
 .expense-grid thead th { position: sticky; top: 0; z-index: 2; height: 34px; padding: 0 12px !important; border-right: 1px solid var(--line); background: var(--surface-2); font-size: 9px; }
 .expense-grid tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 56%, var(--surface)); }
 .expense-grid tbody td { height: 38px; padding: 6px 12px !important; border-right: 1px solid var(--line); font-size: 11px; }
-.pagination-bar { display: flex; min-height: 38px; padding: 5px 10px; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); background: var(--surface-2); }
+.pagination-bar { display: flex; min-height: 38px; padding: 5px 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); background: var(--surface-2); }
 .pagination-bar > span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
-.pagination-bar > div { display: flex; gap: 5px; }
+.pagination-bar-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pagination-buttons { display: flex; gap: 5px; }
 .pagination-bar button { min-height: 27px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 9px; font-weight: 650; }
 .pagination-bar button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-3); }
 .pagination-bar button:disabled { cursor: not-allowed; opacity: .4; }
+.page-size-select { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 650; white-space: nowrap; }
+.page-size-select .input { width: auto; min-height: 27px; height: 27px; padding: 0 8px; border-radius: 6px; font-size: 10px; }
 
 .form-region { margin-bottom: 16px; animation: reveal 200ms ease-out; }
 .purchase-form { overflow: auto; max-height: calc(100vh - 120px); padding: 0 !important; }
@@ -842,10 +848,11 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 @media (max-width: 900px) {
   .sidebar { display: none; }
   .mobile-topbar { position: sticky; top: 0; z-index: 50; display: flex; min-height: 56px; padding: 0 14px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(18px); }
-  .mobile-topbar .product-logo { color: var(--text); }
-  .mobile-topbar .product-logo-icon { width: 31px; height: 31px; border-radius: 9px; }
-  .mobile-topbar .product-logo strong { font-size: 13px; }
-  .mobile-topbar .product-logo small { color: var(--muted); }
+  .mobile-topbar .brand-link { min-width: 0; flex: 1 1 auto; margin-right: 10px; padding: 2px 0; color: var(--text); }
+  .mobile-topbar .brand-title { font-size: 17px; }
+  .mobile-topbar .brand-cap { width: 19px; top: -3px; right: -8px; }
+  .mobile-topbar .brand-subtitle-line { width: 24px; }
+  .mobile-topbar .brand-subtitle-text { font-size: 9px; letter-spacing: .25em; }
   .mobile-theme { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--surface); }
   /* 9 nav items (Tasks added) at phone widths: sized down slightly from the
      original 8-item bar, and the label is defensively truncated with an
@@ -901,6 +908,8 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .compact-form-actions > div .button-secondary:only-child { grid-column: 1 / -1; }
   .data-panel { border-radius: 10px; }
   .table-toolbar { min-height: 54px; padding: 9px 12px; }
+  .pagination-bar { flex-direction: column; align-items: stretch; }
+  .pagination-bar-controls { justify-content: space-between; }
   .empty-state { min-height: 130px; padding: 18px 12px; }
   .purchase-topbar { grid-template-columns: 1fr; gap: 10px; }
   .purchase-topbar h1 { font-size: 1.45rem; }
