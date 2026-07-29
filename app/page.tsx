@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Expense, Purchase } from "@/lib/types";
 import TodaysTasksCard from "@/components/TodaysTasksCard";
 import { computeHomeReport, periods, type Period } from "@/lib/home-report";
+import { awaitingArrivalItemsLabel, awaitingArrivalMessage, calculateAwaitingArrivalValue, countAwaitingArrival } from "@/lib/purchases";
 
 const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const shortMoney = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
@@ -30,6 +31,14 @@ export default function HomePage() {
   }, []);
 
   const report = useMemo(() => computeHomeReport(period, purchases, expenses), [period, purchases, expenses]);
+  // Total outstanding stock purchases — deliberately independent of `period`
+  // (the Compare period switch above only scopes the spend/source cards),
+  // since "how much am I still waiting on" is always a current, all-time fact.
+  // Both figures are derived from the same already-fetched `purchases` array
+  // (no extra request) and share the identical isAwaitingArrival eligibility
+  // rule, so the count and value can never disagree about which rows count.
+  const awaitingArrival = useMemo(() => countAwaitingArrival(purchases), [purchases]);
+  const awaitingArrivalValue = useMemo(() => calculateAwaitingArrivalValue(purchases), [purchases]);
 
   return <section className="page-shell home-page">
     <header className="home-header">
@@ -47,6 +56,19 @@ export default function HomePage() {
       <article><span>Stock spend</span><strong>{loading ? "—" : money.format(report.stockSpend)}</strong><small>{period === "all-time" ? "Purchases across all time" : "Purchases in period"}</small></article>
       <article><span>Business expenses</span><strong>{loading ? "—" : money.format(report.expenseSpend)}</strong><small>{period === "all-time" ? "Expenses across all time" : "Expenses in period"}</small></article>
       <article className="summary-total"><span>Total spend</span><strong>{loading ? "—" : money.format(report.stockSpend + report.expenseSpend)}</strong><small>Stock + expenses</small></article>
+      <article
+        className={loading ? "summary-arrival" : "summary-arrival summary-clickable"}
+        role={loading ? undefined : "button"}
+        tabIndex={loading ? undefined : 0}
+        aria-label={loading ? undefined : `${awaitingArrivalMessage(awaitingArrival)}, ${money.format(awaitingArrivalValue)} stock value. View not arrived purchases.`}
+        title={loading ? undefined : awaitingArrivalMessage(awaitingArrival)}
+        onClick={loading ? undefined : () => router.push("/purchases?arrived=not-arrived")}
+        onKeyDown={loading ? undefined : event => { if (event.key === "Enter") router.push("/purchases?arrived=not-arrived"); }}
+      >
+        <span>Awaiting arrival</span>
+        <strong>{loading ? "—" : awaitingArrivalItemsLabel(awaitingArrival)}</strong>
+        <small>{loading ? "" : `${money.format(awaitingArrivalValue)} stock value`}</small>
+      </article>
     </div>
 
     <TodaysTasksCard />
