@@ -67,7 +67,8 @@ export default function HomePage() {
       >
         <span>Awaiting arrival</span>
         <strong>{loading ? "—" : awaitingArrivalItemsLabel(awaitingArrival)}</strong>
-        <small>{loading ? "" : `${money.format(awaitingArrivalValue)} stock value`}</small>
+        <span className="summary-arrival-value" title={loading ? undefined : `${money.format(awaitingArrivalValue)} stock value`}>{loading ? "—" : money.format(awaitingArrivalValue)}</span>
+        <small>Stock value</small>
       </article>
     </div>
 
