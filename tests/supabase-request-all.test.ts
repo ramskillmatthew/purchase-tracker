@@ -188,3 +188,49 @@ describe("supabaseRequestAll — strengthened against a server-side page cap sma
     expect(ids).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 });
+
+describe("supabaseRequestAll — REGRESSION: PGRST103 (\"Requested range not satisfiable\")", () => {
+  // Root cause, confirmed live against a real Supabase project: this
+  // function always paginates via its own Range header. If `path` already
+  // carries an explicit `?limit=1` and the true matching-row count exceeds
+  // 1, the first page returns Content-Range "0-0/N" (1 row, total N) —
+  // this function then requests a second page ("Range: 1-1000") to try to
+  // reach that total, and PostgREST rejects that exact combination with
+  // PGRST103 (previously reproduced verbatim: a Range header with a
+  // nonzero offset alongside a query-string `limit=` is invalid). The fix
+  // is to fail fast before ever sending a request, not to catch the error
+  // after the fact.
+  it("throws immediately (no fetch at all) when the path already has an explicit limit= parameter", async () => {
+    await expect(supabaseRequestAll("listing_draft_images?select=sort_order&order=sort_order.desc&limit=1")).rejects.toThrow(/limit\/offset/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws immediately when the path has limit= combined with other filters (&limit=, not just ?limit=)", async () => {
+    await expect(supabaseRequestAll("listing_draft_images?draft_id=eq.x&select=id&limit=1")).rejects.toThrow(/limit\/offset/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws immediately when the path has an explicit offset= parameter", async () => {
+    await expect(supabaseRequestAll("purchases?select=*&offset=5")).rejects.toThrow(/limit\/offset/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never sends an invalid negative-width Range header — a zero pageSize returns an empty array instead of computing 'from-(-1)'", async () => {
+    const result = await supabaseRequestAll("purchases?select=*", { pageSize: 0 });
+    expect(result).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("also treats a negative pageSize as \"nothing requested\" rather than sending a malformed Range", async () => {
+    const result = await supabaseRequestAll("purchases?select=*", { pageSize: -1 });
+    expect(result).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a path with no limit/offset and a normal pageSize is completely unaffected by the new guard", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponseWithRange(rowsOf(2, 0), "0-1/2"));
+    const result = await supabaseRequestAll("purchases?select=*", { pageSize: 5 });
+    expect(result).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

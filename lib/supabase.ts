@@ -83,9 +83,33 @@ function parseContentRange(header: string): { end: number; total: number | null 
  * If any page request fails, or the defensive maxPages ceiling is hit,
  * this throws rather than returning whatever was accumulated so far —
  * callers must never receive a silently partial dataset.
+ *
+ * REGRESSION GUARD: `path` must never already carry its own `limit=`/
+ * `offset=` query parameter. This function paginates via its own `Range`
+ * header, which conflicts with an explicit `limit=` the moment the Range
+ * header's offset advances past that limit — PostgREST responds with
+ * `PGRST103 "Requested range not satisfiable"` (confirmed live against a
+ * real Supabase project: `Range: 0-999` + `?limit=1` succeeds, but the very
+ * next page, `Range: 1-1000` + `?limit=1`, is rejected outright). A caller
+ * that only wants a bounded/top-N result should call supabaseRequest()
+ * directly instead — this function's entire contract is "fetch every
+ * matching row", which is inherently incompatible with a caller-supplied
+ * cap. Fails fast with a clear error before ever sending a request, rather
+ * than letting a bad Range reach PostgREST.
  */
 export async function supabaseRequestAll<T>(path: string, options?: { pageSize?: number; maxPages?: number }): Promise<T[]> {
+  if (/[?&](limit|offset)=/.test(path)) {
+    throw new Error(
+      `supabaseRequestAll(): "${path.split("?")[0]}" already has an explicit limit/offset query parameter, which conflicts with this function's own Range-based pagination and can produce an invalid PostgREST range (PGRST103) once matching rows exceed that limit. Use supabaseRequest() directly for a bounded query instead.`,
+    );
+  }
+
   const pageSize = options?.pageSize ?? DEFAULT_PAGE_SIZE;
+  // A zero/negative page size would compute an inverted Range (e.g.
+  // "0--1") — nothing was ever requested, so the correct, safe result is
+  // simply no rows, not a request PostgREST would reject.
+  if (pageSize <= 0) return [];
+
   const maxPages = options?.maxPages ?? DEFAULT_MAX_PAGES;
   const results: T[] = [];
   let from = 0;
