@@ -142,3 +142,33 @@ export async function deleteStorageObject(bucket: string, path: string): Promise
   });
   if (!response.ok) throw new Error(`Could not delete the Storage object (${response.status}): ${await response.text()}`);
 }
+
+// A defensive cap on how many prefixes go in one DELETE request body — not
+// a documented hard Supabase Storage limit, just a sane ceiling well under
+// any observed real one, so a full workspace clear (potentially hundreds of
+// photos) batches into a handful of requests instead of either one giant
+// request or one request per photo.
+export const STORAGE_DELETE_BATCH_SIZE = 100;
+
+/**
+ * Deletes many objects from one bucket, batched (the same DELETE
+ * {prefixes: [...]} endpoint deleteStorageObject uses above, just with
+ * more than one path per call). Throws on the first failing batch rather
+ * than swallowing it — callers that need "delete everything, or report
+ * exactly what happened and change nothing else" (see
+ * app/api/listing-studio/workspace/route.ts's DELETE handler) rely on this
+ * to stop before touching anything else once a batch fails.
+ */
+export async function deleteStorageObjects(bucket: string, paths: string[]): Promise<void> {
+  const { url } = config();
+  for (let i = 0; i < paths.length; i += STORAGE_DELETE_BATCH_SIZE) {
+    const batch = paths.slice(i, i + STORAGE_DELETE_BATCH_SIZE);
+    if (!batch.length) continue;
+    const response = await fetch(`${url}/storage/v1/object/${bucket}`, {
+      method: "DELETE",
+      headers: storageHeaders(),
+      body: JSON.stringify({ prefixes: batch }),
+    });
+    if (!response.ok) throw new Error(`Could not delete ${batch.length} Storage object(s) (${response.status}): ${await response.text()}`);
+  }
+}

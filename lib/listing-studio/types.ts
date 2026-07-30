@@ -126,7 +126,7 @@ export type ListingDraftImage = {
   createdAt: string;
 };
 
-export const listingAnalysisStages = ["image_quality", "label_extraction", "visual_identification", "consistency_check", "generation"] as const;
+export const listingAnalysisStages = ["image_quality", "label_extraction", "visual_identification", "consistency_check", "generation", "product_grouping"] as const;
 export type ListingAnalysisStage = typeof listingAnalysisStages[number];
 
 export const listingAnalysisRunStatuses = ["running", "success", "failed"] as const;

@@ -86,7 +86,13 @@ describe("supabase-listing-studio.sql — Milestone 2 additions", () => {
 });
 
 describe("supabase-listing-studio.sql — listing_studio_delete_group (group deletion UX fix)", () => {
-  const fn = migration.slice(migration.indexOf("function public.listing_studio_delete_group"), migration.indexOf("-- Matches the existing function-access pattern"));
+  // Scoped to exactly this function's own body (not the wider "everything
+  // up to the shared trailing comment" span) — later RPCs added after this
+  // one (apply_boundary_session, clear_workspace) also contain their own
+  // "delete from public.listing_draft_images"/"delete from public.listing_drafts"
+  // statements, which a looser slice would incorrectly pick up via
+  // lastIndexOf/indexOf below.
+  const fn = migration.slice(migration.indexOf("function public.listing_studio_delete_group"), migration.indexOf("function public.listing_studio_apply_boundary_session"));
 
   it("rejects an unrecognized mode before touching any data", () => {
     expect(fn).toContain("INVALID_MODE");

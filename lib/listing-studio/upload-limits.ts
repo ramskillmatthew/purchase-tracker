@@ -49,6 +49,56 @@ export function isAcceptedImageMimeType(mimeType: string): mimeType is AcceptedI
   return (ACCEPTED_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType);
 }
 
+// Automatic AI product grouping (Milestone 3): how many Unsorted photos ONE
+// server request (one Claude call) analyses. Chosen against this route's
+// own `maxDuration = 60` (matching the ceiling already used elsewhere for
+// AI-calling routes — see app/api/vinted/sync/route.ts, app/api/assistant/route.ts):
+// downloading/decoding/resizing 40 images with bounded concurrency plus one
+// vision call comfortably fits inside 60s with real margin, whereas a much
+// larger single request risks the model call alone taking long enough to
+// blow the ceiling.
+//
+// A full "Auto-group products" click is NOT limited to this many photos,
+// though — components/listing-studio/GroupingWorkspace.tsx slices the
+// whole eligible Unsorted set (up to MAX_AUTO_GROUP_SESSION_SIZE) into
+// chunks of this size and calls the ANALYZE route once per chunk
+// automatically, in sequence, behind the one click. This keeps every
+// individual HTTP request small and safely bounded while still processing
+// a full multi-product photography session without the user ever clicking
+// twice. Each chunk is only ANALYSED independently — see
+// app/api/listing-studio/groups/auto-group/apply-session/route.ts, which
+// reconciles every chunk's result together and applies the whole session
+// in one all-or-nothing transaction only once every chunk is done, so a
+// physical product can never be split across a chunk boundary and left
+// half-applied.
+export const MAX_AUTO_GROUP_BATCH_SIZE = 40;
+
+// The target for one full "Auto-group products" click: roughly 30 products
+// worth of photos in a typical session. At MAX_AUTO_GROUP_BATCH_SIZE this is
+// ⌈250/40⌉ = 7 sequential chunk requests. If Unsorted holds more than this
+// many eligible photos, only the oldest (by sort_order) are analysed this
+// run; the remainder is simply picked up by clicking "Auto-group products"
+// again.
+export const MAX_AUTO_GROUP_SESSION_SIZE = 250;
+
+// How many photos from the tail of the previous chunk are shown again,
+// read-only, as context for the next chunk — enough for the model to judge
+// whether the new chunk's first photo continues the same physical product
+// across the chunk boundary (see AUTO_GROUP_SYSTEM_PROMPT's
+// `continuesFromPreviousChunk` instructions) without meaningfully growing
+// request size.
+export const CHUNK_OVERLAP_SIZE = 5;
+
+// Resize ceiling for photos sent to Claude for grouping analysis — grouping
+// only needs enough visual detail to tell products apart, not fine label
+// text (that's a later, per-product pass), so this can be well under
+// Anthropic's own ~1568px-per-side internal limit to keep both the
+// server's own processing and the request payload smaller. Never applied
+// to the stored original — only to the copy built in-memory for this one
+// API call (lib/listing-studio/auto-group-image-input.ts).
+export const AUTO_GROUP_IMAGE_MAX_DIMENSION_PX = 1024;
+export const AUTO_GROUP_IMAGE_JPEG_QUALITY = 78;
+
 // See lib/listing-studio/client-image-processing.ts — HEIC/HEIF genuinely
 // cannot be decoded server-side by this app's stack (verified live during
 // Milestone 2: sharp's bundled libheif reads HEIC container metadata but

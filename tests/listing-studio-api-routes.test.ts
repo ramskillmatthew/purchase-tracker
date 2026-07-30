@@ -280,12 +280,237 @@ describe("app/api/listing-studio/groups/split/route.ts — automatic Product-N n
   });
 });
 
-describe("app/api/listing-studio/workspace/route.ts", () => {
+describe("app/api/listing-studio/groups/auto-group/route.ts — ANALYZE ONLY, one ordered chunk per call (Milestone 3 v3: ordered boundary detection)", () => {
+  const source = read("app/api/listing-studio/groups/auto-group/route.ts");
+
+  it("requires the owner and never handles any other HTTP method", () => {
+    expect(source).toContain("await requireOwner()");
+    expect(source).not.toMatch(/export async function (GET|PUT|DELETE|PATCH)/);
+  });
+
+  it("has a bounded maxDuration matching the ceiling already used for this app's other AI-calling routes (app/api/vinted/sync, app/api/assistant)", () => {
+    expect(source).toContain("export const maxDuration = 60;");
+  });
+
+  it("takes an explicit imageIds chunk, optional overlap context, and this chunk's own sequence start from the client — a full run is a client-driven loop of many small, bounded, ORDERED calls", () => {
+    expect(source).toContain("autoGroupAnalyzeRequestSchema.parse(await request.json())");
+    expect(source).toContain("chunkStartSequenceIndex");
+    expect(source).toContain("overlapImageIds");
+  });
+
+  it("only ever reads photos from whichever Unsorted group currently exists — the exact same find lookup as the uploads route, never a client-supplied group id", () => {
+    expect(source).toContain('title=eq.${encodeURIComponent(UNSORTED_TITLE)}&status=in.(uploading,grouping)');
+  });
+
+  it("REGRESSION: never trusts the client's ids blindly — re-verifies every id (both the chunk's own photos and any overlap context) against this owner's current Unsorted group and upload_state before using any of them", () => {
+    const fn = source.slice(source.indexOf("const allRequestedIds ="), source.indexOf("const chunkImages ="));
+    expect(fn).toContain("owner_id=eq.${user.id}");
+    expect(fn).toContain("draft_id=eq.${unsortedDraftId}");
+    expect(fn).toContain("upload_state=eq.uploaded");
+  });
+
+  it("REGRESSION: reconstructs exact sequence order after image preparation, since prepareAutoGroupImageInputs does not preserve input order — this is load-bearing, since sequence-index labelling depends on the model seeing photos in true upload order", () => {
+    expect(source).toContain("const blockById = new Map(blocks.map(block => [block.imageId, block]));");
+    expect(source).toContain("chunkImages.map(image => blockById.get(image.id))");
+    expect(source).toContain("overlapImages.map(image => blockById.get(image.id))");
+  });
+
+  it("never applies or moves anything — this route only calls runAutoGroupAnalysis and returns its raw (unreconciled) data; reconciliation and apply happen only in apply-session/route.ts", () => {
+    expect(source).not.toContain("rpc/listing_studio_apply_boundary_session");
+    expect(source).not.toContain("reconcileAutoGroupSession");
+    expect(source).toContain("const outcome = await runAutoGroupAnalysis(orderedChunkBlocks, chunkStartSequenceIndex, orderedOverlapBlocks);");
+    expect(source).toContain("return NextResponse.json({ data: outcome.data });");
+  });
+
+  it("records an audit row on both success and failure — stage, model, prompt/schema version, and timestamps are always populated", () => {
+    for (const field of ['stage: "product_grouping"', "model,", "prompt_version: LISTING_PROMPT_VERSIONS.product_grouping", "schema_version: LISTING_SCHEMA_VERSIONS.product_grouping", "started_at", "completed_at"]) {
+      expect(source).toContain(field);
+    }
+    expect(source).toContain('status: "failed"');
+    expect(source).toContain('status: "success"');
+  });
+
+  it("never stores the raw AI failure — only the fixed, safe describeAutoGroupFailure message", () => {
+    const fn = source.slice(source.indexOf('outcome.status !== "success"'), source.indexOf("const status = outcome.status"));
+    expect(fn).toContain("error_message: describeAutoGroupFailure(outcome.status)");
+  });
+
+  it("REGRESSION: distinguishes 'not configured' (503 — stop the whole client-side chunk loop, every remaining chunk would fail identically) from any other AI failure (502 — this one chunk failed, possibly transiently; the loop continues with the next chunk)", () => {
+    expect(source).toContain('const status = outcome.status === "not_configured" ? 503 : 502;');
+    expect(source).toContain("error: describeAutoGroupFailure(outcome.status)");
+    expect(source).toContain("{ status });");
+  });
+
+  it("returns a clean empty result — never an error — when nothing in this chunk is still eligible (no Unsorted group, none of the given ids still validate, or nothing survives image preparation)", () => {
+    expect(source.match(/return NextResponse\.json\(\{ data: \{ groups: \[\], ungroupedImageIds: \[\] \} \}\);/g)?.length).toBe(3);
+  });
+
+  it("catches everything through safeApiError, matching every other route in this feature", () => {
+    expect(source).toContain('return safeApiError(error, "Could not analyse these photos.");');
+  });
+});
+
+describe("app/api/listing-studio/groups/auto-group/apply-session/route.ts — the ONLY place a whole 'Auto-group products' session is ever written (Milestone 3 v3)", () => {
+  const source = read("app/api/listing-studio/groups/auto-group/apply-session/route.ts");
+
+  it("requires the owner, validates the whole-session request body strictly, and has a bounded maxDuration", () => {
+    expect(source).toContain("await requireOwner()");
+    expect(source).toContain("applyAutoGroupSessionRequestSchema.parse(await request.json())");
+    expect(source).toContain("export const maxDuration = 30;");
+  });
+
+  it("REGRESSION: reconciles every chunk's result together BEFORE applying anything — never applies one chunk's result on its own", () => {
+    const reconcileIndex = source.indexOf("reconcileAutoGroupSession(chunkResults, imageIds.map(id => ({ id })));");
+    const rpcIndex = source.indexOf('"rpc/listing_studio_apply_boundary_session"');
+    expect(reconcileIndex).toBeGreaterThan(-1);
+    expect(rpcIndex).toBeGreaterThan(reconcileIndex);
+  });
+
+  it("calls the whole-session transactional RPC exactly once with every accepted high-confidence group together — never one RPC call per group", () => {
+    expect(source.match(/supabaseRequest\("rpc\/listing_studio_apply_boundary_session"/g)?.length).toBe(1);
+    expect(source).toContain("p_groups: plannedGroups.map(g => ({ title: g.title, image_ids: g.image_ids })),");
+  });
+
+  it("computes each new group's name via the shared automatic-naming helper, updating its own in-memory copy so no two groups in the same session collide on the same name", () => {
+    const plannedGroupsIndex = source.indexOf("const plannedGroups =");
+    const fn = source.slice(plannedGroupsIndex, source.indexOf("try {", plannedGroupsIndex));
+    expect(fn).toContain("getNextAutomaticGroupName(existingTitles)");
+    expect(fn).toContain("existingTitles.push(");
+  });
+
+  it("REGRESSION: if the RPC call fails, the whole session's apply is treated as failed (409) — never partially reported as success", () => {
+    const catchBlock = source.slice(source.indexOf("} catch (error) {"), source.indexOf("const proposedGroups ="));
+    expect(catchBlock).toContain("classifyListingStudioRpcError(error)");
+    expect(catchBlock).toContain("status: 409");
+    expect(catchBlock).not.toContain("groupsCreated =");
+  });
+
+  it("never returns the raw provider/DB error to the client — only the classified message or a safe generic fallback", () => {
+    const catchBlock = source.slice(source.indexOf("} catch (error) {"), source.indexOf("const proposedGroups ="));
+    expect(catchBlock).toContain('return NextResponse.json({ error: known ?? "Could not apply this session\'s groups." }, { status: 409 });');
+  });
+
+  it("medium-confidence ranges are returned to the client as proposedGroups for individual review — never auto-applied", () => {
+    const fn = source.slice(source.indexOf("const proposedGroups ="), source.indexOf("const photosGroupedCount ="));
+    expect(fn).toContain("reconciled.needsReview.map(");
+    expect(source).not.toMatch(/needsReview[\s\S]{0,80}rpc\//);
+  });
+
+  it("records an audit row on both success and failure — stage, model, prompt/schema version, and timestamps are always populated", () => {
+    for (const field of ['stage: "product_grouping"', "model,", "prompt_version: LISTING_PROMPT_VERSIONS.product_grouping", "schema_version: LISTING_SCHEMA_VERSIONS.product_grouping", "started_at", "completed_at"]) {
+      expect(source).toContain(field);
+    }
+    expect(source).toContain('status: "failed"');
+    expect(source).toContain('status: "success"');
+  });
+
+  it("returns a clean zero-result — never an error — when there is no Unsorted group left to apply into", () => {
+    expect(source).toContain("if (!unsorted.length) {");
+    expect(source).toContain("groupsCreated: [], proposedGroups: [], photosGroupedCount: 0, photosPendingReviewCount: 0, photosLeftInUnsortedCount: 0");
+  });
+
+  it("catches everything through safeApiError, matching every other route in this feature", () => {
+    expect(source).toContain('return safeApiError(error, "Could not apply this session\'s groups.");');
+  });
+});
+
+describe("app/api/listing-studio/groups/auto-group/apply/route.ts — applying one reviewed medium-confidence proposal", () => {
+  const source = read("app/api/listing-studio/groups/auto-group/apply/route.ts");
+
+  it("requires the owner and validates the request body strictly", () => {
+    expect(source).toContain("await requireOwner()");
+    expect(source).toContain("applyAutoGroupProposalRequestSchema.parse(await request.json())");
+  });
+
+  it("only the photo ids are taken from the client — the Unsorted group is looked up fresh here, never trusted from an earlier response", () => {
+    expect(source).toContain('title=eq.${encodeURIComponent(UNSORTED_TITLE)}&status=in.(uploading,grouping)');
+    expect(source).not.toContain("unsortedDraftId:");
+  });
+
+  it("computes the destination name via the shared automatic-naming helper, from a fresh query of the caller's current groups", () => {
+    expect(source).toContain("getNextAutomaticGroupName(existingDrafts)");
+  });
+
+  it("applies via the same shared helper as the analyze route's own high-confidence auto-apply — one transactional split RPC call, not a new code path", () => {
+    expect(source).toContain("await applyAutoGroupProposal(user, unsorted[0].id, imageIds, title)");
+  });
+
+  it("fails safely with a classified error, never a raw one, when the underlying photos have since moved", () => {
+    expect(source).toContain("if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 });");
+  });
+});
+
+describe("app/api/listing-studio/workspace/route.ts — GET (fetches the Create workspace)", () => {
   const source = read("app/api/listing-studio/workspace/route.ts");
+  const getFn = source.slice(source.indexOf("export async function GET"), source.indexOf("export async function DELETE"));
+
   it("never returns the raw storage_path to the client — only image metadata and ids used with the /view route", () => {
-    expect(source).not.toContain("storage_path");
+    expect(getFn).not.toContain("storage_path");
   });
   it("excludes archived drafts from the Create workspace", () => {
-    expect(source).toContain("status=neq.archived");
+    expect(getFn).toContain("status=neq.archived");
+  });
+});
+
+describe("app/api/listing-studio/workspace/route.ts — DELETE ('Clear all', workspace-wide reset)", () => {
+  const source = read("app/api/listing-studio/workspace/route.ts");
+  const deleteFn = source.slice(source.indexOf("export async function DELETE"), source.length);
+
+  it("requires the owner, and scopes the image-resolution query to that owner alone — never a client-supplied owner/id", () => {
+    expect(deleteFn).toContain("await requireOwner()");
+    expect(deleteFn).toContain("listing_draft_images?owner_id=eq.${user.id}&select=id,storage_path&order=id.asc");
+  });
+
+  it("REGRESSION: resolves Storage paths and deletes Storage objects BEFORE calling the database-clearing RPC — the reverse order from the single-group delete route, deliberately", () => {
+    const resolveIndex = deleteFn.indexOf("supabaseRequestAll<{ id: string; storage_path: string }>");
+    const storageDeleteIndex = deleteFn.indexOf("await deleteStorageObjects(LISTING_STUDIO_BUCKET, uniquePaths)");
+    const rpcIndex = deleteFn.indexOf('"rpc/listing_studio_clear_workspace"');
+    expect(resolveIndex).toBeGreaterThan(-1);
+    expect(storageDeleteIndex).toBeGreaterThan(resolveIndex);
+    expect(rpcIndex).toBeGreaterThan(storageDeleteIndex);
+  });
+
+  it("re-validates every resolved storage path's shape and ownership independently, even though it came from this owner's own database rows, never accepting a path from the client at all (there is no client input to this endpoint)", () => {
+    expect(deleteFn).toContain("const parsed = parseDraftImageStoragePath(image.storage_path);");
+    expect(deleteFn).toContain("if (!parsed || parsed.ownerId !== user.id)");
+    expect(deleteFn).toContain("warnings.push(");
+  });
+
+  it("REGRESSION: deduplicates storage paths before deleting", () => {
+    expect(deleteFn).toContain("const uniquePaths = [...new Set(validPaths)];");
+  });
+
+  it("REGRESSION: a Storage deletion failure aborts before any database row is touched — the RPC is never reached, and the message says nothing was deleted", () => {
+    const storageCatch = deleteFn.slice(deleteFn.indexOf("await deleteStorageObjects"), deleteFn.indexOf("let counts:"));
+    expect(storageCatch).toContain("stage: \"storage\"");
+    expect(storageCatch).toContain("Nothing was deleted");
+    expect(storageCatch).not.toContain("rpc/listing_studio_clear_workspace");
+  });
+
+  it("REGRESSION: a database deletion failure (after Storage succeeded) is reported with a distinct message and stage, since real files are already gone at that point", () => {
+    const dbCatch = deleteFn.slice(deleteFn.indexOf("let counts:"), deleteFn.indexOf("deletedImageCount: counts.deleted_image_count"));
+    expect(dbCatch).toContain("stage: \"database\"");
+    expect(dbCatch).toContain("removed from storage, but clearing the remaining records failed");
+  });
+
+  it("calls the one dedicated RPC exactly once with only the owner id — no per-image or per-group delete calls", () => {
+    expect(deleteFn.match(/supabaseRequest\("rpc\/listing_studio_clear_workspace"/g)?.length).toBe(1);
+    expect(deleteFn).toContain("body: JSON.stringify({ p_owner_id: user.id })");
+  });
+
+  it("returns deleted image/group/draft/Storage-object counts and any warnings — deletedDraftCount mirrors deletedGroupCount since this schema has one table for both", () => {
+    expect(deleteFn).toContain("deletedImageCount: counts.deleted_image_count,");
+    expect(deleteFn).toContain("deletedGroupCount: counts.deleted_group_count,");
+    expect(deleteFn).toContain("deletedDraftCount: counts.deleted_group_count,");
+    expect(deleteFn).toContain("deletedStorageObjectCount: uniquePaths.length,");
+    expect(deleteFn).toContain("warnings,");
+  });
+
+  it("catches everything through safeApiError, matching every other route in this feature", () => {
+    expect(deleteFn).toContain('return safeApiError(error, "Could not clear the workspace.");');
+  });
+
+  it("has a bounded maxDuration, matching the convention for a potentially-long-running route in this feature", () => {
+    expect(source).toContain("export const maxDuration = 30;");
   });
 });

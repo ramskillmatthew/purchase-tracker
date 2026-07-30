@@ -6,7 +6,9 @@ import {
   createSignedDownloadUrl,
   createSignedUploadUrl,
   deleteStorageObject,
+  deleteStorageObjects,
   getStorageObjectMetadata,
+  STORAGE_DELETE_BATCH_SIZE,
   StorageBucketMissingError,
 } from "@/lib/listing-studio/storage-rest";
 
@@ -126,6 +128,41 @@ describe("deleteStorageObject", () => {
   it("throws on a failed delete", async () => {
     fetchMock.mockResolvedValueOnce(new Response("error", { status: 500 }));
     await expect(deleteStorageObject("listing-drafts", "path")).rejects.toThrow();
+  });
+});
+
+describe("deleteStorageObjects — batched multi-path delete for 'Clear all'", () => {
+  it("sends every path in one request when the list fits in one batch", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([]));
+    await deleteStorageObjects("listing-drafts", ["a/b/1-x.jpg", "a/b/2-y.jpg", "a/b/3-z.jpg"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, init] = fetchMock.mock.calls[0];
+    expect(String(calledUrl)).toBe("https://example.supabase.co/storage/v1/object/listing-drafts");
+    expect((init as RequestInit).method).toBe("DELETE");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ prefixes: ["a/b/1-x.jpg", "a/b/2-y.jpg", "a/b/3-z.jpg"] });
+  });
+
+  it("REGRESSION: splits a path list larger than STORAGE_DELETE_BATCH_SIZE into multiple requests, never one giant request or one request per path", async () => {
+    const paths = Array.from({ length: STORAGE_DELETE_BATCH_SIZE + 5 }, (_, i) => `a/b/${i}-x.jpg`);
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    await deleteStorageObjects("listing-drafts", paths);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstBatch = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string).prefixes;
+    const secondBatch = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string).prefixes;
+    expect(firstBatch).toHaveLength(STORAGE_DELETE_BATCH_SIZE);
+    expect(secondBatch).toHaveLength(5);
+  });
+
+  it("does nothing, and calls fetch zero times, for an empty path list", async () => {
+    await deleteStorageObjects("listing-drafts", []);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("REGRESSION: throws on the first failing batch and stops — a later batch is never attempted once one has failed", async () => {
+    const paths = Array.from({ length: STORAGE_DELETE_BATCH_SIZE + 5 }, (_, i) => `a/b/${i}-x.jpg`);
+    fetchMock.mockResolvedValueOnce(new Response("error", { status: 500 }));
+    await expect(deleteStorageObjects("listing-drafts", paths)).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

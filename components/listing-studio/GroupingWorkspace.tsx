@@ -7,11 +7,13 @@ import ProductGroupCard from "./ProductGroupCard";
 import MovePhotosDialog, { type MovableGroup } from "./MovePhotosDialog";
 import MergeGroupsDialog, { type MergeableGroup } from "./MergeGroupsDialog";
 import DeleteGroupDialog, { type DeleteGroupMode } from "./DeleteGroupDialog";
+import ClearWorkspaceDialog from "./ClearWorkspaceDialog";
 import TaskToast from "@/components/TaskToast";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { UploadItem } from "./upload-types";
 import type { PhotoTileData } from "./SortablePhotoGrid";
 import { isAcceptedFile, partitionDuplicateFiles } from "@/lib/listing-studio/file-selection";
+import { CHUNK_OVERLAP_SIZE, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE } from "@/lib/listing-studio/upload-limits";
 import { prepareImagePreview, releaseImagePreview } from "@/lib/listing-studio/client-image-processing";
 
 type WorkspaceDraft = { id: string; title: string | null; status: string; created_at: string; updated_at: string };
@@ -27,6 +29,37 @@ type SaveState = "idle" | "saving" | "saved" | "failed";
 // A stable reference for groups with no photos, so memo()'d ProductGroupCard
 // doesn't see a "changed" prop (a fresh []) on every unrelated re-render.
 const EMPTY_PHOTOS: PhotoTileData[] = [];
+
+// REGRESSION (v3): a proposal is now always a CONTIGUOUS sequence range
+// (ordered boundary detection), never an arbitrary photo selection — see
+// lib/listing-studio/auto-group-schemas.ts's top-of-file comment for why.
+type AutoGroupProposal = {
+  proposedGroupId: string; imageIds: string[]; photoCount: number;
+  boundaryReason: string; warnings: string[];
+};
+type AutoGroupSummary = {
+  ranAnalysis: boolean;
+  groupsCreated: { draftId: string; title: string; photoCount: number }[];
+  photosGroupedCount: number;
+  photosPendingReviewCount: number;
+  photosLeftInUnsortedCount: number;
+  totalUnsortedAtStart: number;
+  truncated: boolean;
+};
+
+// Cycled on a timer while any one chunk's request is in flight — there is no
+// real incremental progress to report *within* a single request, but the
+// analysedSoFar/totalToAnalyse counters below (updated once per completed
+// chunk) ARE real progress, shown alongside this.
+const AUTO_GROUP_STAGE_TEXTS = ["Preparing photos", "Comparing products", "Building product groups", "Applying groups"];
+
+type AutoGroupProgress = {
+  totalToAnalyse: number;
+  analysedSoFar: number;
+  productsIdentifiedSoFar: number;
+  stageIndex: number;
+};
+
 
 // Undo toast contract: onAction runs when the user clicks "Undo"; onDismiss
 // always runs afterward (immediately on click, or automatically once the
@@ -84,6 +117,17 @@ export default function GroupingWorkspace() {
   const [autoEditGroupId, setAutoEditGroupId] = useState<string | null>(null);
   const handleAutoEditConsumed = useCallback(() => setAutoEditGroupId(null), []);
 
+  const [autoGroupRunning, setAutoGroupRunning] = useState(false);
+  const [autoGroupProgress, setAutoGroupProgress] = useState<AutoGroupProgress | null>(null);
+  const [autoGroupError, setAutoGroupError] = useState<string | null>(null);
+  const [autoGroupSummary, setAutoGroupSummary] = useState<AutoGroupSummary | null>(null);
+  const [autoGroupProposals, setAutoGroupProposals] = useState<AutoGroupProposal[]>([]);
+  const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
+
+  const [clearWorkspaceDialogOpen, setClearWorkspaceDialogOpen] = useState(false);
+  const [clearingWorkspace, setClearingWorkspace] = useState(false);
+  const [clearWorkspaceError, setClearWorkspaceError] = useState("");
+
   const uploadItemsRef = useRef<UploadItem[]>([]);
   useEffect(() => { uploadItemsRef.current = uploadItems; }, [uploadItems]);
   const pendingUndoRef = useRef<PendingUndo | null>(null);
@@ -115,15 +159,32 @@ export default function GroupingWorkspace() {
     setSaveState("saved");
     setTimeout(() => setSaveState(current => (current === "saved" ? "idle" : current)), 2000);
   }
+  // REGRESSION: this single saveState is shared by every group card at
+  // once (see the shared `saveState={saveState}` prop below) — it's a
+  // workspace-wide "something is saving / just saved / just failed"
+  // indicator, not a per-card one. "saved" always auto-cleared back to
+  // "idle" via flashSaved's own timeout, but "failed" never did — so a
+  // single failed save from ANY action (a rename, a reorder, a stale
+  // reference on the losing side of a race, one flaky request) left every
+  // card permanently showing "Save failed" until the next unrelated action
+  // happened to succeed, long after that original failure was resolved or
+  // irrelevant. flashFailed mirrors flashSaved exactly (same
+  // guarded-timeout pattern, just a longer window so a real failure stays
+  // visible long enough to actually notice) so the indicator always
+  // reflects *recent* activity, never a stale failure from minutes ago.
+  function flashFailed() {
+    setSaveState("failed");
+    setTimeout(() => setSaveState(current => (current === "failed" ? "idle" : current)), 5000);
+  }
   async function withSaveState(action: () => Promise<Response>): Promise<{ ok: boolean; error?: string }> {
     setSaveState("saving");
     try {
       const response = await action();
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) { setSaveState("failed"); return { ok: false, error: body.error || "Save failed." }; }
+      if (!response.ok) { flashFailed(); return { ok: false, error: body.error || "Save failed." }; }
       flashSaved();
       return { ok: true };
-    } catch { setSaveState("failed"); return { ok: false, error: "Network error — please try again." }; }
+    } catch { flashFailed(); return { ok: false, error: "Network error — please try again." }; }
   }
 
   // ---- Upload flow ----
@@ -290,7 +351,7 @@ export default function GroupingWorkspace() {
     try {
       await runWithConcurrencyLimit(imageIds, 5, async photoId => { await fetch(`/api/listing-studio/images/${photoId}`, { method: "DELETE" }); });
       flashSaved();
-    } catch { setSaveState("failed"); }
+    } catch { flashFailed(); }
   }
 
   const handleRemovePhoto = useCallback((photoId: string) => {
@@ -359,7 +420,7 @@ export default function GroupingWorkspace() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) { setSaveState("failed"); return; }
+      if (!response.ok) { flashFailed(); return; }
       const { draftId, title } = body as { draftId: string; title: string };
       const now = new Date().toISOString();
       setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now }]);
@@ -368,7 +429,7 @@ export default function GroupingWorkspace() {
       requestAnimationFrame(() => {
         document.getElementById(`listing-group-${draftId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
-    } catch { setSaveState("failed"); }
+    } catch { flashFailed(); }
   }
 
   // An empty group deletes (after the undo window) immediately; a group
@@ -419,8 +480,8 @@ export default function GroupingWorkspace() {
               const response = await fetch(`/api/listing-studio/groups/${draftId}`, {
                 method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(mode ? { mode } : {}),
               });
-              if (response.ok) { flashSaved(); await loadWorkspace(); } else setSaveState("failed");
-            } catch { setSaveState("failed"); }
+              if (response.ok) { flashSaved(); await loadWorkspace(); } else flashFailed();
+            } catch { flashFailed(); }
           })();
         }
         setPendingUndo(null);
@@ -471,7 +532,7 @@ export default function GroupingWorkspace() {
     setDialogBusy(true);
     const created = await fetch("/api/listing-studio/groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
     const createdBody = await created.json().catch(() => ({}));
-    if (!created.ok) { setDialogBusy(false); setSaveState("failed"); return; }
+    if (!created.ok) { setDialogBusy(false); flashFailed(); return; }
     const { draftId, title } = createdBody as { draftId: string; title: string };
     const now = new Date().toISOString();
     setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now }]);
@@ -507,7 +568,7 @@ export default function GroupingWorkspace() {
         },
         onDismiss: () => setPendingUndo(null),
       });
-    } else setSaveState("failed");
+    } else flashFailed();
   }
 
   async function handleMerge(targetDraftId: string) {
@@ -542,6 +603,202 @@ export default function GroupingWorkspace() {
     }
   }
 
+  // ---- Automatic AI product grouping ----
+  // One click processes a whole normal listing session (up to
+  // MAX_AUTO_GROUP_SESSION_SIZE photos) without the user ever clicking
+  // again: the eligible Unsorted set is sliced into
+  // MAX_AUTO_GROUP_BATCH_SIZE-sized chunks here, and this loop calls the
+  // analyze route once per chunk, automatically, in sequence — each request
+  // stays small and safely bounded server-side (see that route's own
+  // maxDuration), while the whole run still covers everything. A chunk that
+  // fails for a reason that might be transient (502) doesn't abort the
+  // run — its photos simply stay in Unsorted and the loop continues, since
+  // one bad batch out of several must never waste the chunks that already
+  // succeeded; a chunk reporting the service isn't configured at all (503)
+  // stops the loop immediately, since every remaining chunk would fail
+  // identically. There is no meaningful, safe way to cancel mid-flight
+  // here — a chunk may already have created and moved high-confidence
+  // groups by the time a "Cancel" click could reach it, and pretending to
+  // stop something that already happened would be worse than not offering
+  // cancellation at all — so this deliberately has no Cancel action, only
+  // Retry after a failure (which simply re-runs the same logic against
+  // whatever is still in Unsorted — already-grouped photos are naturally
+  // excluded next time, so retrying never reprocesses a success).
+  async function handleAutoGroupProducts() {
+    const unsortedDraft = drafts.find(draft => draft.title === "Unsorted");
+    const eligible = unsortedDraft
+      ? images.filter(image => image.draft_id === unsortedDraft.id && image.upload_state === "uploaded").sort((a, b) => a.sort_order - b.sort_order)
+      : [];
+    if (eligible.length === 0) {
+      setAutoGroupError(null);
+      setAutoGroupSummary({ ranAnalysis: false, groupsCreated: [], photosGroupedCount: 0, photosPendingReviewCount: 0, photosLeftInUnsortedCount: 0, totalUnsortedAtStart: 0, truncated: false });
+      setAutoGroupProposals([]);
+      return;
+    }
+
+    const totalEligible = eligible.length;
+    const capped = eligible.slice(0, MAX_AUTO_GROUP_SESSION_SIZE);
+    const chunks: typeof capped[] = [];
+    for (let i = 0; i < capped.length; i += MAX_AUTO_GROUP_BATCH_SIZE) chunks.push(capped.slice(i, i + MAX_AUTO_GROUP_BATCH_SIZE));
+
+    setAutoGroupRunning(true);
+    setAutoGroupError(null);
+    setAutoGroupSummary(null);
+    setAutoGroupProposals([]);
+    setAutoGroupProgress({ totalToAnalyse: capped.length, analysedSoFar: 0, productsIdentifiedSoFar: 0, stageIndex: 0 });
+    const stageTimer = setInterval(() => {
+      setAutoGroupProgress(current => current && { ...current, stageIndex: (current.stageIndex + 1) % AUTO_GROUP_STAGE_TEXTS.length });
+    }, 2500);
+
+    // Every chunk is only ANALYSED here — never applied — so a physical
+    // product spanning a chunk boundary can be reconciled (stitched back
+    // together via continuesFromPreviousChunk) before anything is written.
+    // Only after every chunk is done does one single apply-session call
+    // reconcile the whole session and apply it, all-or-nothing.
+    const chunkResults: { groups: unknown[]; ungroupedImageIds: string[] }[] = [];
+    let hardStopError: string | null = null;
+    let softFailureCount = 0;
+    let proposedBoundariesSoFar = 0;
+
+    try {
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        const chunk = chunks[chunkIndex];
+        const chunkStartSequenceIndex = chunkIndex * MAX_AUTO_GROUP_BATCH_SIZE + 1;
+        // A small read-only tail of the previous chunk, shown again so the
+        // model can judge whether this chunk's first photo continues that
+        // same physical product across the chunk boundary — never
+        // re-analysed or re-moved, context only.
+        const overlapImageIds = chunkIndex > 0 ? chunks[chunkIndex - 1].slice(-CHUNK_OVERLAP_SIZE).map(image => image.id) : [];
+
+        setAutoGroupProgress(current => current && { ...current, stageIndex: 0 });
+        let response: Response;
+        try {
+          response = await fetch("/api/listing-studio/groups/auto-group", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageIds: chunk.map(image => image.id), overlapImageIds, chunkStartSequenceIndex }),
+          });
+        } catch { hardStopError = "Network error — please try again."; break; }
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (response.status === 503) { hardStopError = body.error || "Automatic grouping is not available right now."; break; }
+          softFailureCount += 1;
+          setAutoGroupProgress(current => current && { ...current, analysedSoFar: current.analysedSoFar + chunk.length });
+          continue;
+        }
+        chunkResults.push(body.data);
+        proposedBoundariesSoFar += Array.isArray(body.data?.groups) ? body.data.groups.length : 0;
+        setAutoGroupProgress(current => current && {
+          ...current,
+          analysedSoFar: current.analysedSoFar + chunk.length,
+          productsIdentifiedSoFar: proposedBoundariesSoFar,
+        });
+      }
+
+      if (chunkResults.length > 0) {
+        setAutoGroupProgress(current => current && { ...current, stageIndex: AUTO_GROUP_STAGE_TEXTS.length - 1 });
+        try {
+          const applyResponse = await fetch("/api/listing-studio/groups/auto-group/apply-session", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageIds: capped.map(image => image.id), chunkResults }),
+          });
+          const applyBody = await applyResponse.json().catch(() => ({}));
+          if (!applyResponse.ok) {
+            hardStopError = hardStopError ?? applyBody.error ?? "Could not apply this session's groups.";
+          } else {
+            setAutoGroupSummary({
+              ranAnalysis: true, truncated: totalEligible > capped.length || hardStopError !== null,
+              totalUnsortedAtStart: totalEligible,
+              groupsCreated: applyBody.groupsCreated ?? [], photosGroupedCount: applyBody.photosGroupedCount ?? 0,
+              photosPendingReviewCount: applyBody.photosPendingReviewCount ?? 0, photosLeftInUnsortedCount: applyBody.photosLeftInUnsortedCount ?? 0,
+            });
+            setAutoGroupProposals(applyBody.proposedGroups ?? []);
+            if ((applyBody.groupsCreated?.length ?? 0) > 0) await loadWorkspace();
+          }
+        } catch { hardStopError = hardStopError ?? "Network error — please try again."; }
+      }
+
+      if (hardStopError) setAutoGroupError(hardStopError);
+      else if (softFailureCount > 0) setAutoGroupError(`${softFailureCount} of ${chunks.length} batches could not be analysed. Click Auto-group products again to retry them.`);
+    } finally {
+      clearInterval(stageTimer);
+      setAutoGroupRunning(false);
+      setAutoGroupProgress(null);
+    }
+  }
+
+  async function handleApplyAutoGroupProposal(proposal: AutoGroupProposal) {
+    setApplyingProposalId(proposal.proposedGroupId);
+    setAutoGroupError(null);
+    try {
+      const response = await fetch("/api/listing-studio/groups/auto-group/apply", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageIds: proposal.imageIds }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setAutoGroupError(body.error || "Could not create this group."); return; }
+      setAutoGroupProposals(current => current.filter(p => p.proposedGroupId !== proposal.proposedGroupId));
+      await loadWorkspace();
+      flashSaved();
+    } catch { setAutoGroupError("Network error — please try again."); }
+    finally { setApplyingProposalId(null); }
+  }
+
+  // No API call — these photos were never moved, so "skip" just stops
+  // showing the suggestion; they remain exactly where they already are.
+  function handleDismissAutoGroupProposal(proposedGroupId: string) {
+    setAutoGroupProposals(current => current.filter(p => p.proposedGroupId !== proposedGroupId));
+  }
+
+  // ---- Clear all (workspace-wide reset) ----
+  // One dedicated server call (DELETE /api/listing-studio/workspace) does
+  // every photo and every group, Unsorted included, in one transaction —
+  // never one request per image/group. Any pending undo toast is discarded
+  // outright (setPendingUndo(null), not forceResolvePendingUndo()) rather
+  // than fired: its target rows are about to be deleted by this action
+  // anyway, so replaying its real network effect would be redundant at
+  // best. Every other piece of local state this feature touches (upload
+  // queue, auto-group progress/summary/proposals/error, selection, every
+  // open dialog, the shared save indicator) is reset directly; drafts/
+  // images themselves come from a real loadWorkspace() call afterward so
+  // the UI reflects the server's own confirmation of empty, not an
+  // assumption.
+  async function handleClearWorkspace() {
+    setClearingWorkspace(true);
+    setClearWorkspaceError("");
+    try {
+      const response = await fetch("/api/listing-studio/workspace", { method: "DELETE" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setClearWorkspaceError(body.error || "Could not clear the workspace. Please try again.");
+        return;
+      }
+
+      setPendingUndo(null);
+      setSelectedIds(new Set());
+      setUploadItems([]);
+      setUploadNotice("");
+      setUploadSuccessMessage("");
+      setAutoGroupRunning(false);
+      setAutoGroupProgress(null);
+      setAutoGroupError(null);
+      setAutoGroupSummary(null);
+      setAutoGroupProposals([]);
+      setApplyingProposalId(null);
+      setMoveDialogGroupId(null);
+      setMergeDialogGroupId(null);
+      setDeleteGroupTarget(null);
+      setBulkDeleteConfirmOpen(false);
+      setAutoEditGroupId(null);
+      setSaveState("idle");
+      setLoadError("");
+      setClearWorkspaceDialogOpen(false);
+      await loadWorkspace();
+    } catch {
+      setClearWorkspaceError("Network error — could not clear the workspace. Please try again.");
+    } finally {
+      setClearingWorkspace(false);
+    }
+  }
+
   // ---- Keyboard shortcuts ----
   // Ctrl/Cmd+A selects every photo in whichever group currently has focus
   // (via the data-group-id ancestor set on each ProductGroupCard); Escape
@@ -549,7 +806,7 @@ export default function GroupingWorkspace() {
   // confirmation rather than deleting immediately. Disabled while any
   // dialog is open, or while typing in a text field (renaming a group,
   // typing a new group's name), so native input behaviour is never hijacked.
-  const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen);
+  const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen);
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target;
@@ -599,6 +856,13 @@ export default function GroupingWorkspace() {
   // grouping section, no floating "Create new group" button.
   const hasAnyData = drafts.length > 0 || images.length > 0;
   const readyCount = drafts.filter(draft => draft.status === "ready").length;
+  const unsortedDraft = drafts.find(draft => draft.title === "Unsorted");
+  const unsortedPhotoCount = unsortedDraft ? images.filter(image => image.draft_id === unsortedDraft.id).length : 0;
+  // "Clear all" is disabled while anything destructive/long-running of its
+  // own is already in flight — an upload, an auto-group run, or another
+  // clear — so it can never race with, or be raced by, one of those.
+  const uploadsActive = uploadItems.some(item => item.state === "pending" || item.state === "uploading");
+  const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive;
 
   return <div className="listing-studio-create">
     <UploadDropzone onFilesSelected={handleFilesSelected} />
@@ -624,8 +888,79 @@ export default function GroupingWorkspace() {
       </div>
 
       <div className="product-groups-toolbar">
+        <button type="button" className="button-secondary" onClick={handleAutoGroupProducts} disabled={autoGroupRunning || unsortedPhotoCount === 0} title={unsortedPhotoCount === 0 ? "No photos in Unsorted to group" : undefined}>
+          {autoGroupRunning ? "Grouping…" : "Auto-group products"}
+        </button>
         <button type="button" className="button-secondary" onClick={handleCreateGroup}>+ New product</button>
+        <button
+          type="button"
+          className="button-danger listing-clear-all"
+          onClick={() => setClearWorkspaceDialogOpen(true)}
+          disabled={clearWorkspaceDisabled}
+          title={clearWorkspaceDisabled ? "Wait for the current upload or grouping run to finish" : undefined}
+        >
+          Clear all
+        </button>
       </div>
+      <p className="auto-group-order-hint">For best results, keep each product&rsquo;s photos together in upload order.</p>
+
+      {clearWorkspaceError && !clearingWorkspace && <div className="auto-group-error" role="alert">
+        <span>{clearWorkspaceError}</span>
+        <button type="button" className="button-secondary" onClick={() => setClearWorkspaceDialogOpen(true)}>Retry</button>
+      </div>}
+
+      {autoGroupRunning && autoGroupProgress && <div className="auto-group-progress" role="status">
+        <span className="auto-group-progress-spinner" aria-hidden="true" />
+        <div className="auto-group-progress-text">
+          <strong>Analysing photos {autoGroupProgress.analysedSoFar} / {autoGroupProgress.totalToAnalyse}</strong>
+          <span>{AUTO_GROUP_STAGE_TEXTS[autoGroupProgress.stageIndex]}…</span>
+          <span className="auto-group-progress-stats">
+            {autoGroupProgress.productsIdentifiedSoFar} product{autoGroupProgress.productsIdentifiedSoFar === 1 ? "" : "s"} identified so far · {autoGroupProgress.totalToAnalyse - autoGroupProgress.analysedSoFar} photo{autoGroupProgress.totalToAnalyse - autoGroupProgress.analysedSoFar === 1 ? "" : "s"} remaining
+          </span>
+        </div>
+      </div>}
+
+      {autoGroupError && !autoGroupRunning && <div className="auto-group-error" role="alert">
+        <span>{autoGroupError}</span>
+        <button type="button" className="button-secondary" onClick={handleAutoGroupProducts}>Retry</button>
+      </div>}
+
+      {autoGroupSummary && !autoGroupRunning && (autoGroupSummary.ranAnalysis
+        ? <div className="auto-group-summary" role="status">
+            <button type="button" className="auto-group-summary-close" onClick={() => setAutoGroupSummary(null)} aria-label="Dismiss">×</button>
+            <strong>{autoGroupSummary.groupsCreated.length} product group{autoGroupSummary.groupsCreated.length === 1 ? "" : "s"} created</strong>
+            <span>{autoGroupSummary.photosGroupedCount} photo{autoGroupSummary.photosGroupedCount === 1 ? "" : "s"} grouped</span>
+            <span>{autoGroupSummary.photosLeftInUnsortedCount} photo{autoGroupSummary.photosLeftInUnsortedCount === 1 ? "" : "s"} left in Unsorted</span>
+            {autoGroupSummary.truncated && <p className="auto-group-truncated-note">Not every eligible photo was analysed this run — click Auto-group products again to process the rest.</p>}
+          </div>
+        : <p className="auto-group-empty-note">No photos in Unsorted to group.</p>)}
+
+      {autoGroupProposals.length > 0 && <div className="auto-group-review">
+        <h3>Review {autoGroupProposals.length} suggested group{autoGroupProposals.length === 1 ? "" : "s"}</h3>
+        <p className="auto-group-review-hint">Not fully confident — check each one before creating it.</p>
+        {autoGroupProposals.map(proposal => <div key={proposal.proposedGroupId} className="auto-group-proposal-card">
+          <div className="auto-group-proposal-thumbs">
+            {proposal.imageIds.slice(0, 6).map(imageId =>
+              // eslint-disable-next-line @next/next/no-img-element -- private, per-request signed redirect URL; see SortablePhotoGrid.tsx for the same rationale
+              <img key={imageId} src={`/api/listing-studio/images/${imageId}/view`} alt="" />)}
+            {proposal.imageIds.length > 6 && <span className="auto-group-proposal-thumbs-more">+{proposal.imageIds.length - 6}</span>}
+          </div>
+          <div className="auto-group-proposal-body">
+            <div className="auto-group-proposal-heading">
+              <strong>{proposal.photoCount} photo{proposal.photoCount === 1 ? "" : "s"}</strong>
+              <span className="auto-group-proposal-confidence">Medium confidence</span>
+            </div>
+            <p className="auto-group-proposal-reasoning">{proposal.boundaryReason}</p>
+            {proposal.warnings.length > 0 && <ul className="auto-group-proposal-warnings">{proposal.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}
+          </div>
+          <div className="auto-group-proposal-actions">
+            <button type="button" className="button-secondary" onClick={() => handleDismissAutoGroupProposal(proposal.proposedGroupId)} disabled={applyingProposalId === proposal.proposedGroupId}>Reject</button>
+            <button type="button" className="button" onClick={() => handleApplyAutoGroupProposal(proposal)} disabled={applyingProposalId === proposal.proposedGroupId}>
+              {applyingProposalId === proposal.proposedGroupId ? "Accepting…" : "Accept"}
+            </button>
+          </div>
+        </div>)}
+      </div>}
 
       <div className="product-groups-list">
         {drafts.map(draft => <ProductGroupCard
@@ -683,5 +1018,10 @@ export default function GroupingWorkspace() {
       onCancel={() => setBulkDeleteConfirmOpen(false)}
     />}
     {pendingUndo && <TaskToast message={pendingUndo.message} actionLabel="Undo" onAction={pendingUndo.onAction} onDismiss={pendingUndo.onDismiss} />}
+    {clearWorkspaceDialogOpen && <ClearWorkspaceDialog
+      loading={clearingWorkspace}
+      onClose={() => setClearWorkspaceDialogOpen(false)}
+      onConfirm={handleClearWorkspace}
+    />}
   </div>;
 }

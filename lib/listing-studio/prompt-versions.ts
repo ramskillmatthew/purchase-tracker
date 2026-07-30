@@ -11,4 +11,11 @@ export const LISTING_PROMPT_VERSIONS: Record<ListingAnalysisStage, string> = {
   visual_identification: "listing-visual-identification-v1",
   consistency_check: "listing-consistency-check-v1",
   generation: "listing-generation-v1",
+  // v3: replaces free-clustering with ordered boundary detection — a real
+  // 24-photo/3-pair test still over-split two of three products under v2
+  // (the model's own reasoning admitted a fragment might be the same item
+  // as another group), proving similarity-based clustering was the wrong
+  // primary task for a workflow where photos are uploaded in photography
+  // order. See AUTO_GROUP_SYSTEM_PROMPT's own comment.
+  product_grouping: "listing-product-grouping-v3",
 };

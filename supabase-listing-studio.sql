@@ -199,7 +199,8 @@ create table if not exists public.listing_analysis_runs (
         'label_extraction',
         'visual_identification',
         'consistency_check',
-        'generation'
+        'generation',
+        'product_grouping'
       )
     ),
 
@@ -242,6 +243,27 @@ revoke all
 on public.listing_analysis_runs
 from anon,
 authenticated;
+
+-- Milestone 3 (automatic AI product grouping): widens the `stage` check
+-- constraint on an already-deployed database, since `create table if not
+-- exists` above only affects a brand-new install — an existing table's
+-- constraint must be explicitly replaced to accept the new
+-- 'product_grouping' value. Safe to re-run: drops the constraint only if
+-- it currently exists, under whatever name Postgres auto-assigned it
+-- ("<table>_<column>_check" is Postgres's own default naming for an inline
+-- column check), then recreates it with the widened list.
+alter table public.listing_analysis_runs drop constraint if exists listing_analysis_runs_stage_check;
+alter table public.listing_analysis_runs add constraint listing_analysis_runs_stage_check
+  check (
+    stage in (
+      'image_quality',
+      'label_extraction',
+      'visual_identification',
+      'consistency_check',
+      'generation',
+      'product_grouping'
+    )
+  );
 
 
 create table if not exists public.listing_status_history (
@@ -588,6 +610,212 @@ begin
 end;
 $$;
 
+-- Milestone 3 (automatic AI product grouping) v3 — ordered boundary
+-- detection: applies a WHOLE "Auto-group products" session's accepted
+-- groups in ONE transaction, only after every chunk has been analysed and
+-- reconciled across chunk boundaries (see
+-- lib/listing-studio/auto-group-schemas.ts's reconcileAutoGroupSession,
+-- called from app/api/listing-studio/groups/auto-group/apply-session/route.ts) —
+-- never applying one chunk's groups before the rest of the session is
+-- known, which previously risked a physical product being split across a
+-- chunk boundary with no way to put it back together. p_groups is a JSON
+-- array of {"title": text, "image_ids": [uuid, ...]}, one entry per
+-- accepted group, in the order they should be created. Every image id in
+-- every group must currently belong to p_source_draft_id (the Unsorted
+-- group) and this owner — the exact same ownership/membership check as
+-- listing_studio_split_group, just for every group in one call instead of
+-- one. If ANY group fails validation, the exception aborts the whole
+-- function and every effect of every earlier iteration in the same call
+-- rolls back with it (a single plpgsql function body is one implicit
+-- transaction) — so a session's application is genuinely all-or-nothing,
+-- never leaving some groups created and others missing.
+-- DIAGNOSTIC INSTRUMENTATION (temporary — see this function's own callers
+-- for the removal condition): every raise below now attaches a `detail`
+-- naming the exact group index/title/image count/image ids involved, and
+-- the per-group loop body is wrapped in its own exception handler that
+-- captures GET STACKED DIAGNOSTICS (SQLSTATE, message, detail, hint) for
+-- ANY error — including one this function never anticipated (a constraint
+-- violation, a trigger failure, etc.) — and re-raises it with all of that
+-- plus the failing group's own index/title/image ids embedded in one
+-- message, so the calling route's catch block (which already logs the raw
+-- error text in development — see apply-session/route.ts) can surface the
+-- precise failing statement instead of a bare "rolled back". This changes
+-- NO validation rule and NO control flow: the same checks fire in the same
+-- order for the same reasons, and any exception still aborts the whole
+-- function (one plpgsql function body is one implicit transaction) exactly
+-- as before — only the message/detail attached to that same exception is
+-- richer.
+--
+-- REGRESSION (SQLSTATE 42702 "column reference \"draft_id\" is ambiguous",
+-- confirmed live on the first group of a real apply): `returns table
+-- (draft_id uuid, title text)` implicitly declares `draft_id` and `title`
+-- as OUT-parameter PL/pgSQL variables, visible for the whole function body
+-- — exactly like any other local variable. listing_draft_images also has
+-- its own `draft_id` column, so every bare (unqualified) `draft_id`
+-- reference inside a query below could mean either one, and Postgres
+-- correctly refuses to guess. The OUT parameter names can't be renamed —
+-- they ARE the RPC's returned column names (draft_id/title), which
+-- app/api/listing-studio/groups/auto-group/apply-session/route.ts already
+-- reads by those exact keys; renaming them would change this RPC's API
+-- contract. The correct fix is the other direction: every table reference
+-- below is now aliased (ld/ldi) and every column in every query is
+-- qualified with it, so no query can ever be ambiguous regardless of what
+-- local/OUT-parameter names this function happens to declare. Only two
+-- statements actually triggered the bug (the image-count check and the
+-- `ordered` CTE, both via listing_draft_images.draft_id) — every other
+-- table reference is qualified too, defensively, so no future
+-- variable/column name collision (owner_id, image_id, group_id, etc.) can
+-- reintroduce this class of failure.
+create or replace function public.listing_studio_apply_boundary_session(p_owner_id uuid, p_source_draft_id uuid, p_groups jsonb)
+returns table(draft_id uuid, title text)
+language plpgsql
+as $$
+declare
+  v_group jsonb;
+  v_group_index integer := 0;
+  v_title text;
+  v_image_ids uuid[];
+  v_image_count integer;
+  v_new_draft_id uuid;
+  v_diag_sqlstate text;
+  v_diag_message text;
+  v_diag_detail text;
+  v_diag_hint text;
+begin
+  if p_groups is null or jsonb_typeof(p_groups) <> 'array' or jsonb_array_length(p_groups) = 0 then
+    raise exception 'NO_GROUPS' using errcode = 'P0001';
+  end if;
+
+  if not exists (select 1 from public.listing_drafts ld where ld.id = p_source_draft_id and ld.owner_id = p_owner_id for update) then
+    raise exception 'SOURCE_DRAFT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  begin
+    for v_group in select * from jsonb_array_elements(p_groups)
+    loop
+      v_group_index := v_group_index + 1;
+      v_title := nullif(trim(v_group ->> 'title'), '');
+      select array_agg(value::uuid) into v_image_ids from jsonb_array_elements_text(v_group -> 'image_ids');
+
+      if v_title is null then
+        raise exception 'INVALID_GROUP_TITLE' using errcode = 'P0003',
+          detail = format('group index %s (0-based) had no usable title', v_group_index - 1);
+      end if;
+      if v_image_ids is null or array_length(v_image_ids, 1) is null then
+        raise exception 'NO_IMAGES' using errcode = 'P0001',
+          detail = format('group index %s (0-based, title "%s") had no image ids', v_group_index - 1, v_title);
+      end if;
+
+      select count(*) into v_image_count
+      from public.listing_draft_images ldi
+      where ldi.id = any(v_image_ids) and ldi.draft_id = p_source_draft_id and ldi.owner_id = p_owner_id;
+
+      if v_image_count <> array_length(v_image_ids, 1) then
+        raise exception 'IMAGE_NOT_IN_SOURCE_DRAFT' using errcode = 'P0004',
+          detail = format(
+            'group index %s (0-based, title "%s"): expected %s image(s), only %s currently match owner %s + source draft %s (duplicates within the group, an id already moved elsewhere, or an id belonging to a different owner all look identical here) — image_ids requested: %s',
+            v_group_index - 1, v_title, array_length(v_image_ids, 1), v_image_count, p_owner_id, p_source_draft_id, v_image_ids
+          );
+      end if;
+
+      insert into public.listing_drafts (owner_id, title, status)
+      values (p_owner_id, v_title, 'grouping')
+      returning id into v_new_draft_id;
+
+      with ordered as (
+        select ldi.id, row_number() over (order by ldi.sort_order) as rn
+        from public.listing_draft_images ldi
+        where ldi.id = any(v_image_ids) and ldi.draft_id = p_source_draft_id and ldi.owner_id = p_owner_id
+      )
+      update public.listing_draft_images img
+      set draft_id = v_new_draft_id,
+          sort_order = ordered.rn - 1
+      from ordered
+      where img.id = ordered.id;
+
+      insert into public.listing_status_history (draft_id, owner_id, previous_status, new_status, reason)
+      values (v_new_draft_id, p_owner_id, null, 'grouping', 'created by automatic AI product grouping');
+
+      draft_id := v_new_draft_id;
+      title := v_title;
+      return next;
+    end loop;
+  exception when others then
+    get stacked diagnostics
+      v_diag_sqlstate = returned_sqlstate,
+      v_diag_message = message_text,
+      v_diag_detail = pg_exception_detail,
+      v_diag_hint = pg_exception_hint;
+    raise exception 'APPLY_BOUNDARY_SESSION_FAILED at group index % (0-based, title "%"): sqlstate=% message=% detail=% hint=%',
+      coalesce(v_group_index - 1, -1), coalesce(v_title, '(unknown)'), v_diag_sqlstate, v_diag_message,
+      coalesce(v_diag_detail, '(none)'), coalesce(v_diag_hint, '(none)')
+      using errcode = 'P0009', detail = coalesce(v_diag_detail, v_diag_message), hint = coalesce(v_diag_hint, '(none)');
+  end;
+end;
+$$;
+
+-- "Clear all" (Listing Studio workspace-wide reset): deletes every Listing
+-- Studio database row this owner has — every listing_drafts row (every
+-- product group AND Unsorted; there is no separate "draft" table, a group
+-- IS a listing_drafts row, so deleting these covers both at once) plus
+-- every listing_draft_images/listing_analysis_runs/listing_status_history
+-- row. Those three already cascade-delete when their listing_drafts row is
+-- removed (`on delete cascade`, confirmed by
+-- tests/listing-studio-migration.test.ts's own cascade-count assertion), so
+-- a single `delete from listing_drafts` would already remove everything —
+-- but this deletes each table explicitly, in dependency order, specifically
+-- to return an accurate per-table count to the caller (cascade deletes
+-- don't give you a row count for the table the cascade fired into). Not
+-- duplicated safety logic, just deliberately not relying on RETURNING
+-- through a cascade for something this function needs to report.
+--
+-- Ownership is enforced the only way every other RPC in this file enforces
+-- it: every delete filters on `owner_id = p_owner_id`, and p_owner_id is
+-- never something the client can spoof — the calling route derives it from
+-- requireOwner() (see app/api/listing-studio/workspace/route.ts's DELETE
+-- handler), never from the request body. One plpgsql function body is one
+-- implicit transaction, so if any statement fails, every prior delete in
+-- the same call rolls back with it — the same all-or-nothing guarantee
+-- every other multi-step RPC in this file has.
+--
+-- Storage cleanup is NOT done here (Postgres has no access to Storage) —
+-- the calling route resolves and deletes every Storage object BEFORE
+-- calling this function at all (the opposite order from
+-- listing_studio_delete_group's single-group delete above), specifically
+-- so a Storage-deletion failure can abort before any database row is
+-- touched, and so a retry after a failure has something to re-resolve from
+-- (nothing here would have run yet). See that route's own comment for why
+-- this order is deliberately reversed from the single-group case.
+create or replace function public.listing_studio_clear_workspace(p_owner_id uuid)
+returns table(deleted_image_count integer, deleted_group_count integer, deleted_analysis_run_count integer, deleted_status_history_count integer)
+language plpgsql
+as $$
+declare
+  v_image_count integer;
+  v_group_count integer;
+  v_run_count integer;
+  v_history_count integer;
+begin
+  with deleted as (delete from public.listing_draft_images where owner_id = p_owner_id returning 1)
+  select count(*) into v_image_count from deleted;
+
+  with deleted as (delete from public.listing_analysis_runs where owner_id = p_owner_id returning 1)
+  select count(*) into v_run_count from deleted;
+
+  with deleted as (delete from public.listing_status_history where owner_id = p_owner_id returning 1)
+  select count(*) into v_history_count from deleted;
+
+  with deleted as (delete from public.listing_drafts where owner_id = p_owner_id returning 1)
+  select count(*) into v_group_count from deleted;
+
+  deleted_image_count := v_image_count;
+  deleted_group_count := v_group_count;
+  deleted_analysis_run_count := v_run_count;
+  deleted_status_history_count := v_history_count;
+  return next;
+end;
+$$;
+
 -- Matches the existing function-access pattern (supabase-purchase-import-v2.sql):
 -- the application only ever calls these via the service-role key, which is
 -- unaffected by these revokes. anon/authenticated are explicitly denied
@@ -597,6 +825,8 @@ revoke all on function public.listing_studio_reorder_images(uuid, uuid, uuid[]) 
 revoke all on function public.listing_studio_split_group(uuid, uuid, uuid[], text) from public;
 revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from public;
 revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from public;
+revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from public;
+revoke all on function public.listing_studio_clear_workspace(uuid) from public;
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
     revoke all on function public.listing_studio_move_images(uuid, uuid[], uuid) from anon;
@@ -604,6 +834,8 @@ do $$ begin
     revoke all on function public.listing_studio_split_group(uuid, uuid, uuid[], text) from anon;
     revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from anon;
     revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from anon;
+    revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from anon;
+    revoke all on function public.listing_studio_clear_workspace(uuid) from anon;
   end if;
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
     revoke all on function public.listing_studio_move_images(uuid, uuid[], uuid) from authenticated;
@@ -611,5 +843,7 @@ do $$ begin
     revoke all on function public.listing_studio_split_group(uuid, uuid, uuid[], text) from authenticated;
     revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from authenticated;
     revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from authenticated;
+    revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from authenticated;
+    revoke all on function public.listing_studio_clear_workspace(uuid) from authenticated;
   end if;
 end $$;

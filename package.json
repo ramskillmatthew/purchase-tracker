@@ -15,6 +15,7 @@
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.7",
     "exceljs": "^4.4.0",
+    "heic-convert": "^2.1.0",
     "heic2any": "^0.0.4",
     "imapflow": "^1.4.7",
     "jose": "^6.2.3",
@@ -24,9 +25,11 @@
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "sanitize-html": "^2.17.6",
+    "sharp": "^0.34.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/heic-convert": "^2.1.1",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^22.0.0",
     "@types/papaparse": "^5.5.2",

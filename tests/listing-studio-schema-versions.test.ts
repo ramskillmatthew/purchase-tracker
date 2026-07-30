@@ -22,4 +22,8 @@ describe("LISTING_SCHEMA_VERSIONS — versioned independently of LISTING_PROMPT_
       expect(LISTING_SCHEMA_VERSIONS[stage]).not.toBe(LISTING_PROMPT_VERSIONS[stage]);
     }
   });
+
+  it("Milestone 3: automatic AI product grouping has its own recorded schema version", () => {
+    expect(LISTING_SCHEMA_VERSIONS.product_grouping).toBe("listing-product-grouping-schema-v2");
+  });
 });

@@ -12,4 +12,11 @@ export const LISTING_SCHEMA_VERSIONS: Record<ListingAnalysisStage, string> = {
   visual_identification: "listing-visual-identification-schema-v1",
   consistency_check: "listing-consistency-check-schema-v1",
   generation: "listing-generation-schema-v1",
+  // v2: the tool's response shape changed from an arbitrary imageIds list
+  // per group to a contiguous sequence range (startSequenceIndex/
+  // endSequenceIndex/orderedImageIds/continuesFromPreviousChunk) — ordered
+  // boundary detection, not free clustering. Prior run rows recorded under
+  // schema-v1 remain readable as-is; nothing reads them back as input to
+  // this version's logic, so no migration of old rows is needed.
+  product_grouping: "listing-product-grouping-schema-v2",
 };

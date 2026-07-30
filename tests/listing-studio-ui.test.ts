@@ -718,3 +718,305 @@ describe("components/listing-studio/GroupingWorkspace.tsx — '+ New product' on
   });
 });
 
+describe("components/listing-studio/GroupingWorkspace.tsx — automatic AI product grouping: analyze-per-chunk, apply only after whole-session reconciliation (Milestone 3 v3)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+  const handlerFn = () => source.slice(source.indexOf("async function handleAutoGroupProducts"), source.indexOf("async function handleApplyAutoGroupProposal"));
+
+  it("adds an 'Auto-group products' action, disabled while running or when there are no Unsorted photos to analyse", () => {
+    expect(source).toContain("{autoGroupRunning ? \"Grouping…\" : \"Auto-group products\"}");
+    expect(source).toContain("disabled={autoGroupRunning || unsortedPhotoCount === 0}");
+  });
+
+  it("computes the eligible Unsorted set from local state, capped at MAX_AUTO_GROUP_SESSION_SIZE and sliced into MAX_AUTO_GROUP_BATCH_SIZE-sized chunks — the whole session's worth of photos, not just one small batch", () => {
+    const fn = handlerFn();
+    expect(fn).toContain('images.filter(image => image.draft_id === unsortedDraft.id && image.upload_state === "uploaded").sort((a, b) => a.sort_order - b.sort_order)');
+    expect(fn).toContain("eligible.slice(0, MAX_AUTO_GROUP_SESSION_SIZE)");
+    expect(fn).toContain("for (let i = 0; i < capped.length; i += MAX_AUTO_GROUP_BATCH_SIZE) chunks.push(capped.slice(i, i + MAX_AUTO_GROUP_BATCH_SIZE));");
+  });
+
+  it("loops through every chunk automatically, in sequence, behind one click — the user is never asked to click again — and every chunk is only ANALYSED here, never applied", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {");
+    expect(fn).toContain('fetch("/api/listing-studio/groups/auto-group", {');
+    expect(fn).not.toContain("rpc/listing_studio_apply_boundary_session");
+    expect(fn).toContain("chunkResults.push(body.data);");
+  });
+
+  it("REGRESSION: sends this chunk's own global sequence start, and a read-only overlap of the previous chunk's tail (CHUNK_OVERLAP_SIZE), so the model can judge continuity across the chunk boundary — never re-analysing or re-moving the overlap photos themselves", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("const chunkStartSequenceIndex = chunkIndex * MAX_AUTO_GROUP_BATCH_SIZE + 1;");
+    expect(fn).toContain("const overlapImageIds = chunkIndex > 0 ? chunks[chunkIndex - 1].slice(-CHUNK_OVERLAP_SIZE).map(image => image.id) : [];");
+    expect(fn).toContain("body: JSON.stringify({ imageIds: chunk.map(image => image.id), overlapImageIds, chunkStartSequenceIndex })");
+  });
+
+  it("a 503 (service not configured) stops the whole chunk loop immediately — every remaining chunk would fail identically", () => {
+    const fn = handlerFn();
+    expect(fn).toContain('if (response.status === 503) { hardStopError = body.error');
+    expect(fn).toContain("break;");
+  });
+
+  it("any other chunk failure (502, or a network error) is treated as possibly transient — that chunk's photos simply aren't included in chunkResults, and the loop continues with the next chunk rather than aborting the whole run", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("softFailureCount += 1;");
+    expect(fn).toContain("continue;");
+  });
+
+  it("REGRESSION: reconciles and applies the WHOLE session in exactly one call, only after every chunk has been analysed — never applying one chunk's result before the rest are known", () => {
+    const fn = handlerFn();
+    const loopEndIndex = fn.indexOf("if (chunkResults.length > 0) {");
+    const applySessionIndex = fn.indexOf('fetch("/api/listing-studio/groups/auto-group/apply-session"');
+    expect(loopEndIndex).toBeGreaterThan(-1);
+    expect(applySessionIndex).toBeGreaterThan(loopEndIndex);
+    expect(fn.match(/fetch\("\/api\/listing-studio\/groups\/auto-group\/apply-session"/g)?.length).toBe(1);
+    expect(fn).toContain("body: JSON.stringify({ imageIds: capped.map(image => image.id), chunkResults })");
+  });
+
+  it("REGRESSION: a failure applying the whole session (409) is surfaced as a hard error, distinct from a per-chunk analyze failure — nothing is reported as created unless the transactional apply actually succeeded", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("hardStopError = hardStopError ?? applyBody.error ?? \"Could not apply this session's groups.\";");
+  });
+
+  it("reports real, running progress after every completed chunk — photos analysed so far, and boundaries proposed so far — not just a cosmetic spinner", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("analysedSoFar: current.analysedSoFar + chunk.length");
+    expect(fn).toContain("proposedBoundariesSoFar += Array.isArray(body.data?.groups) ? body.data.groups.length : 0;");
+    expect(fn).toContain("productsIdentifiedSoFar: proposedBoundariesSoFar");
+  });
+
+  it("cycles a secondary cosmetic stage label on a timer alongside the real per-chunk progress counters, and advances to the final 'Applying groups' stage once the whole-session apply call starts", () => {
+    expect(source).toContain('const AUTO_GROUP_STAGE_TEXTS = ["Preparing photos", "Comparing products", "Building product groups", "Applying groups"];');
+    const fn = handlerFn();
+    expect(fn).toContain("setInterval(() => {");
+    expect(fn).toContain("stageIndex: (current.stageIndex + 1) % AUTO_GROUP_STAGE_TEXTS.length");
+    expect(fn).toContain("clearInterval(stageTimer)");
+    expect(fn).toContain("stageIndex: AUTO_GROUP_STAGE_TEXTS.length - 1 });");
+  });
+
+  it("REGRESSION: deliberately has no Cancel action — nothing can be safely rolled back once the session apply may already have created and moved high-confidence groups", () => {
+    expect(source).not.toMatch(/>Cancel</);
+    expect(source).not.toMatch(/AbortController/);
+  });
+
+  it("reloads the workspace only when at least one group was actually created by the session apply — an all-review or all-failed run never needs a refetch", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("if ((applyBody.groupsCreated?.length ?? 0) > 0) await loadWorkspace();");
+  });
+
+  it("shows a clear failure message with a Retry action that simply re-invokes the same handler — retrying naturally skips whatever already succeeded, since those photos have already left Unsorted", () => {
+    expect(source).toContain('{autoGroupError && !autoGroupRunning && <div className="auto-group-error" role="alert">');
+    expect(source).toContain("<button type=\"button\" className=\"button-secondary\" onClick={handleAutoGroupProducts}>Retry</button>");
+  });
+
+  it("shows the success summary (groups created / photos grouped / photos left in Unsorted) from the whole-session apply result, and a distinct empty-state note when there was nothing to analyse", () => {
+    expect(source).toContain("{autoGroupSummary.groupsCreated.length} product group{autoGroupSummary.groupsCreated.length === 1 ? \"\" : \"s\"} created");
+    expect(source).toContain("{autoGroupSummary.photosGroupedCount} photo{autoGroupSummary.photosGroupedCount === 1 ? \"\" : \"s\"} grouped");
+    expect(source).toContain("{autoGroupSummary.photosLeftInUnsortedCount} photo{autoGroupSummary.photosLeftInUnsortedCount === 1 ? \"\" : \"s\"} left in Unsorted");
+    expect(source).toContain("No photos in Unsorted to group.");
+  });
+
+  it("surfaces a truncation note when the session cap was hit or the run stopped early, inviting another click to cover the rest", () => {
+    expect(source).toContain("{autoGroupSummary.truncated &&");
+    const fn = handlerFn();
+    expect(fn).toContain("truncated: totalEligible > capped.length || hardStopError !== null");
+  });
+
+  it("medium-confidence proposals (contiguous ranges pending review) are rendered with photo thumbnails, boundaryReason, warnings, and explicit Accept/Reject actions — never applied silently", () => {
+    expect(source).toContain("{autoGroupProposals.length > 0 && <div className=\"auto-group-review\">");
+    expect(source).toContain("auto-group-proposal-thumbs");
+    expect(source).toContain("{proposal.boundaryReason}");
+    expect(source).toContain("proposal.warnings.map(");
+    expect(source).toContain("onClick={() => handleDismissAutoGroupProposal(proposal.proposedGroupId)}");
+    expect(source).toContain("onClick={() => handleApplyAutoGroupProposal(proposal)}");
+  });
+
+  it("REGRESSION: the review actions read 'Accept' / 'Reject', not 'Create group' / 'Skip' — same underlying handlers, wording only", () => {
+    expect(source).toContain(">Reject</button>");
+    expect(source).toContain('{applyingProposalId === proposal.proposedGroupId ? "Accepting…" : "Accept"}');
+    expect(source).not.toContain(">Skip<");
+    expect(source).not.toContain('"Create group"');
+  });
+
+  it("applying (Accept) a proposal posts its exact imageIds to the single-proposal apply endpoint (unchanged by the v3 redesign), removes it from the pending list on success, and reloads the workspace", () => {
+    const fn = source.slice(source.indexOf("async function handleApplyAutoGroupProposal"), source.indexOf("function handleDismissAutoGroupProposal"));
+    expect(fn).toContain('fetch("/api/listing-studio/groups/auto-group/apply", {');
+    expect(fn).toContain("body: JSON.stringify({ imageIds: proposal.imageIds })");
+    expect(fn).toContain("current.filter(p => p.proposedGroupId !== proposal.proposedGroupId)");
+    expect(fn).toContain("await loadWorkspace();");
+  });
+
+  it("dismissing (Reject) a proposal makes no API call — the photos were never moved, so there's nothing to undo", () => {
+    const fn = source.slice(source.indexOf("function handleDismissAutoGroupProposal"), source.indexOf("// ---- Clear all"));
+    expect(fn).not.toContain("fetch(");
+  });
+
+  it("computes unsortedPhotoCount from the real Unsorted group's own photos, not a guess", () => {
+    expect(source).toContain('const unsortedDraft = drafts.find(draft => draft.title === "Unsorted");');
+    expect(source).toContain("const unsortedPhotoCount = unsortedDraft ? images.filter(image => image.draft_id === unsortedDraft.id).length : 0;");
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — REGRESSION: 'Save failed' getting stuck on every card (separate bug, fixed alongside the v3 redesign)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+
+  it("flashFailed mirrors flashSaved: sets 'failed', then auto-resets back to 'idle' after a guarded timeout, so a stale failure can never persist indefinitely", () => {
+    const fn = source.slice(source.indexOf("function flashFailed()"), source.indexOf("function flashFailed()") + 250);
+    expect(fn).toContain('setSaveState("failed");');
+    expect(fn).toContain('setTimeout(() => setSaveState(current => (current === "failed" ? "idle" : current)), 5000);');
+  });
+
+  it("REGRESSION: every failure path calls flashFailed() — there is exactly one raw setSaveState(\"failed\") call in the whole file, and it's flashFailed's own definition", () => {
+    expect(source.match(/setSaveState\("failed"\)/g)?.length).toBe(1);
+    // every other former call site now goes through flashFailed()
+    expect(source.match(/flashFailed\(\)/g)?.length).toBeGreaterThanOrEqual(7);
+  });
+
+  it("withSaveState (renames, reorders, merges) calls flashFailed on both a non-ok response and a thrown network error", () => {
+    const fn = source.slice(source.indexOf("async function withSaveState"), source.indexOf("// ---- Upload flow"));
+    expect(fn).toContain("if (!response.ok) { flashFailed(); return { ok: false");
+    expect(fn).toContain("catch { flashFailed(); return { ok: false");
+  });
+
+  it("commitDeletePhotos (the real delayed-delete network call) calls flashFailed on failure", () => {
+    const fn = source.slice(source.indexOf("async function commitDeletePhotos"), source.indexOf("const handleRemovePhoto"));
+    expect(fn).toContain("catch { flashFailed(); }");
+  });
+
+  it("handleCreateGroup ('+ New product') calls flashFailed on a non-ok response and on a thrown error", () => {
+    const fn = source.slice(source.indexOf("async function handleCreateGroup"), source.indexOf("// An empty group deletes"));
+    expect(fn).toContain("if (!response.ok) { flashFailed(); return; }");
+    expect(fn).toContain("catch { flashFailed(); }");
+  });
+
+  it("scheduleDelayedGroupDelete's real (non-undone) delete calls flashFailed on a non-ok response or thrown error", () => {
+    const fn = source.slice(source.indexOf("function scheduleDelayedGroupDelete"), source.indexOf("async function handleMove"));
+    expect(fn).toContain("if (response.ok) { flashSaved(); await loadWorkspace(); } else flashFailed();");
+    expect(fn).toContain("catch { flashFailed(); }");
+  });
+
+  it("handleCreateAndMove (Move -> New group) calls flashFailed when creating the new group fails", () => {
+    const fn = source.slice(source.indexOf("async function handleCreateAndMove"), source.indexOf("async function handleSplit"));
+    expect(fn).toContain("if (!created.ok) { setDialogBusy(false); flashFailed(); return; }");
+  });
+
+  it("handleSplit calls flashFailed on a non-ok response", () => {
+    const fn = source.slice(source.indexOf("async function handleSplit"), source.indexOf("async function handleMerge"));
+    expect(fn).toContain("} else flashFailed();");
+  });
+});
+
+describe("components/listing-studio/ClearWorkspaceDialog.tsx — confirmation dialog", () => {
+  const source = read("components/listing-studio/ClearWorkspaceDialog.tsx");
+
+  it("uses the exact required title, body copy, and button labels", () => {
+    expect(source).toContain(">Clear all photos and groups?<");
+    expect(source).toContain("This will permanently delete every uploaded photo and product group in Listing Studio. This action cannot be undone.");
+    expect(source).toContain(">Cancel<");
+    expect(source).toContain("Clear everything");
+  });
+
+  it("the confirm button is styled as clearly destructive", () => {
+    expect(source).toContain('className="button-danger"');
+  });
+
+  it("REGRESSION: while loading, both buttons are disabled and the confirm label reads 'Clearing…'", () => {
+    expect(source).toMatch(/className="button-secondary" onClick=\{onClose\} disabled=\{loading\}/);
+    expect(source).toMatch(/className="button-danger" disabled=\{loading\} onClick=\{onConfirm\}/);
+    expect(source).toContain('{loading ? "Clearing…" : "Clear everything"}');
+  });
+
+  it("Escape closes the dialog, but only when not loading", () => {
+    expect(source).toContain('event.key === "Escape" && !loading');
+  });
+
+  it("clicking the backdrop closes the dialog, matching the existing modal convention, but only when not loading", () => {
+    expect(source).toContain("event.target === event.currentTarget && !loading");
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' workspace-wide reset", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+  const handlerFn = () => source.slice(source.indexOf("async function handleClearWorkspace"), source.indexOf("// ---- Keyboard shortcuts"));
+
+  it("adds a clearly destructive but not overly prominent 'Clear all' action in the same toolbar as Auto-group products / + New product", () => {
+    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
+    expect(toolbar).toContain("Clear all");
+    expect(toolbar).toContain('className="button-danger listing-clear-all"');
+  });
+
+  it("does not execute immediately on click — it only opens the confirmation dialog", () => {
+    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
+    expect(toolbar).toContain("onClick={() => setClearWorkspaceDialogOpen(true)}");
+    expect(toolbar).not.toContain("onClick={handleClearWorkspace}");
+  });
+
+  it("shows a small, unobtrusive helper note near Auto-group products about keeping each product's photos together in upload order — never as an error/warning banner", () => {
+    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{clearWorkspaceError &&'));
+    expect(toolbar).toContain('<p className="auto-group-order-hint">For best results, keep each product');
+    expect(toolbar).not.toContain('role="alert"');
+    expect(toolbar).not.toContain('role="status"');
+  });
+
+  it("REGRESSION: disables the 'Clear all' trigger while an upload is active, while auto-grouping is running, or while a clear is already running", () => {
+    expect(source).toContain("const uploadsActive = uploadItems.some(item => item.state === \"pending\" || item.state === \"uploading\");");
+    expect(source).toContain("const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive;");
+    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
+    expect(toolbar).toContain("disabled={clearWorkspaceDisabled}");
+  });
+
+  it("renders ClearWorkspaceDialog only when clearWorkspaceDialogOpen is true, wired to the real handler and loading state", () => {
+    expect(source).toContain("{clearWorkspaceDialogOpen && <ClearWorkspaceDialog");
+    expect(source).toContain("loading={clearingWorkspace}");
+    expect(source).toContain("onConfirm={handleClearWorkspace}");
+  });
+
+  it("REGRESSION: calls the single dedicated DELETE endpoint exactly once — never one call per photo or group", () => {
+    const fn = handlerFn();
+    expect(fn).toContain('fetch("/api/listing-studio/workspace", { method: "DELETE" })');
+    expect(fn.match(/fetch\("\/api\/listing-studio\/workspace"/g)?.length).toBe(1);
+  });
+
+  it("on a non-ok response, reports the error and leaves every local state untouched — nothing is assumed cleared just because the dialog was open", () => {
+    const fn = handlerFn();
+    const failureBranch = fn.slice(fn.indexOf("if (!response.ok)"), fn.indexOf("setPendingUndo(null);"));
+    expect(failureBranch).toContain("setClearWorkspaceError(body.error ||");
+    expect(failureBranch).toContain("return;");
+  });
+
+  it("REGRESSION: on success, discards (never fires) any pending undo toast, since its target rows are about to be deleted anyway", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("setPendingUndo(null);");
+    expect(fn).not.toContain("forceResolvePendingUndo();");
+  });
+
+  it("on success, clears selection, the whole upload queue, every auto-group UI state field (progress/error/summary/proposals), every open dialog, the shared save indicator, and the load error, then closes its own dialog", () => {
+    const fn = handlerFn();
+    for (const call of [
+      "setSelectedIds(new Set());", "setUploadItems([]);", "setUploadNotice(\"\");", "setUploadSuccessMessage(\"\");",
+      "setAutoGroupRunning(false);", "setAutoGroupProgress(null);", "setAutoGroupError(null);", "setAutoGroupSummary(null);",
+      "setAutoGroupProposals([]);", "setApplyingProposalId(null);",
+      "setMoveDialogGroupId(null);", "setMergeDialogGroupId(null);", "setDeleteGroupTarget(null);", "setBulkDeleteConfirmOpen(false);",
+      "setAutoEditGroupId(null);", "setSaveState(\"idle\");", "setLoadError(\"\");", "setClearWorkspaceDialogOpen(false);",
+    ]) {
+      expect(fn).toContain(call);
+    }
+  });
+
+  it("REGRESSION: refreshes drafts/images from a real loadWorkspace() call after success — the empty state is confirmed by the server, not assumed locally", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("await loadWorkspace();");
+    const loadWorkspaceIndex = fn.indexOf("await loadWorkspace();");
+    const dialogCloseIndex = fn.indexOf("setClearWorkspaceDialogOpen(false);");
+    expect(loadWorkspaceIndex).toBeGreaterThan(dialogCloseIndex);
+  });
+
+  it("a network error is also surfaced, and clearingWorkspace is always reset in a finally block regardless of outcome", () => {
+    const fn = handlerFn();
+    expect(fn).toContain('setClearWorkspaceError("Network error — could not clear the workspace. Please try again.");');
+    expect(fn).toMatch(/finally \{\s*setClearingWorkspace\(false\);\s*\}/);
+  });
+
+  it("includes clearWorkspaceDialogOpen in anyDialogOpen, so keyboard shortcuts (Ctrl+A/Escape/Delete) are disabled while this dialog is open, matching every other dialog", () => {
+    expect(source).toContain("const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen);");
+  });
+});
+

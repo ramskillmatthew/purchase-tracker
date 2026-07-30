@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { isAcceptedImageMimeType, MAX_FILES_PER_SELECTION } from "@/lib/listing-studio/upload-limits";
+import { isAcceptedImageMimeType, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE, MAX_FILES_PER_SELECTION } from "@/lib/listing-studio/upload-limits";
+import { autoGroupToolInputSchema } from "@/lib/listing-studio/auto-group-schemas";
 
 // Milestone 2 request-body schemas: photo upload, confirmation, and manual
 // grouping (create/rename/move/reorder/split/merge). Every field is
@@ -71,4 +72,44 @@ export const splitGroupRequestSchema = z.object({
 export const mergeGroupsRequestSchema = z.object({
   sourceDraftId: uuidSchema,
   targetDraftId: uuidSchema,
+}).strict();
+
+// Applies one already-reviewed medium-confidence auto-grouping proposal
+// (see app/api/listing-studio/groups/auto-group/apply/route.ts) — just the
+// photo ids the user confirmed; the destination group is always a fresh,
+// automatically-named one, and the source is always whichever Unsorted
+// group currently exists, so neither is ever client-supplied.
+export const applyAutoGroupProposalRequestSchema = z.object({
+  imageIds: z.array(uuidSchema).min(1).max(100),
+}).strict();
+
+// One chunk of a (possibly much larger) "Auto-group products" run — see
+// MAX_AUTO_GROUP_BATCH_SIZE. components/listing-studio/GroupingWorkspace.tsx
+// slices the whole eligible Unsorted set into chunks of at most this many
+// ids and calls the analyze route once per chunk, automatically, in
+// sequence; the server independently re-verifies every id still belongs to
+// this owner's current Unsorted group regardless of what the client sends.
+// `overlapImageIds` (read-only context from the tail of the previous
+// chunk) and `chunkStartSequenceIndex` (this chunk's own global sequence
+// position, for prompt labelling only) are both optional — chunk 1 has
+// neither.
+export const autoGroupAnalyzeRequestSchema = z.object({
+  imageIds: z.array(uuidSchema).min(1).max(MAX_AUTO_GROUP_BATCH_SIZE),
+  overlapImageIds: z.array(uuidSchema).max(20).optional(),
+  chunkStartSequenceIndex: z.number().int().positive(),
+}).strict();
+
+// Applies a WHOLE "Auto-group products" session in one all-or-nothing call
+// — see app/api/listing-studio/groups/auto-group/apply-session/route.ts.
+// `imageIds` is the full session's eligible photo ids, in the exact order
+// used throughout analysis (1-based position = sequence index);
+// `chunkResults` is every chunk's own validated analyze response, in the
+// order the chunks were analysed. Both are re-derived from data the server
+// itself already returned to the client — this is reconciliation input,
+// not a source of authority: ownership and Unsorted-membership are still
+// independently enforced by rpc/listing_studio_apply_boundary_session
+// itself before anything is ever moved.
+export const applyAutoGroupSessionRequestSchema = z.object({
+  imageIds: z.array(uuidSchema).min(1).max(MAX_AUTO_GROUP_SESSION_SIZE),
+  chunkResults: z.array(autoGroupToolInputSchema).min(1).max(Math.ceil(MAX_AUTO_GROUP_SESSION_SIZE / MAX_AUTO_GROUP_BATCH_SIZE)),
 }).strict();
