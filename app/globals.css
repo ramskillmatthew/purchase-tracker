@@ -873,6 +873,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .task-modal-heading button { width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--muted); background: var(--surface-3); font-size: 18px; }
 .task-modal-body { display: flex; padding: 14px 16px; flex-direction: column; gap: 12px; }
 .task-modal-body textarea.input { min-height: 70px; padding: 8px 10px; resize: vertical; }
+.edit-listing-fields-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
 .task-modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .task-priority-select { display: inline-flex; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
 .task-priority-option { flex: 1; min-height: 32px; padding: 0 10px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 650; transition: background 140ms ease, color 140ms ease; }
@@ -1085,6 +1086,22 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .product-group-unsorted-badge { padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-2); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .product-group-save-state { margin-left: auto; color: var(--muted); font-size: 9px; font-weight: 600; }
 .product-group-empty { margin: 8px 0; color: var(--muted); font-size: 11px; }
+.listing-card { margin: 0 0 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--line)); border-radius: 9px; background: var(--primary-soft); }
+.listing-card-title { margin: 0; color: var(--text); font-size: 12px; font-weight: 700; line-height: 1.4; }
+.listing-card-description { overflow: hidden; display: -webkit-box; margin: 6px 0 8px; color: var(--muted); font-size: 10.5px; line-height: 1.5; white-space: pre-line; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.listing-card-actions { display: flex; gap: 8px; }
+.listing-card-actions button { min-height: 28px; padding: 0 10px; font-size: 9px; }
+
+.preview-listing-modal { width: min(560px, 100%); }
+.preview-listing-body { max-height: min(60vh, 520px); overflow-y: auto; }
+.preview-listing-section + .preview-listing-section { margin-top: 14px; }
+.preview-listing-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.preview-listing-section-heading button { min-height: 28px; padding: 0 10px; font-size: 9px; white-space: nowrap; }
+.preview-listing-title-text { margin: 0; color: var(--text); font-size: 13px; font-weight: 700; line-height: 1.5; }
+.preview-listing-description-text { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--text); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.preview-listing-meta { display: flex; margin-top: 14px; gap: 20px; }
+.preview-listing-meta-item { display: flex; flex-direction: column; gap: 3px; }
+.preview-listing-meta-item span:last-child { color: var(--text); font-size: 11.5px; font-weight: 600; }
 .product-group-selection-row { display: flex; margin-bottom: 6px; align-items: center; gap: 8px; flex-wrap: wrap; }
 .product-group-selection-row button { min-height: 28px; padding: 0 10px; font-size: 9px; }
 .product-group-selection-count { color: var(--muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; }

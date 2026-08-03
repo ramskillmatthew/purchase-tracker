@@ -450,6 +450,12 @@ describe("app/api/listing-studio/workspace/route.ts — GET (fetches the Create 
   it("excludes archived drafts from the Create workspace", () => {
     expect(getFn).toContain("status=neq.archived");
   });
+
+  it("Milestone 4: selects every structured/generated listing field the Create view needs to render a listing card", () => {
+    for (const column of ["brand", "model", "product_type", "colour", "uk_size", "sku", "generated_title", "generated_description"]) {
+      expect(getFn).toContain(column);
+    }
+  });
 });
 
 describe("app/api/listing-studio/workspace/route.ts — DELETE ('Clear all', workspace-wide reset)", () => {
@@ -512,5 +518,131 @@ describe("app/api/listing-studio/workspace/route.ts — DELETE ('Clear all', wor
 
   it("has a bounded maxDuration, matching the convention for a potentially-long-running route in this feature", () => {
     expect(source).toContain("export const maxDuration = 30;");
+  });
+});
+
+describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Milestone 4: generates ONE group's listing", () => {
+  const source = read("app/api/listing-studio/groups/[draftId]/generate/route.ts");
+
+  it("requires the owner, validates the group id, and has a bounded maxDuration matching this feature's other AI-calling routes", () => {
+    expect(source).toContain("await requireOwner()");
+    expect(source).toContain("uuidSchema.safeParse(draftId).success");
+    expect(source).toContain("export const maxDuration = 60;");
+  });
+
+  it("REGRESSION: rejects generating a listing for the Unsorted group specifically, not just any group", () => {
+    expect(source).toContain('if (draft.title === UNSORTED_TITLE) return NextResponse.json({ error: "Cannot generate a listing for the Unsorted group." }, { status: 400 });');
+  });
+
+  it("only ever reads this owner's own uploaded photos for this exact group — never a client-supplied photo list", () => {
+    const fn = source.slice(source.indexOf("const images = await supabaseRequestAll"), source.indexOf("if (!images.length)"));
+    expect(fn).toContain("draft_id=eq.${draftId}");
+    expect(fn).toContain("owner_id=eq.${user.id}");
+    expect(fn).toContain("upload_state=eq.uploaded");
+  });
+
+  it("bounds the number of photos sent to Claude for one group, per MAX_GENERATION_IMAGES_PER_GROUP", () => {
+    expect(source).toContain("const eligibleImages = images.slice(0, MAX_GENERATION_IMAGES_PER_GROUP);");
+  });
+
+  it("never applies/persists anything on an AI failure — only an audit row is written, so a retry always safely repeats the same call", () => {
+    const failureBlock = source.slice(source.indexOf('if (outcome.status !== "success")'), source.indexOf("const fields = outcome.data;"));
+    expect(failureBlock).toContain('status: "failed"');
+    expect(failureBlock).not.toContain("listing_drafts?id=eq");
+    expect(failureBlock).toContain('const status = outcome.status === "not_configured" ? 503 : 502;');
+  });
+
+  it("REGRESSION: derives title/description from the structured fields via listing-template.ts — never sends or accepts a title/description from the AI", () => {
+    expect(source).toContain("generateListingTitle(structuredFields)");
+    expect(source).toContain("generateListingDescription(structuredFields)");
+    expect(source).not.toMatch(/outcome\.data\.title|outcome\.data\.description/);
+  });
+
+  it("persists every structured field, the derived/preserved UK size and its provenance, the raw source size, the fixed condition text, both generated fields, and marks the draft ready, in one real (non-swallowed) write", () => {
+    const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
+    const patchBlock = source.slice(patchStart, source.indexOf("await supabaseRequest(\"listing_analysis_runs\"", patchStart));
+    expect(patchBlock).not.toContain(".catch(() => {})"); // the real write is never best-effort
+    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: finalUkSize", "uk_size_source: finalUkSizeSource", "sku: structuredFields.sku", "source_size_system: fields.sourceSize.system", "source_size_value: fields.sourceSize.value", "condition: LISTING_CONDITION_TEXT", "generated_title: generatedTitle", "generated_description: generatedDescription", 'status: "ready"', "ai_result_json: fields"]) {
+      expect(patchBlock).toContain(field);
+    }
+  });
+
+  it("REGRESSION (Milestone 4 sizing coverage correction): derives ukSize deterministically via lib/listing-studio/size-conversion.ts — a directly observed UK size is used as-is, EU/US is converted brand-aware with a fallback, and an existing UK size (and its provenance, from a prior generation or manual Edit fields entry) is never overwritten", () => {
+    expect(source).toContain("import { deriveUkSizeFromSource } from \"@/lib/listing-studio/size-conversion\";");
+    const deriveIndex = source.indexOf("const derived = deriveUkSizeFromSource({");
+    const deriveBlock = source.slice(deriveIndex, source.indexOf("const finalUkSize ="));
+    expect(deriveBlock).toContain("sourceSizeSystem: fields.sourceSize.system,");
+    expect(deriveBlock).toContain("sourceSizeValue: fields.sourceSize.value,");
+    expect(deriveBlock).toContain("sourceSizeGender: fields.sourceSize.gender,");
+    expect(source).toContain("const finalUkSize = draft.uk_size ?? derived.ukSize;");
+    expect(source).toContain("const finalUkSizeSource = draft.uk_size ? draft.uk_size_source : derived.provenance;");
+  });
+
+  it("selects the draft's own current uk_size and uk_size_source before generating, so the preserve-existing-value check above has something real to compare against", () => {
+    expect(source).toContain("select=id,title,uk_size,uk_size_source");
+  });
+
+  it("records an audit row on both success and failure — stage 'generation', model, prompt/schema version, timestamps", () => {
+    for (const field of ['stage: "generation"', "model,", "prompt_version: LISTING_PROMPT_VERSIONS.generation", "schema_version: LISTING_SCHEMA_VERSIONS.generation", "started_at", "completed_at"]) {
+      expect(source).toContain(field);
+    }
+    expect(source).toContain('status: "failed"');
+    expect(source).toContain('status: "success"');
+  });
+
+  it("returns the persisted structured fields and both generated fields to the client", () => {
+    const responseBlock = source.slice(source.lastIndexOf("return NextResponse.json({"), source.length);
+    for (const field of ["brand:", "model:", "productType:", "colour:", "ukSize:", "sku:", "generatedTitle,", "generatedDescription,"]) {
+      expect(responseBlock).toContain(field);
+    }
+  });
+
+  it("catches everything through safeApiError, matching every other route in this feature", () => {
+    expect(source).toContain('return safeApiError(error, "Could not generate this listing.");');
+  });
+});
+
+describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 4: 'Edit fields' — no AI call, ever", () => {
+  const source = read("app/api/listing-studio/groups/[draftId]/fields/route.ts");
+
+  it("requires the owner, validates the group id and request body strictly", () => {
+    expect(source).toContain("await requireOwner()");
+    expect(source).toContain("uuidSchema.safeParse(draftId).success");
+    expect(source).toContain("updateListingFieldsRequestSchema.parse(await request.json())");
+  });
+
+  it("REGRESSION: never imports or calls anything AI-related — this is a pure database-and-template operation", () => {
+    expect(source).not.toMatch(/anthropic|Anthropic|runListingGenerationAnalysis|prepareListingGenerationImageInputs/);
+  });
+
+  it("normalizes an empty/whitespace-only field to null — never stores a blank string as a 'set' value", () => {
+    expect(source).toContain("function normalize(value: string | null): string | null {");
+    expect(source).toContain("const trimmed = value?.trim();");
+    expect(source).toContain("return trimmed ? trimmed : null;");
+  });
+
+  it("regenerates both derived fields from the submitted structured fields via listing-template.ts, and persists them together with the structured fields", () => {
+    const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
+    const patchBlock = source.slice(patchStart, source.indexOf("return NextResponse.json({", patchStart));
+    expect(source).toContain("generateListingTitle(structuredFields)");
+    expect(source).toContain("generateListingDescription(structuredFields)");
+    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: structuredFields.ukSize", "sku: structuredFields.sku", "generated_title: generatedTitle", "generated_description: generatedDescription"]) {
+      expect(patchBlock).toContain(field);
+    }
+  });
+
+  it("REGRESSION (Milestone 4 sizing coverage correction): records provenance 'manual' whenever a UK size is submitted, and null when it's cleared — a manually-entered value must never be mistaken for a generated one on a later regenerate", () => {
+    const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
+    const patchBlock = source.slice(patchStart, source.indexOf("return NextResponse.json({", patchStart));
+    expect(patchBlock).toContain('uk_size_source: structuredFields.ukSize ? "manual" : null');
+  });
+
+  it("REGRESSION: never accepts a title or description field from the client — updateListingFieldsRequestSchema has no such field, and this route never reads one from the body", () => {
+    expect(source).not.toContain("body.title");
+    expect(source).not.toContain("body.description");
+  });
+
+  it("catches everything through safeApiError, matching every other route in this feature", () => {
+    expect(source).toContain('return safeApiError(error, "Could not save these fields.");');
   });
 });

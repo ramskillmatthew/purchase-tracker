@@ -99,6 +99,30 @@ export type ListingDraft = {
   subcategory: string | null;
   condition: string | null;
   sizeLabel: string | null;
+  // Milestone 4 (AI listing generation) — see lib/listing-studio/listing-template.ts.
+  // `productType`/`colour`/`ukSize` are the structured fields the AI
+  // returns (alongside the reused `brand`/`model`/`sku` above);
+  // `generatedTitle`/`generatedDescription` are the application-derived
+  // marketplace listing text, deliberately separate from `title`/
+  // `description` above (which remain this group's own editable display
+  // name — unrelated to the generated listing).
+  productType: string | null;
+  colour: string | null;
+  ukSize: string | null;
+  // Milestone 4 sizing correction — see lib/listing-studio/size-conversion.ts.
+  // The AI never converts a size itself; it only ever reports the system
+  // and value exactly as printed on the label, persisted here for audit/
+  // traceability alongside the (possibly brand-aware-converted) `ukSize`
+  // above. Null whenever no size marking was confidently read at all.
+  sourceSizeSystem: string | null;
+  sourceSizeValue: string | null;
+  // Milestone 4 sizing coverage correction — how `ukSize` above was
+  // obtained: 'observed' | 'brand_converted' | 'fallback_converted' |
+  // 'manual' | null (see lib/listing-studio/size-conversion.ts's
+  // UkSizeProvenance). Internal bookkeeping only, never shown in the UI.
+  ukSizeSource: string | null;
+  generatedTitle: string | null;
+  generatedDescription: string | null;
   suggestedPricePence: number | null;
   confirmedPricePence: number | null;
   status: ListingDraftStatus;

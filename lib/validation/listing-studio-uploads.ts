@@ -113,3 +113,20 @@ export const applyAutoGroupSessionRequestSchema = z.object({
   imageIds: z.array(uuidSchema).min(1).max(MAX_AUTO_GROUP_SESSION_SIZE),
   chunkResults: z.array(autoGroupToolInputSchema).min(1).max(Math.ceil(MAX_AUTO_GROUP_SESSION_SIZE / MAX_AUTO_GROUP_BATCH_SIZE)),
 }).strict();
+
+// Milestone 4 (AI listing generation) — the "Edit fields" modal's own save
+// request (see app/api/listing-studio/groups/[draftId]/fields/route.ts).
+// Every field is optional/nullable: a blank field is a legitimate value
+// (the AI leaves brand/model/colour/ukSize/sku null rather than guess, and
+// the user can leave it blank too) — this is never itself a validation
+// failure, only a missing-data state the UI already expects. An empty
+// string is normalized to null by the route, not this schema.
+const listingFieldTextSchema = z.string().trim().max(150).nullable();
+export const updateListingFieldsRequestSchema = z.object({
+  brand: listingFieldTextSchema,
+  model: listingFieldTextSchema,
+  productType: listingFieldTextSchema,
+  colour: listingFieldTextSchema,
+  ukSize: z.string().trim().max(20).nullable(),
+  sku: z.string().trim().max(50).nullable(),
+}).strict();

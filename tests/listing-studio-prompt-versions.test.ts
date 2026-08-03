@@ -21,10 +21,13 @@ describe("LISTING_PROMPT_VERSIONS — Stage 1 spec §18", () => {
     expect(LISTING_PROMPT_VERSIONS.label_extraction).toBe("listing-label-extraction-v1");
     expect(LISTING_PROMPT_VERSIONS.visual_identification).toBe("listing-visual-identification-v1");
     expect(LISTING_PROMPT_VERSIONS.consistency_check).toBe("listing-consistency-check-v1");
-    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v1");
   });
 
   it("Milestone 3: automatic AI product grouping has its own recorded prompt version", () => {
     expect(LISTING_PROMPT_VERSIONS.product_grouping).toBe("listing-product-grouping-v3"); // v3: replaces free-clustering with ordered boundary detection
+  });
+
+  it("Milestone 4 sizing coverage correction: the SIZE instructions gained childrens-category guidance — bumped to v4, after the v3 rewrite that introduced sourceSize", () => {
+    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v4");
   });
 });

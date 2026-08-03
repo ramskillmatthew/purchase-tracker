@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import UploadDropzone from "./UploadDropzone";
 import UploadQueue from "./UploadQueue";
-import ProductGroupCard from "./ProductGroupCard";
+import ProductGroupCard, { type GeneratedListingSummary } from "./ProductGroupCard";
+import EditListingFieldsDialog, { type ListingFieldsDraft } from "./EditListingFieldsDialog";
+import PreviewListingDialog from "./PreviewListingDialog";
 import MovePhotosDialog, { type MovableGroup } from "./MovePhotosDialog";
 import MergeGroupsDialog, { type MergeableGroup } from "./MergeGroupsDialog";
 import DeleteGroupDialog, { type DeleteGroupMode } from "./DeleteGroupDialog";
@@ -16,13 +18,29 @@ import { isAcceptedFile, partitionDuplicateFiles } from "@/lib/listing-studio/fi
 import { CHUNK_OVERLAP_SIZE, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE } from "@/lib/listing-studio/upload-limits";
 import { prepareImagePreview, releaseImagePreview } from "@/lib/listing-studio/client-image-processing";
 
-type WorkspaceDraft = { id: string; title: string | null; status: string; created_at: string; updated_at: string };
+type WorkspaceDraft = {
+  id: string; title: string | null; status: string; created_at: string; updated_at: string;
+  // Milestone 4 (AI listing generation) — see ProductGroupCard.tsx's
+  // GeneratedListingSummary for why generated_title/generated_description
+  // are distinct from `title` above.
+  brand: string | null; model: string | null; product_type: string | null; colour: string | null;
+  uk_size: string | null; sku: string | null; generated_title: string | null; generated_description: string | null;
+};
 type WorkspaceImage = {
   id: string; draft_id: string; original_filename: string; mime_type: string; file_size: number;
   width: number | null; height: number | null; sort_order: number;
   detected_role: string | null; confirmed_role: string | null; upload_state: PhotoTileData["uploadState"]; preview_available: boolean;
 };
 type WorkspaceData = { drafts: WorkspaceDraft[]; images: WorkspaceImage[] };
+
+// A brand-new group (via "+ New product" or "Move/Split -> New group") has
+// none of Milestone 4's listing fields yet — spread into the locally
+// appended draft object right after creation, before the next
+// loadWorkspace() call replaces it with the server's own copy.
+const BLANK_LISTING_FIELDS = {
+  brand: null, model: null, product_type: null, colour: null,
+  uk_size: null, sku: null, generated_title: null, generated_description: null,
+} as const;
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
 
@@ -127,6 +145,16 @@ export default function GroupingWorkspace() {
   const [clearWorkspaceDialogOpen, setClearWorkspaceDialogOpen] = useState(false);
   const [clearingWorkspace, setClearingWorkspace] = useState(false);
   const [clearWorkspaceError, setClearWorkspaceError] = useState("");
+
+  // Milestone 4 (AI listing generation)
+  const [generatingListings, setGeneratingListings] = useState(false);
+  const [generateListingsProgress, setGenerateListingsProgress] = useState<{ done: number; total: number } | null>(null);
+  const [generateListingsError, setGenerateListingsError] = useState<string | null>(null);
+  const [editFieldsGroupId, setEditFieldsGroupId] = useState<string | null>(null);
+  const [savingListingFields, setSavingListingFields] = useState(false);
+  const [editFieldsError, setEditFieldsError] = useState("");
+  // Milestone 4 UX fix — read-only full preview, distinct from Edit fields.
+  const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);
 
   const uploadItemsRef = useRef<UploadItem[]>([]);
   useEffect(() => { uploadItemsRef.current = uploadItems; }, [uploadItems]);
@@ -423,7 +451,7 @@ export default function GroupingWorkspace() {
       if (!response.ok) { flashFailed(); return; }
       const { draftId, title } = body as { draftId: string; title: string };
       const now = new Date().toISOString();
-      setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now }]);
+      setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now, ...BLANK_LISTING_FIELDS }]);
       flashSaved();
       setAutoEditGroupId(draftId);
       requestAnimationFrame(() => {
@@ -535,7 +563,7 @@ export default function GroupingWorkspace() {
     if (!created.ok) { setDialogBusy(false); flashFailed(); return; }
     const { draftId, title } = createdBody as { draftId: string; title: string };
     const now = new Date().toISOString();
-    setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now }]);
+    setDrafts(current => [...current, { id: draftId, title, status: "grouping", created_at: now, updated_at: now, ...BLANK_LISTING_FIELDS }]);
     await handleMove(draftId);
   }
 
@@ -799,6 +827,79 @@ export default function GroupingWorkspace() {
     }
   }
 
+  // ---- AI listing generation (Milestone 4) ----
+  // One request per eligible group (not Unsorted, has at least one photo,
+  // not yet generated — see eligibleListingGroups below), sequential,
+  // continuing past an individual group's failure rather than aborting the
+  // whole run, mirroring handleAutoGroupProducts's own resilience
+  // convention. Never sends a title/description to the AI and never
+  // accepts one back — see lib/listing-studio/listing-generation-schemas.ts's
+  // own top comment. Re-clicking simply retries whichever groups still
+  // have no generated_title; an already-generated group is never
+  // regenerated by this bulk action.
+  async function handleGenerateListings() {
+    if (!eligibleListingGroups.length) return;
+    setGeneratingListings(true);
+    setGenerateListingsError(null);
+    setGenerateListingsProgress({ done: 0, total: eligibleListingGroups.length });
+
+    let failureCount = 0;
+    let anySucceeded = false;
+    for (const group of eligibleListingGroups) {
+      try {
+        const response = await fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" });
+        if (response.ok) anySucceeded = true; else failureCount += 1;
+      } catch {
+        failureCount += 1;
+      }
+      setGenerateListingsProgress(current => current && { ...current, done: current.done + 1 });
+    }
+
+    if (anySucceeded) await loadWorkspace();
+    if (failureCount > 0) {
+      setGenerateListingsError(`${failureCount} of ${eligibleListingGroups.length} listing${eligibleListingGroups.length === 1 ? "" : "s"} could not be generated. Click Generate Listings again to retry them.`);
+    }
+    setGeneratingListings(false);
+    setGenerateListingsProgress(null);
+  }
+
+  // Structured fields are the sole editable source of truth — saving here
+  // always regenerates title/description via the server's own
+  // listing-template.ts call, with no AI call. See EditListingFieldsDialog's
+  // own top comment.
+  async function handleSaveListingFields(fields: ListingFieldsDraft) {
+    if (!editFieldsGroupId) return;
+    const draftId = editFieldsGroupId;
+    setSavingListingFields(true);
+    setEditFieldsError("");
+    try {
+      const response = await fetch(`/api/listing-studio/groups/${draftId}/fields`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brand: fields.brand || null, model: fields.model || null, productType: fields.productType || null,
+          colour: fields.colour || null, ukSize: fields.ukSize || null, sku: fields.sku || null,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setEditFieldsError(body.error || "Could not save these fields."); return; }
+      setDrafts(current => current.map(draft => draft.id === draftId ? {
+        ...draft,
+        brand: body.brand, model: body.model, product_type: body.productType, colour: body.colour,
+        uk_size: body.ukSize, sku: body.sku, generated_title: body.generatedTitle, generated_description: body.generatedDescription,
+      } : draft));
+      setEditFieldsGroupId(null);
+    } catch {
+      setEditFieldsError("Network error — could not save these fields.");
+    } finally {
+      setSavingListingFields(false);
+    }
+  }
+
+  function handleCloseEditFields() {
+    setEditFieldsGroupId(null);
+    setEditFieldsError("");
+  }
+
   // ---- Keyboard shortcuts ----
   // Ctrl/Cmd+A selects every photo in whichever group currently has focus
   // (via the data-group-id ancestor set on each ProductGroupCard); Escape
@@ -806,7 +907,7 @@ export default function GroupingWorkspace() {
   // confirmation rather than deleting immediately. Disabled while any
   // dialog is open, or while typing in a text field (renaming a group,
   // typing a new group's name), so native input behaviour is never hijacked.
-  const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen);
+  const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen || editFieldsGroupId || previewGroupId);
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target;
@@ -847,6 +948,29 @@ export default function GroupingWorkspace() {
     return map;
   }, [images]);
 
+  // Milestone 4 (AI listing generation) — a single lookup keyed by draft
+  // id, rebuilt only when `drafts` changes, so memo()'d ProductGroupCard
+  // never sees a "changed" listing prop on an unrelated re-render.
+  const listingsByDraftId = useMemo(() => {
+    const map = new Map<string, GeneratedListingSummary | null>();
+    for (const draft of drafts) {
+      map.set(draft.id, draft.generated_title && draft.generated_description ? {
+        brand: draft.brand, model: draft.model, productType: draft.product_type, colour: draft.colour,
+        ukSize: draft.uk_size, sku: draft.sku, generatedTitle: draft.generated_title, generatedDescription: draft.generated_description,
+      } : null);
+    }
+    return map;
+  }, [drafts]);
+  // Eligible for "Generate Listings": a real product group (never
+  // Unsorted), with at least one photo, not already generated. Re-clicking
+  // only ever processes whichever groups still lack a generated_title.
+  const eligibleListingGroups = drafts.filter(draft =>
+    draft.title !== "Unsorted" && !draft.generated_title && images.some(image => image.draft_id === draft.id),
+  );
+  const editFieldsTarget = drafts.find(draft => draft.id === editFieldsGroupId) ?? null;
+  const previewTarget = drafts.find(draft => draft.id === previewGroupId) ?? null;
+  const previewListing = previewGroupId ? listingsByDraftId.get(previewGroupId) ?? null : null;
+
   const movableGroups: MovableGroup[] = drafts.filter(draft => draft.id !== moveDialogGroupId).map(draft => ({ id: draft.id, title: draft.title, photoCount: images.filter(image => image.draft_id === draft.id).length }));
   const mergeSourceGroup = drafts.find(draft => draft.id === mergeDialogGroupId);
   const mergeableGroups: MergeableGroup[] = drafts.filter(draft => draft.id !== mergeDialogGroupId).map(draft => ({ id: draft.id, title: draft.title, photoCount: images.filter(image => image.draft_id === draft.id).length }));
@@ -862,7 +986,8 @@ export default function GroupingWorkspace() {
   // own is already in flight — an upload, an auto-group run, or another
   // clear — so it can never race with, or be raced by, one of those.
   const uploadsActive = uploadItems.some(item => item.state === "pending" || item.state === "uploading");
-  const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive;
+  const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;
+  const generateListingsDisabled = generatingListings || autoGroupRunning || clearingWorkspace || uploadsActive;
 
   return <div className="listing-studio-create">
     <UploadDropzone onFilesSelected={handleFilesSelected} />
@@ -891,6 +1016,15 @@ export default function GroupingWorkspace() {
         <button type="button" className="button-secondary" onClick={handleAutoGroupProducts} disabled={autoGroupRunning || unsortedPhotoCount === 0} title={unsortedPhotoCount === 0 ? "No photos in Unsorted to group" : undefined}>
           {autoGroupRunning ? "Grouping…" : "Auto-group products"}
         </button>
+        <button
+          type="button"
+          className="button-secondary"
+          onClick={handleGenerateListings}
+          disabled={generateListingsDisabled || eligibleListingGroups.length === 0}
+          title={eligibleListingGroups.length === 0 ? "No product groups to generate listings for" : undefined}
+        >
+          {generatingListings ? "Generating…" : "Generate Listings"}
+        </button>
         <button type="button" className="button-secondary" onClick={handleCreateGroup}>+ New product</button>
         <button
           type="button"
@@ -907,6 +1041,18 @@ export default function GroupingWorkspace() {
       {clearWorkspaceError && !clearingWorkspace && <div className="auto-group-error" role="alert">
         <span>{clearWorkspaceError}</span>
         <button type="button" className="button-secondary" onClick={() => setClearWorkspaceDialogOpen(true)}>Retry</button>
+      </div>}
+
+      {generatingListings && generateListingsProgress && <div className="auto-group-progress" role="status">
+        <span className="auto-group-progress-spinner" aria-hidden="true" />
+        <div className="auto-group-progress-text">
+          <strong>Generating listings {generateListingsProgress.done} / {generateListingsProgress.total}</strong>
+        </div>
+      </div>}
+
+      {generateListingsError && !generatingListings && <div className="auto-group-error" role="alert">
+        <span>{generateListingsError}</span>
+        <button type="button" className="button-secondary" onClick={handleGenerateListings}>Retry</button>
       </div>}
 
       {autoGroupRunning && autoGroupProgress && <div className="auto-group-progress" role="status">
@@ -983,6 +1129,9 @@ export default function GroupingWorkspace() {
           saveState={saveState}
           autoEdit={draft.id === autoEditGroupId}
           onAutoEditConsumed={handleAutoEditConsumed}
+          listing={listingsByDraftId.get(draft.id) ?? null}
+          onEditFields={setEditFieldsGroupId}
+          onPreviewListing={setPreviewGroupId}
         />)}
       </div>
     </>}
@@ -1022,6 +1171,25 @@ export default function GroupingWorkspace() {
       loading={clearingWorkspace}
       onClose={() => setClearWorkspaceDialogOpen(false)}
       onConfirm={handleClearWorkspace}
+    />}
+    {editFieldsTarget && <EditListingFieldsDialog
+      groupTitle={editFieldsTarget.title || "this group"}
+      fields={{
+        brand: editFieldsTarget.brand ?? "", model: editFieldsTarget.model ?? "", productType: editFieldsTarget.product_type ?? "",
+        colour: editFieldsTarget.colour ?? "", ukSize: editFieldsTarget.uk_size ?? "", sku: editFieldsTarget.sku ?? "",
+      }}
+      loading={savingListingFields}
+      error={editFieldsError}
+      onClose={handleCloseEditFields}
+      onSave={handleSaveListingFields}
+    />}
+    {previewTarget && previewListing && <PreviewListingDialog
+      groupTitle={previewTarget.title || "this group"}
+      generatedTitle={previewListing.generatedTitle}
+      generatedDescription={previewListing.generatedDescription}
+      ukSize={previewListing.ukSize}
+      sku={previewListing.sku}
+      onClose={() => setPreviewGroupId(null)}
     />}
   </div>;
 }

@@ -170,6 +170,29 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     }
   });
 
+  it("Milestone 4 (AI listing generation): listing_drafts gets the new structured/generated listing columns, added idempotently on an already-deployed database", () => {
+    for (const column of ["product_type", "colour", "uk_size", "generated_title", "generated_description"]) {
+      expect(migration).toContain(`alter table public.listing_drafts add column if not exists ${column} text;`);
+    }
+  });
+
+  it("REGRESSION: generated_title/generated_description are distinct new columns from the pre-existing title/description columns — the migration never renames or repurposes the originals", () => {
+    expect(migration).toContain("title text,");
+    expect(migration).toContain("description text,");
+    expect(migration).toContain("generated_title text");
+    expect(migration).toContain("generated_description text");
+    expect(migration).not.toContain("rename column");
+  });
+
+  it("Milestone 4 sizing correction: listing_drafts gets source_size_system/source_size_value, added idempotently, independent of uk_size (which holds the observed/converted/manually-entered value)", () => {
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists source_size_system text;");
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists source_size_value text;");
+  });
+
+  it("Milestone 4 sizing coverage correction: listing_drafts gets uk_size_source, added idempotently, recording how uk_size was obtained (observed/brand_converted/fallback_converted/manual)", () => {
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists uk_size_source text;");
+  });
+
   it("useful indexes exist for the query patterns Saved Drafts needs (status filter, SKU search, per-draft image order, per-draft analysis history)", () => {
     expect(migration).toContain("listing_drafts_owner_status_idx");
     expect(migration).toContain("listing_drafts_owner_sku_idx");

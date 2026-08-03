@@ -111,6 +111,51 @@ on public.listing_drafts
 from anon,
 authenticated;
 
+-- Milestone 4 (AI listing generation): the structured product fields the AI
+-- returns for a product group (see lib/listing-studio/listing-generation-schemas.ts),
+-- plus the application-generated marketplace title/description derived from
+-- them (lib/listing-studio/listing-template.ts — pure functions, no AI call,
+-- so a future template change can regenerate every listing from these
+-- stored structured fields alone). Deliberately separate columns from
+-- `title`/`description` above, which remain each group's own editable
+-- *display name* inside the Create workspace (confirmed still in active use
+-- by GroupingWorkspace.tsx's rename UX) — colliding the two would either
+-- break renaming or silently overwrite a generated listing's marketplace
+-- title, so they never share a column. `brand`, `model`, `sku`, `condition`,
+-- and `ai_result_json` above are reused as-is: `ai_result_json` is exactly
+-- "raw last-pipeline-output, audit/debug only" per its own comment, which is
+-- also where this milestone's per-field confidence lives — internal-only,
+-- never surfaced in the UI, exactly as required, so no new confidence
+-- column is needed. `alter table ... add column if not exists` is
+-- idempotent, safe to re-run on an already-deployed database exactly like
+-- every other statement in this file.
+alter table public.listing_drafts add column if not exists product_type text;
+alter table public.listing_drafts add column if not exists colour text;
+alter table public.listing_drafts add column if not exists uk_size text;
+alter table public.listing_drafts add column if not exists generated_title text;
+alter table public.listing_drafts add column if not exists generated_description text;
+
+-- Milestone 4 sizing correction: the AI never converts a size itself — it
+-- only ever reports the system and value exactly as printed on the label
+-- (lib/listing-studio/listing-generation-schemas.ts's sourceSize field);
+-- any EU/US -> UK conversion happens deterministically, brand-aware, in
+-- lib/listing-studio/size-conversion.ts. These two columns persist that
+-- raw source reading for audit/traceability, independently of `uk_size`
+-- above (which holds the directly-observed UK size, or the converted
+-- result, or whatever the user has since entered manually via Edit
+-- fields — uk_size is never overwritten by a later generate call once set).
+alter table public.listing_drafts add column if not exists source_size_system text;
+alter table public.listing_drafts add column if not exists source_size_value text;
+
+-- Milestone 4 sizing coverage correction: records HOW `uk_size` above was
+-- obtained — 'observed' (read directly off the label), 'brand_converted'
+-- (matched an exact brand-specific chart entry), 'fallback_converted'
+-- (matched the generic category-separated fallback chart), or 'manual'
+-- (typed by the user via Edit fields). Never shown in the UI; exists so a
+-- later regeneration and the manual-entry protection above can tell these
+-- apart without re-deriving anything.
+alter table public.listing_drafts add column if not exists uk_size_source text;
+
 
 create table if not exists public.listing_draft_images (
   id uuid primary key default gen_random_uuid(),

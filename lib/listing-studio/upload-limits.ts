@@ -99,6 +99,26 @@ export const CHUNK_OVERLAP_SIZE = 5;
 export const AUTO_GROUP_IMAGE_MAX_DIMENSION_PX = 1024;
 export const AUTO_GROUP_IMAGE_JPEG_QUALITY = 78;
 
+// Milestone 4 (AI listing generation): unlike grouping, this pass must read
+// fine label/sticker text (the SKU inventory sticker, a UK size tag), so it
+// gets a noticeably higher resize ceiling than AUTO_GROUP_IMAGE_MAX_DIMENSION_PX
+// — at Anthropic's own documented ~1568px-per-side internal limit, so no
+// detail is thrown away before it even reaches the model. A separate, higher
+// JPEG quality too, for the same reason. See
+// lib/listing-studio/listing-generation-image-input.ts (a deliberately
+// separate file from auto-group-image-input.ts, not a shared/refactored one
+// — Milestone 3's grouping image-prep pipeline is tested and committed and
+// is not touched by this milestone).
+export const LISTING_GENERATION_IMAGE_MAX_DIMENSION_PX = 1568;
+export const LISTING_GENERATION_IMAGE_JPEG_QUALITY = 85;
+
+// A generous, defensive ceiling on how many of one product group's own
+// photos are sent to Claude in the one "Generate Listings" call for that
+// group — a real product group is normally well under this; if one somehow
+// exceeds it, only the first this many (by sort_order) are analysed rather
+// than the request growing unbounded.
+export const MAX_GENERATION_IMAGES_PER_GROUP = 40;
+
 // See lib/listing-studio/client-image-processing.ts — HEIC/HEIF genuinely
 // cannot be decoded server-side by this app's stack (verified live during
 // Milestone 2: sharp's bundled libheif reads HEIC container metadata but

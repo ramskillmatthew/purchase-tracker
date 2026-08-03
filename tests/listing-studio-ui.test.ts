@@ -956,9 +956,9 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
     expect(toolbar).not.toContain('role="status"');
   });
 
-  it("REGRESSION: disables the 'Clear all' trigger while an upload is active, while auto-grouping is running, or while a clear is already running", () => {
+  it("REGRESSION: disables the 'Clear all' trigger while an upload is active, while auto-grouping is running, while a clear is already running, or while listings are generating", () => {
     expect(source).toContain("const uploadsActive = uploadItems.some(item => item.state === \"pending\" || item.state === \"uploading\");");
-    expect(source).toContain("const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive;");
+    expect(source).toContain("const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;");
     const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
     expect(toolbar).toContain("disabled={clearWorkspaceDisabled}");
   });
@@ -1016,7 +1016,258 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
   });
 
   it("includes clearWorkspaceDialogOpen in anyDialogOpen, so keyboard shortcuts (Ctrl+A/Escape/Delete) are disabled while this dialog is open, matching every other dialog", () => {
-    expect(source).toContain("const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen);");
+    expect(source).toContain("const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen || editFieldsGroupId || previewGroupId);");
+  });
+});
+
+describe("components/listing-studio/EditListingFieldsDialog.tsx — Milestone 4: the only place structured listing fields are edited", () => {
+  const source = read("components/listing-studio/EditListingFieldsDialog.tsx");
+
+  it("has exactly the six required fields — Brand, Model, Product type, Colour, UK size, SKU — and nothing else editable", () => {
+    for (const label of ["Brand", "Model", "Product type", "Colour", "UK size", "SKU"]) {
+      expect(source).toContain(`<span className="label">${label}</span>`);
+    }
+  });
+
+  it("REGRESSION: has no title or description field anywhere — those are never directly editable", () => {
+    expect(source).not.toMatch(/label">Title</i);
+    expect(source).not.toMatch(/label">Description</i);
+    expect(source).not.toContain("textarea");
+  });
+
+  it("while saving, disables every input and both buttons, and the save button reads 'Saving…'", () => {
+    expect(source).toContain('disabled={loading}');
+    expect(source.match(/disabled=\{loading\}/g)?.length).toBeGreaterThanOrEqual(8); // 6 inputs + cancel + save
+    expect(source).toContain('{loading ? "Saving…" : "Save"}');
+  });
+
+  it("Escape and backdrop-click close the dialog, guarded by !loading, matching every other bespoke dialog in this feature", () => {
+    expect(source).toContain('event.key === "Escape" && !loading');
+    expect(source).toContain("event.target === event.currentTarget && !loading");
+  });
+
+  it("shows a save error inline in the dialog when passed one, rather than a separate page-level banner", () => {
+    expect(source).toContain('{error && <p className="upload-photo-error" role="alert">{error}</p>}');
+  });
+});
+
+describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4: the generated listing card", () => {
+  const source = read("components/listing-studio/ProductGroupCard.tsx");
+
+  it("renders the generated title/description and an Edit fields action only once a listing has been generated for this group", () => {
+    const cardBlock = source.slice(source.indexOf("{listing &&"), source.indexOf("<div className=\"product-group-selection-row\">"));
+    expect(cardBlock).toContain("{listing.generatedTitle}");
+    expect(cardBlock).toContain("{listing.generatedDescription}");
+    expect(cardBlock).toContain('onClick={() => onEditFields(group.id)}');
+    expect(cardBlock).toContain(">Edit fields<");
+  });
+
+  it("REGRESSION: generatedTitle/generatedDescription are a distinct prop from the group's own display name (`group.title`) — never the same field, never colliding with the rename UX", () => {
+    expect(source).toContain("export type GeneratedListingSummary = {");
+    const typeBlock = source.slice(source.indexOf("export type GeneratedListingSummary = {"), source.indexOf("export type GroupSummary = {") + 1 || source.length);
+    expect(source).toMatch(/generatedTitle: string;/);
+    expect(source).toMatch(/generatedDescription: string;/);
+    // The rename UX still only ever reads/writes group.title, never listing.generatedTitle.
+    expect(source).toContain("onRename(group.id, trimmed)");
+  });
+
+  it("does not render the listing card at all when this group has no generated listing yet", () => {
+    expect(source).toMatch(/\{listing && <div className="listing-card">/);
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Generate Listings' bulk action", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+  const handlerFn = () => source.slice(source.indexOf("async function handleGenerateListings"), source.indexOf("async function handleSaveListingFields"));
+
+  it("adds a 'Generate Listings' action in the same toolbar as Auto-group products, disabled when there is nothing eligible or another run is active", () => {
+    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('<p className="auto-group-order-hint">'));
+    expect(toolbar).toContain("Generate Listings");
+    expect(toolbar).toContain("onClick={handleGenerateListings}");
+    expect(toolbar).toContain("disabled={generateListingsDisabled || eligibleListingGroups.length === 0}");
+  });
+
+  it("REGRESSION: eligible groups exclude Unsorted, empty groups, and groups already generated — re-clicking only retries what's still missing", () => {
+    expect(source).toContain('draft.title !== "Unsorted" && !draft.generated_title && images.some(image => image.draft_id === draft.id)');
+  });
+
+  it("calls the single-group generate endpoint once per eligible group, sequentially, continuing past an individual failure rather than aborting the whole run", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("for (const group of eligibleListingGroups) {");
+    expect(fn).toContain("fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: \"POST\" })");
+    expect(fn).toContain("failureCount += 1;");
+    expect(fn).not.toContain("break;");
+  });
+
+  it("reports real running progress (done/total) while generating", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("setGenerateListingsProgress({ done: 0, total: eligibleListingGroups.length });");
+    expect(fn).toContain("setGenerateListingsProgress(current => current && { ...current, done: current.done + 1 });");
+  });
+
+  it("reloads the workspace only if at least one group actually succeeded, and reports a retry-friendly error if any failed", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("if (anySucceeded) await loadWorkspace();");
+    expect(fn).toContain("could not be generated. Click Generate Listings again to retry them.");
+  });
+
+  it("never sends any request body at all to the generate endpoint — the route derives everything itself from the group's own stored photos", () => {
+    const fn = handlerFn();
+    expect(fn).toContain('fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" })');
+    expect(fn).not.toContain("body:");
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Edit fields' save flow (no AI call)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+  const handlerFn = () => source.slice(source.indexOf("async function handleSaveListingFields"), source.indexOf("function handleCloseEditFields"));
+
+  it("PATCHes the dedicated fields endpoint for the group currently open in the dialog", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("fetch(`/api/listing-studio/groups/${draftId}/fields`, {");
+    expect(fn).toContain('method: "PATCH"');
+  });
+
+  it("REGRESSION: on success, updates local state with the server's own returned structured + generated fields — never assumes the client-typed values are what got saved", () => {
+    const fn = handlerFn();
+    expect(fn).toContain("brand: body.brand, model: body.model, product_type: body.productType, colour: body.colour,");
+    expect(fn).toContain("uk_size: body.ukSize, sku: body.sku, generated_title: body.generatedTitle, generated_description: body.generatedDescription,");
+  });
+
+  it("on failure, shows the error inline in the dialog (editFieldsError) and returns immediately — never reaches the dialog-closing line on a failed save", () => {
+    const fn = handlerFn();
+    const failureIndex = fn.indexOf('if (!response.ok) { setEditFieldsError(body.error || "Could not save these fields."); return; }');
+    const closeIndex = fn.indexOf("setEditFieldsGroupId(null);");
+    expect(failureIndex).toBeGreaterThan(-1);
+    expect(failureIndex).toBeLessThan(closeIndex); // the failure branch's own `return;` exits before this line is ever reached
+  });
+
+  it("closes the dialog only after a successful save", () => {
+    const fn = handlerFn();
+    const successIndex = fn.indexOf("setDrafts(current =>");
+    const closeIndex = fn.indexOf("setEditFieldsGroupId(null);");
+    expect(closeIndex).toBeGreaterThan(successIndex);
+  });
+
+  it("renders EditListingFieldsDialog only when a group is being edited, seeded with that group's current structured fields (blank strings for null)", () => {
+    expect(source).toContain("{editFieldsTarget && <EditListingFieldsDialog");
+    expect(source).toContain("brand: editFieldsTarget.brand ?? \"\", model: editFieldsTarget.model ?? \"\", productType: editFieldsTarget.product_type ?? \"\",");
+    expect(source).toContain("loading={savingListingFields}");
+    expect(source).toContain("error={editFieldsError}");
+  });
+});
+
+describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 4 UX fix: full, read-only listing preview", () => {
+  const source = read("components/listing-studio/PreviewListingDialog.tsx");
+
+  it("renders the complete title and description via plain interpolation — never sliced/truncated/ellipsised", () => {
+    expect(source).toContain('<p className="preview-listing-title-text">{generatedTitle || "No title generated yet."}</p>');
+    expect(source).toContain('<p className="preview-listing-description-text">{generatedDescription || "No description generated yet."}</p>');
+    expect(source).not.toMatch(/\.slice\(|\.substring\(|…|line-clamp/);
+  });
+
+  it("REGRESSION: the description is rendered with white-space: pre-wrap (see globals.css) so every line break, blank line, and run of spaces is preserved exactly as stored — never collapsed or reformatted", () => {
+    const css = read("app/globals.css");
+    expect(css).toMatch(/\.preview-listing-description-text\s*\{[^}]*white-space:\s*pre-wrap/);
+  });
+
+  it("shows UK size and SKU, each falling back to a clear 'Not set' when null", () => {
+    expect(source).toContain('<span>{ukSize || "Not set"}</span>');
+    expect(source).toContain('<span>{sku || "Not set"}</span>');
+  });
+
+  it("REGRESSION: is read-only — no input, textarea, or onChange anywhere in this dialog; editing only ever happens via EditListingFieldsDialog", () => {
+    expect(source).not.toMatch(/<input\b|<textarea\b|onChange/);
+  });
+
+  it("does not show any confidence score, badge, or label anywhere", () => {
+    expect(source).not.toMatch(/confidence/i);
+  });
+
+  it("never makes an AI call or imports anything AI-related", () => {
+    expect(source).not.toMatch(/anthropic|Anthropic|fetch\(/i);
+  });
+
+  it("has a Copy title button and a Copy description button, each copying the exact corresponding text via the Clipboard API", () => {
+    expect(source).toContain('onClick={() => copy(generatedTitle, "title")}');
+    expect(source).toContain('onClick={() => copy(generatedDescription, "description")}');
+    expect(source).toContain("navigator.clipboard.writeText(text)");
+  });
+
+  it("REGRESSION: shows a brief 'Copied!' success state per-button, independently, that reverts back to the original label", () => {
+    expect(source).toContain('{copiedField === "title" ? "Copied!" : "Copy title"}');
+    expect(source).toContain('{copiedField === "description" ? "Copied!" : "Copy description"}');
+    expect(source).toContain('setTimeout(() => setCopiedField(current => (current === field ? null : current)), 2000);');
+  });
+
+  it("a clipboard failure is caught silently — never thrown, never shown as an error — since the full text is still visible in the modal either way", () => {
+    const copyFn = source.slice(source.indexOf("async function copy"), source.indexOf("return <div"));
+    expect(copyFn).toContain("try {");
+    expect(copyFn).toContain("} catch {");
+  });
+
+  it("Escape and backdrop-click close the dialog, matching the existing modal convention in this feature", () => {
+    expect(source).toContain('event.key === "Escape"');
+    expect(source).toContain("event.target === event.currentTarget");
+  });
+
+  it("has a single Close action — no Save, since nothing here is editable", () => {
+    expect(source).toContain(">Close</button>");
+    expect(source).not.toMatch(/>Save</);
+  });
+});
+
+describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4 UX fix: 'Preview listing' action beside 'Edit fields'", () => {
+  const source = read("components/listing-studio/ProductGroupCard.tsx");
+
+  it("renders a compact 'Preview listing' action alongside 'Edit fields', inside the same listing card, only once a listing exists", () => {
+    const cardBlock = source.slice(source.indexOf("{listing &&"), source.indexOf('<div className="product-group-selection-row">'));
+    expect(cardBlock).toContain('onClick={() => onPreviewListing(group.id)}');
+    expect(cardBlock).toContain(">Preview listing<");
+    expect(cardBlock).toContain('onClick={() => onEditFields(group.id)}');
+    expect(cardBlock).toContain('className="listing-card-actions"');
+  });
+
+  it("takes onPreviewListing as a required prop, scoped by this group's own id, matching onEditFields's own convention", () => {
+    expect(source).toContain("onPreviewListing: (draftId: string) => void;");
+  });
+
+  it("REGRESSION: the card itself is unaffected — still truncates the description (line-clamp) and stays compact; only a new button was added, not a redesign", () => {
+    expect(source).toContain('<p className="listing-card-description">{listing.generatedDescription}</p>');
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4 UX fix: 'Preview listing' wiring", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+
+  it("tracks which group's preview is open in its own dedicated state, distinct from Edit fields' own state", () => {
+    expect(source).toContain("const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);");
+  });
+
+  it("passes onPreviewListing={setPreviewGroupId} to every ProductGroupCard", () => {
+    expect(source).toContain("onPreviewListing={setPreviewGroupId}");
+  });
+
+  it("renders PreviewListingDialog only when both the target group and its generated listing exist, seeded from the same listingsByDraftId lookup Edit fields and the card itself already use", () => {
+    expect(source).toContain("const previewTarget = drafts.find(draft => draft.id === previewGroupId) ?? null;");
+    expect(source).toContain("const previewListing = previewGroupId ? listingsByDraftId.get(previewGroupId) ?? null : null;");
+    expect(source).toContain("{previewTarget && previewListing && <PreviewListingDialog");
+  });
+
+  it("passes the exact stored generatedTitle/generatedDescription/ukSize/sku through untouched — no new formatting/AI call in the wiring itself", () => {
+    const dialogBlock = source.slice(source.indexOf("{previewTarget && previewListing && <PreviewListingDialog"), source.indexOf("{previewTarget && previewListing && <PreviewListingDialog") + 400);
+    expect(dialogBlock).toContain("generatedTitle={previewListing.generatedTitle}");
+    expect(dialogBlock).toContain("generatedDescription={previewListing.generatedDescription}");
+    expect(dialogBlock).toContain("ukSize={previewListing.ukSize}");
+    expect(dialogBlock).toContain("sku={previewListing.sku}");
+  });
+
+  it("closing the preview resets previewGroupId back to null", () => {
+    expect(source).toContain("onClose={() => setPreviewGroupId(null)}");
+  });
+
+  it("includes previewGroupId in anyDialogOpen, so keyboard shortcuts are disabled while this dialog is open, matching every other dialog", () => {
+    expect(source).toContain("const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen || editFieldsGroupId || previewGroupId);");
   });
 });
 

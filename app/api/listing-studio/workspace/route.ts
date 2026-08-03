@@ -8,7 +8,15 @@ import { deleteStorageObjects } from "@/lib/listing-studio/storage-rest";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-type DraftRow = { id: string; title: string | null; status: string; created_at: string; updated_at: string };
+type DraftRow = {
+  id: string; title: string | null; status: string; created_at: string; updated_at: string;
+  // Milestone 4 (AI listing generation) — brand/model/sku are reused
+  // Stage 1 columns; product_type/colour/uk_size/generated_title/
+  // generated_description are new. `title` above remains this group's own
+  // editable display name — unrelated to `generated_title`.
+  brand: string | null; model: string | null; product_type: string | null; colour: string | null;
+  uk_size: string | null; sku: string | null; generated_title: string | null; generated_description: string | null;
+};
 type ImageRow = {
   id: string; draft_id: string; original_filename: string; mime_type: string; file_size: number;
   width: number | null; height: number | null; sort_order: number;
@@ -27,7 +35,9 @@ export async function GET() {
   try {
     const user = await requireOwner();
     const [drafts, images] = await Promise.all([
-      supabaseRequestAll<DraftRow>(`listing_drafts?owner_id=eq.${user.id}&status=neq.archived&select=id,title,status,created_at,updated_at&order=created_at.asc`),
+      supabaseRequestAll<DraftRow>(
+        `listing_drafts?owner_id=eq.${user.id}&status=neq.archived&select=id,title,status,created_at,updated_at,brand,model,product_type,colour,uk_size,sku,generated_title,generated_description&order=created_at.asc`,
+      ),
       supabaseRequestAll<ImageRow>(
         `listing_draft_images?owner_id=eq.${user.id}&select=id,draft_id,original_filename,mime_type,file_size,width,height,sort_order,detected_role,confirmed_role,upload_state,preview_available&order=sort_order.asc`,
       ),

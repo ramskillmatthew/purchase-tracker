@@ -6,6 +6,23 @@ import OverflowMenu from "./OverflowMenu";
 
 export type GroupSummary = { id: string; title: string | null; status: string };
 
+// Milestone 4 (AI listing generation) — present only once this group has a
+// generated listing. `generatedTitle`/`generatedDescription` are the
+// application-derived marketplace listing text (never the same thing as
+// `GroupSummary.title` above, which stays this group's own editable
+// display name). Structured fields are shown read-only here; "Edit
+// fields" is the only way to change them.
+export type GeneratedListingSummary = {
+  brand: string | null;
+  model: string | null;
+  productType: string | null;
+  colour: string | null;
+  ukSize: string | null;
+  sku: string | null;
+  generatedTitle: string;
+  generatedDescription: string;
+};
+
 // Matches the exact title app/api/listing-studio/uploads/route.ts uses for
 // the auto-created catch-all inbox group — used only to decide whether to
 // show the "Inbox" badge, never trusted for anything security-sensitive.
@@ -30,7 +47,7 @@ const UNSORTED_TITLE = "Unsorted";
  */
 function ProductGroupCard({
   group, photos, selectedIds, onToggleSelect, onSelectAll, onClearSelection, onSelectRange, onRename, onReorder, onSetCover, onRemovePhoto,
-  onSplitSelected, onMoveSelected, onMerge, onDelete, saveState, autoEdit, onAutoEditConsumed,
+  onSplitSelected, onMoveSelected, onMerge, onDelete, saveState, autoEdit, onAutoEditConsumed, listing, onEditFields, onPreviewListing,
 }: {
   group: GroupSummary;
   photos: PhotoTileData[];
@@ -54,6 +71,15 @@ function ProductGroupCard({
   // in the parent so it never re-triggers on a later unrelated re-render.
   autoEdit: boolean;
   onAutoEditConsumed: () => void;
+  // Milestone 4: null until "Generate Listings" has produced a listing for
+  // this group. Never null after that, even while photos/selection change —
+  // the listing only ever changes via a fresh Generate or Edit fields save.
+  listing: GeneratedListingSummary | null;
+  onEditFields: (draftId: string) => void;
+  // Milestone 4 UX fix — opens the read-only full preview (complete title/
+  // description, never truncated) since the card itself only ever shows a
+  // truncated description.
+  onPreviewListing: (draftId: string) => void;
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(group.title ?? "");
@@ -123,6 +149,15 @@ function ProductGroupCard({
         { label: "Delete group", onClick: () => onDelete(group.id), tone: "danger" },
       ]} />
     </header>
+
+    {listing && <div className="listing-card">
+      <p className="listing-card-title">{listing.generatedTitle}</p>
+      <p className="listing-card-description">{listing.generatedDescription}</p>
+      <div className="listing-card-actions">
+        <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview listing</button>
+        <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>
+      </div>
+    </div>}
 
     <div className="product-group-selection-row">
       <button type="button" className="button-secondary" onClick={() => (allSelected ? onClearSelection(group.id) : onSelectAll(group.id))} disabled={photos.length === 0}>

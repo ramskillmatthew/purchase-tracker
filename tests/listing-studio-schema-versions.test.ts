@@ -26,4 +26,8 @@ describe("LISTING_SCHEMA_VERSIONS — versioned independently of LISTING_PROMPT_
   it("Milestone 3: automatic AI product grouping has its own recorded schema version", () => {
     expect(LISTING_SCHEMA_VERSIONS.product_grouping).toBe("listing-product-grouping-schema-v2");
   });
+
+  it("Milestone 4 sizing coverage correction: sourceSize.gender gained a 4th value (\"childrens\") — bumped to schema-v4, after the v3 rebuild that replaced ukSize with sourceSize", () => {
+    expect(LISTING_SCHEMA_VERSIONS.generation).toBe("listing-generation-schema-v4");
+  });
 });
