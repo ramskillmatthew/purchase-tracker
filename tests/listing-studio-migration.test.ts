@@ -189,6 +189,10 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     expect(migration).toContain("alter table public.listing_drafts add column if not exists source_size_value text;");
   });
 
+  it("Milestone 4 sizing coverage correction: listing_drafts gets source_size_gender, added idempotently, recording the category the label itself stated", () => {
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists source_size_gender text;");
+  });
+
   it("Milestone 4 sizing coverage correction: listing_drafts gets uk_size_source, added idempotently, recording how uk_size was obtained (observed/brand_converted/fallback_converted/manual)", () => {
     expect(migration).toContain("alter table public.listing_drafts add column if not exists uk_size_source text;");
   });

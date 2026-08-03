@@ -562,7 +562,7 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
     const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
     const patchBlock = source.slice(patchStart, source.indexOf("await supabaseRequest(\"listing_analysis_runs\"", patchStart));
     expect(patchBlock).not.toContain(".catch(() => {})"); // the real write is never best-effort
-    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: finalUkSize", "uk_size_source: finalUkSizeSource", "sku: structuredFields.sku", "source_size_system: fields.sourceSize.system", "source_size_value: fields.sourceSize.value", "condition: LISTING_CONDITION_TEXT", "generated_title: generatedTitle", "generated_description: generatedDescription", 'status: "ready"', "ai_result_json: fields"]) {
+    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: finalUkSize", "uk_size_source: finalUkSizeSource", "sku: structuredFields.sku", "source_size_system: fields.sourceSize.system", "source_size_value: fields.sourceSize.value", "source_size_gender: fields.sourceSize.gender", "condition: LISTING_CONDITION_TEXT", "generated_title: generatedTitle", "generated_description: generatedDescription", 'status: "ready"', "ai_result_json: fields"]) {
       expect(patchBlock).toContain(field);
     }
   });

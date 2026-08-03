@@ -147,6 +147,12 @@ alter table public.listing_drafts add column if not exists generated_description
 alter table public.listing_drafts add column if not exists source_size_system text;
 alter table public.listing_drafts add column if not exists source_size_value text;
 
+-- Milestone 4 sizing coverage correction: the category the label itself
+-- stated (mens/womens/unisex/childrens — sourceSize.gender), alongside the
+-- raw system/value above. Never inferred, only ever what the AI actually
+-- read off the label; null whenever the label didn't state one.
+alter table public.listing_drafts add column if not exists source_size_gender text;
+
 -- Milestone 4 sizing coverage correction: records HOW `uk_size` above was
 -- obtained — 'observed' (read directly off the label), 'brand_converted'
 -- (matched an exact brand-specific chart entry), 'fallback_converted'

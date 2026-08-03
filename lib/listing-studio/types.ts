@@ -116,6 +116,10 @@ export type ListingDraft = {
   // above. Null whenever no size marking was confidently read at all.
   sourceSizeSystem: string | null;
   sourceSizeValue: string | null;
+  // Milestone 4 sizing coverage correction — the category the label itself
+  // stated (mens/womens/unisex/childrens), alongside system/value above.
+  // Null whenever the label didn't state one.
+  sourceSizeGender: string | null;
   // Milestone 4 sizing coverage correction — how `ukSize` above was
   // obtained: 'observed' | 'brand_converted' | 'fallback_converted' |
   // 'manual' | null (see lib/listing-studio/size-conversion.ts's

@@ -120,6 +120,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
         brand: structuredFields.brand, model: structuredFields.model, product_type: structuredFields.productType,
         colour: structuredFields.colour, uk_size: finalUkSize, uk_size_source: finalUkSizeSource, sku: structuredFields.sku,
         source_size_system: fields.sourceSize.system, source_size_value: fields.sourceSize.value,
+        source_size_gender: fields.sourceSize.gender,
         condition: LISTING_CONDITION_TEXT,
         generated_title: generatedTitle, generated_description: generatedDescription,
         status: "ready", ai_result_json: fields, updated_at: completedAt,
