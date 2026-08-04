@@ -117,6 +117,16 @@ describe("generateListingDescription — byte-for-byte template except UK size a
     const description = generateListingDescription({ ukSize: "9", sku: "1234" });
     expect(description).not.toMatch(/colour|material/i);
   });
+
+  it("business-rule follow-up correction: structurally can never carry children's audience wording (Youth/Kids/Junior/Boys/Girls/Child/Children) — the template only ever substitutes ukSize and sku, never brand/model/productType, for ANY input including a raw un-cleaned SKU/size", () => {
+    const description = generateListingDescription({ ukSize: "3", sku: "YOUTH-1648" }); // even an unusual literal SKU value
+    // Only the SKU line itself may legitimately contain the substring — the
+    // rest of the fixed template text never can, by construction.
+    const [, ...fixedParagraphs] = description.split("\n\n\n\n\n");
+    const skuParagraph = fixedParagraphs.pop();
+    expect(fixedParagraphs.join(" ")).not.toMatch(/\b(youth|kids?|juniors?|boys?|girls?|child(ren)?)\b/i);
+    expect(skuParagraph).toBe("SKU: YOUTH-1648");
+  });
 });
 
 describe("regeneration without another AI call", () => {

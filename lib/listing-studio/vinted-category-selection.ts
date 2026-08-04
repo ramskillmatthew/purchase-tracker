@@ -24,6 +24,10 @@ import type { VintedCategoryRow } from "./vinted-categories-data";
 
 export type DraftAudience = "women" | "men" | "girls" | "boys" | "unknown";
 export type DraftItemFamily = "clothing" | "footwear" | "uncertain";
+// The raw listing_drafts.vinted_audience value shape — named so
+// normaliseFootwearVintedAudience's overloads below don't need to repeat
+// the literal union three times.
+export type VintedAudienceLiteral = "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown";
 
 /**
  * Follow-up correction (2026-08-04): this used to derive audience from the
@@ -68,6 +72,116 @@ export function deriveDraftItemFamily(productType: string | null): DraftItemFami
   if (FOOTWEAR_PRODUCT_TYPE_KEYWORDS.some((keyword) => text.includes(keyword))) return "footwear";
   if (CLOTHING_PRODUCT_TYPE_KEYWORDS.some((keyword) => text.includes(keyword))) return "clothing";
   return "uncertain";
+}
+
+/**
+ * Business-rule follow-up correction: footwear must never be listed under
+ * a children's Vinted audience for this app — a boys'/girls' FOOTWEAR
+ * item is always treated as Women's instead, full stop. This is a fixed
+ * business decision, not a size-based inference (never reads
+ * ukSize/sourceSize — only the already-determined audience + item
+ * family), and it never applies outside footwear: a boys'/girls'
+ * CLOTHING item keeps its own audience completely untouched, since
+ * Vinted's own Kids clothing branches remain a real, valid destination
+ * there.
+ *
+ * The single shared normalisation point — every place audience affects
+ * category selection or persistence (listing generation, text/photo
+ * audience reassessment, single/bulk Assign Category, Edit Fields saving,
+ * Listings Review data, Ready validation) calls this SAME function rather
+ * than re-implementing the boys/girls → womens mapping. mens/womens/
+ * unisex/unknown, and boys/girls for any non-footwear item family, are
+ * always returned completely unchanged.
+ *
+ * Deliberately does not persist or expose the original boys/girls value
+ * anywhere — no separate "detected audience" field, no audit trail of the
+ * discarded value; this function's return IS the only value that is ever
+ * saved, searched, displayed, or validated against.
+ */
+export function normaliseFootwearVintedAudience(audience: VintedAudienceLiteral, itemFamily: DraftItemFamily): VintedAudienceLiteral;
+export function normaliseFootwearVintedAudience(audience: VintedAudienceLiteral | null, itemFamily: DraftItemFamily): VintedAudienceLiteral | null;
+export function normaliseFootwearVintedAudience(audience: VintedAudienceLiteral | null, itemFamily: DraftItemFamily): VintedAudienceLiteral | null {
+  if (itemFamily !== "footwear") return audience;
+  if (audience === "boys" || audience === "girls") return "womens";
+  return audience;
+}
+
+// The exact terms this business rule removes, case-insensitively, from
+// customer-facing footwear text once the listing is Women's — the literal
+// list given by the rule, including the possessive forms that most
+// naturally occur ("Kid's", "Boy's", "Girl's", "Children's"). Bare
+// plurals/singulars (kids, kid, boys, boy, ...) are listed too since a
+// possessive apostrophe is often dropped or appears the other way round
+// ("Kids'") — that stray trailing apostrophe is swept up afterward by
+// stripChildrensAudienceWording's own punctuation cleanup, so every real
+// possessive spelling is covered without enumerating each one here.
+const CHILDRENS_AUDIENCE_WORDING_TERMS = [
+  "children's", "children", "child",
+  "kid's", "kids", "kid",
+  "junior's", "juniors", "junior",
+  "boy's", "boys", "boy",
+  "girl's", "girls", "girl",
+  "youth",
+] as const;
+
+// \b...\b enforces WHOLE-WORD matching only — a boundary requires an
+// actual transition between a word character and a non-word character, so
+// "kid" never matches inside "Skidmore" (no boundary between the S and the
+// k) and "boy" never matches inside "Cowboy" (no boundary between the w
+// and the b). This is what "never remove text merely because it contains
+// the same letters inside another legitimate word" is built on — not a
+// denylist of specific words to protect, but the boundary rule itself.
+const CHILDRENS_AUDIENCE_WORDING_REGEX = new RegExp(
+  `\\b(?:${CHILDRENS_AUDIENCE_WORDING_TERMS.map((term) => term.replace(/'/g, "['’]")).join("|")})\\b`,
+  "gi",
+);
+
+/**
+ * The raw text transform: removes every standalone children's-audience
+ * term from `value`, case-insensitively, then cleans up whatever
+ * whitespace/punctuation the removal left behind (collapsed runs of
+ * spaces; a lone leftover apostrophe from a plural-possessive like "Kids'"
+ * once the bare "Kids" is removed; stray leading/trailing punctuation).
+ * Pure and deterministic — no AI call, no randomness. Exported separately
+ * from normaliseFootwearListingText below so the text transform itself is
+ * directly testable against exact before/after examples, independent of
+ * the business-rule gating.
+ */
+export function stripChildrensAudienceWording(value: string | null): string | null {
+  if (value === null) return null;
+  let result = value.replace(CHILDRENS_AUDIENCE_WORDING_REGEX, " ");
+  result = result.replace(/\s+/g, " ");
+  // A lone apostrophe now stranded between whitespace (or at either end)
+  // once its word was removed — e.g. "Kids' Trainers" loses "Kids",
+  // leaving "' Trainers" — is punctuation noise, not part of any word.
+  result = result.replace(/(^|\s)['’](?=\s|$)/g, "$1");
+  result = result.replace(/\s+/g, " ").trim();
+  result = result.replace(/^[-,.;:'’\s]+/, "").replace(/[-,.;:'’\s]+$/, "");
+  return result || null;
+}
+
+/**
+ * Business rule: footwear listed under the Women's Vinted audience must
+ * never carry children's audience wording (Youth/Kids/Junior/Boys/Girls/
+ * Child/Children, any case, including possessive forms) in customer-facing
+ * text — even though the listing itself is correctly Women's, e.g. a UK 3
+ * trainer whose printed model name literally includes "Youth". Gated
+ * exactly like normaliseFootwearVintedAudience above: only footwear items
+ * that are (already-normalised) Women's are touched at all — a Men's,
+ * Unisex, Unknown, or non-footwear value is always returned completely
+ * unchanged, and the title never has to (and doesn't) say "Women"/"Women's"
+ * either — it just stays neutral once the children's wording is gone.
+ *
+ * The single shared normalisation point for this rule — every place
+ * customer-facing footwear text is generated or persisted (listing
+ * generation, Edit Fields saving, deterministic title/description
+ * regeneration, the existing-draft "Refresh listing text" repair action,
+ * Preview Listing, Listings Review) calls this SAME function rather than
+ * re-implementing the term list or the gating condition.
+ */
+export function normaliseFootwearListingText(value: string | null, itemFamily: DraftItemFamily, vintedAudience: VintedAudienceLiteral | null): string | null {
+  if (itemFamily !== "footwear" || vintedAudience !== "womens") return value;
+  return stripChildrensAudienceWording(value);
 }
 
 // Words that appear in virtually every leaf's own full_path within a

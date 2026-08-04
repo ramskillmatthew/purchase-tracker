@@ -8,6 +8,7 @@ import {
   resolveVintedCategoryAssignmentForExistingDraft, describeVintedCategoryAssignmentReason, MAX_BULK_CATEGORY_ASSIGNMENT,
   type VintedCategoryAssignmentReason,
 } from "@/lib/listing-studio/vinted-category-assignment";
+import { normaliseFootwearVintedAudience, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
@@ -62,7 +63,17 @@ export async function POST(request: Request) {
     await runWithConcurrencyLimit(draftIds, BULK_CONCURRENCY, async (draftId) => {
       const draft = draftsById.get(draftId);
       if (!draft) { results.push({ draftId, skipped: true, reason: null, method: null, costUsd: null }); return; }
-      if (draft.vinted_category_source === "manual") { results.push({ draftId, skipped: true, reason: null, method: null, costUsd: null }); return; }
+      // Business-rule follow-up correction: footwear must never persist a
+      // children's Vinted audience, even one that was manually chosen
+      // before this rule existed — a manually-protected CATEGORY does not
+      // override that, since it may itself be the incompatible Kids
+      // category that needs clearing. This is the one exception to "a
+      // manually-chosen category is always skipped" below.
+      const needsFootwearAudienceCorrection = (draft.vinted_audience === "boys" || draft.vinted_audience === "girls")
+        && deriveDraftItemFamily(draft.product_type) === "footwear";
+      if (draft.vinted_category_source === "manual" && !needsFootwearAudienceCorrection) {
+        results.push({ draftId, skipped: true, reason: null, method: null, costUsd: null }); return;
+      }
 
       const outcome = await resolveVintedCategoryAssignmentForExistingDraft({
         vintedAudience: draft.vinted_audience, vintedAudienceSource: draft.vinted_audience_source, vintedAudienceEvidence: draft.vinted_audience_evidence,
@@ -73,7 +84,14 @@ export async function POST(request: Request) {
       const categoryId = result.reason === "category_assigned" ? result.categoryId : null;
       const categoryPath = result.reason === "category_assigned" ? result.categoryPath : null;
       const categorySource: "ai" | null = result.reason === "category_assigned" ? "ai" : null;
-      const finalAudience = draft.vinted_audience_source === "manual" ? draft.vinted_audience : outcome.vintedAudience;
+      // A manually-protected audience is never touched here regardless of
+      // what resolveVintedCategoryAssignmentForExistingDraft computed with
+      // it — EXCEPT the footwear boys/girls -> womens business-rule
+      // normalisation, which applies even to a manual pick made before
+      // that rule existed.
+      const finalAudience = draft.vinted_audience_source === "manual"
+        ? normaliseFootwearVintedAudience(draft.vinted_audience, deriveDraftItemFamily(draft.product_type))
+        : outcome.vintedAudience;
       const finalAudienceEvidence = draft.vinted_audience_source === "manual" ? draft.vinted_audience_evidence : outcome.vintedAudienceEvidence;
       const nowIso = new Date().toISOString();
 

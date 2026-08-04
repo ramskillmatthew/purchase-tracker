@@ -1,6 +1,6 @@
 import "server-only";
 import { getVintedCategoryById, searchAutomaticSelectionCandidates, MAX_AUTOMATIC_SELECTION_CANDIDATES } from "./vinted-categories-data";
-import { deriveDraftAudience, deriveDraftItemFamily, selectAutomaticSelectionBranches, validateSelectedVintedCategory } from "./vinted-category-selection";
+import { deriveDraftAudience, deriveDraftItemFamily, selectAutomaticSelectionBranches, validateSelectedVintedCategory, normaliseFootwearVintedAudience } from "./vinted-category-selection";
 import { runVintedCategorySelection } from "./vinted-category-selection-ai";
 import { runVintedAudienceTextReassessment } from "./vinted-audience-reassessment-ai";
 import type { VintedAudienceValue } from "./listing-generation-schemas";
@@ -65,16 +65,27 @@ export type VintedCategoryAssignmentInput = {
  * the bounded AI call actually ran (null otherwise — a deterministic
  * match or an audience/candidate dead-end never calls, and never costs,
  * anything).
+ *
+ * Business-rule follow-up correction: this is the single choke point every
+ * caller (listing generation, single/bulk Assign Category, Edit Fields'
+ * audience-change recompute) already goes through to resolve a category —
+ * so it's also the one place normaliseFootwearVintedAudience is applied to
+ * turn a boys'/girls' FOOTWEAR audience into Women's before branch
+ * selection even runs. The returned `vintedAudience` is this normalised
+ * value; every caller persists THIS value, never its own raw input, so the
+ * persisted audience and the resolved category (always from the Women's
+ * branch in that case) can never disagree with each other.
  */
 export async function resolveVintedCategoryAssignment(
   input: VintedCategoryAssignmentInput,
-): Promise<{ result: VintedCategoryAssignmentResult; aiCost: VintedCategoryAssignmentAiCost | null }> {
-  const draftAudience = deriveDraftAudience(input.vintedAudience);
+): Promise<{ result: VintedCategoryAssignmentResult; aiCost: VintedCategoryAssignmentAiCost | null; vintedAudience: VintedAudienceValue | null }> {
+  const draftItemFamily = deriveDraftItemFamily(input.productType);
+  const vintedAudience = normaliseFootwearVintedAudience(input.vintedAudience, draftItemFamily);
+  const draftAudience = deriveDraftAudience(vintedAudience);
   if (draftAudience === "unknown") {
-    return { result: { reason: "audience_missing", categoryId: null, categoryPath: null }, aiCost: null };
+    return { result: { reason: "audience_missing", categoryId: null, categoryPath: null }, aiCost: null, vintedAudience };
   }
 
-  const draftItemFamily = deriveDraftItemFamily(input.productType);
   const branches = selectAutomaticSelectionBranches(draftAudience, draftItemFamily);
   // branches.length is always > 0 here: a known (non-"unknown") audience
   // always has at least its clothing+footwear branches available, even
@@ -87,7 +98,7 @@ export async function resolveVintedCategoryAssignment(
 
   if (candidates.length === 0) {
     const reason = draftItemFamily === "uncertain" ? "item_family_uncertain" : "no_candidates";
-    return { result: { reason, categoryId: null, categoryPath: null }, aiCost: null };
+    return { result: { reason, categoryId: null, categoryPath: null }, aiCost: null, vintedAudience };
   }
 
   if (candidates.length === 1) {
@@ -95,12 +106,12 @@ export async function resolveVintedCategoryAssignment(
     const freshCategory = await getVintedCategoryById(onlyCandidate.id);
     const validation = validateSelectedVintedCategory(onlyCandidate.id, candidates, freshCategory);
     if (validation.valid && validation.categoryId) {
-      return { result: { reason: "category_assigned", categoryId: validation.categoryId, categoryPath: validation.category.full_path, method: "deterministic" }, aiCost: null };
+      return { result: { reason: "category_assigned", categoryId: validation.categoryId, categoryPath: validation.category.full_path, method: "deterministic" }, aiCost: null, vintedAudience };
     }
     // The one candidate the active+selectable query itself just returned
     // failed a fresh re-check (e.g. deactivated between the two queries)
     // — genuinely rare, but never silently trusted regardless.
-    return { result: { reason: "no_candidates", categoryId: null, categoryPath: null }, aiCost: null };
+    return { result: { reason: "no_candidates", categoryId: null, categoryPath: null }, aiCost: null, vintedAudience };
   }
 
   const aiOutcome = await runVintedCategorySelection(
@@ -112,6 +123,7 @@ export async function resolveVintedCategoryAssignment(
     return {
       result: { reason: "ai_selection_failed", categoryId: null, categoryPath: null },
       aiCost: { model: null, inputTokens: null, outputTokens: null, candidateCount: candidates.length, status: "failed" },
+      vintedAudience,
     };
   }
 
@@ -123,7 +135,7 @@ export async function resolveVintedCategoryAssignment(
   const validation = validateSelectedVintedCategory(aiOutcome.vintedCategoryId, candidates, freshCategory);
 
   if (validation.valid && validation.categoryId) {
-    return { result: { reason: "category_assigned", categoryId: validation.categoryId, categoryPath: validation.category.full_path, method: "ai" }, aiCost };
+    return { result: { reason: "category_assigned", categoryId: validation.categoryId, categoryPath: validation.category.full_path, method: "ai" }, aiCost, vintedAudience };
   }
   // Either the AI confidently found nothing among real candidates, or its
   // pick failed fresh re-validation — both are "the bounded AI step did
@@ -132,7 +144,7 @@ export async function resolveVintedCategoryAssignment(
   // since it signals the candidate set may have been truncated, not just
   // genuinely ambiguous.
   const reason = candidates.length === MAX_AUTOMATIC_SELECTION_CANDIDATES ? "too_many_candidates" : "ai_selection_invalid";
-  return { result: { reason, categoryId: null, categoryPath: null }, aiCost };
+  return { result: { reason, categoryId: null, categoryPath: null }, aiCost, vintedAudience };
 }
 
 export type VintedAudienceReassessmentAiCost = {
@@ -207,12 +219,16 @@ export async function resolveVintedCategoryAssignmentForExistingDraft(
     }
   }
 
-  const { result, aiCost } = await resolveVintedCategoryAssignment({
+  const { result, aiCost, vintedAudience: resolvedVintedAudience } = await resolveVintedCategoryAssignment({
     vintedAudience, productType: input.productType, brand: input.brand, model: input.model,
   });
 
   return {
-    result, categoryAiCost: aiCost, vintedAudience, vintedAudienceEvidence,
+    // resolveVintedCategoryAssignment's own returned audience is always
+    // the authoritative one — it's already normalised (boys/girls
+    // footwear → womens), so this can never disagree with the branch the
+    // category above was actually resolved from.
+    result, categoryAiCost: aiCost, vintedAudience: resolvedVintedAudience, vintedAudienceEvidence,
     audienceReassessmentAttempted, audienceAiCost,
     canReassessWithPhotos: result.reason === "audience_missing",
   };

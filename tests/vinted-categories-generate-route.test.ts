@@ -129,6 +129,225 @@ describe("POST /api/listing-studio/groups/[draftId]/generate — the exact New B
   });
 });
 
+describe("POST /api/listing-studio/groups/[draftId]/generate — Business-rule follow-up correction: footwear must never persist a children's Vinted audience", () => {
+  it("Boys + footwear: the AI's 'boys' audience is normalised and PERSISTED as 'womens', category resolved from the Women's branch", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "boys", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.vintedCategoryPath).toBe("Women > Shoes > Trainers");
+
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[1] as RequestInit)?.method === "PATCH" && (c[0] as string).startsWith("listing_drafts"));
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.vinted_audience).toBe("womens");
+    // No NEW dedicated "detected"/"original" audience field is ever added
+    // for the discarded boys/girls value — only the pre-existing
+    // ai_result_json audit blob (unrelated to this rule, and already
+    // established since Milestone 4) legitimately still contains the
+    // AI's raw, unmodified answer for its own separate audit purpose.
+    expect(Object.keys(patchBody)).not.toContain("vinted_audience_detected");
+    expect(Object.keys(patchBody)).not.toContain("vinted_audience_original");
+    expect(patchBody.ai_result_json.vintedAudience.value).toBe("boys"); // the frozen raw-AI audit snapshot, unrelated to this rule
+  });
+
+  it("Girls + footwear: normalised and persisted as 'womens' too", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "girls", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+  });
+
+  it("REGRESSION: title and description are completely unaffected by the normalisation — derived from brand/model/colours/etc only, never audience", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "boys", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const bodyBoys = await (await generateRoute(new Request("http://test"), params())).json();
+
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "womens", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+    const bodyWomens = await (await generateRoute(new Request("http://test"), params())).json();
+
+    expect(bodyBoys.generatedTitle).toBe(bodyWomens.generatedTitle);
+    expect(bodyBoys.generatedDescription).toBe(bodyWomens.generatedDescription);
+  });
+
+  it("REGRESSION: UK size is completely unaffected by the normalisation — never a size-based decision", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow({ uk_size: "3" })]; // a small size, deliberately irrelevant to this rule
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "boys", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.ukSize).toBe("3"); // unchanged by the audience normalisation
+  });
+
+  it("REGRESSION: no AI call is added — the exact same runListingGenerationAnalysis/runVintedCategorySelection mocks as every other test in this file, called the same number of times", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({ status: "success", data: aiFields({ vintedAudience: { value: "boys", confidence: "medium" } }) });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    await generateRoute(new Request("http://test"), params());
+    expect(runListingGenerationAnalysis).toHaveBeenCalledTimes(1);
+    expect(runVintedCategorySelection).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /api/listing-studio/groups/[draftId]/generate — business-rule follow-up correction: Women's footwear text must never carry children's audience wording", () => {
+  it("REGRESSION (the exact production example): Hoka Clifton 9, AI model 'Clifton 9 Youth', audience 'girls' -> persisted model 'Clifton 9', generated title has no 'Youth', category from the Women's branch", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow({ uk_size: "3" })];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({
+      status: "success",
+      data: aiFields({
+        brand: { value: "Hoka", confidence: "high" }, model: { value: "Clifton 9 Youth", confidence: "high" },
+        colours: { value: ["Black", "Grey"], confidence: "high" },
+        vintedAudience: { value: "girls", confidence: "medium" },
+      }),
+    });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.model).toBe("Clifton 9");
+    expect(body.vintedCategoryPath).toBe("Women > Shoes > Trainers");
+    expect(body.generatedTitle).not.toMatch(/\bYouth\b/i);
+    expect(body.generatedTitle).toContain("Hoka Clifton 9 Trainers");
+    expect(body.ukSize).toBe("3"); // completely unaffected
+
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[1] as RequestInit)?.method === "PATCH" && (c[0] as string).startsWith("listing_drafts"));
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    // The STRUCTURED source field itself is cleaned, not only the rendered title.
+    expect(patchBody.model).toBe("Clifton 9");
+    expect(patchBody.generated_title).not.toMatch(/\bYouth\b/i);
+    // The frozen ai_result_json audit snapshot still legitimately holds the AI's raw answer.
+    expect(patchBody.ai_result_json.model.value).toBe("Clifton 9 Youth");
+  });
+
+  it("Boys footwear: productType carrying 'Kids' wording is also cleaned", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({
+      status: "success",
+      data: aiFields({ productType: { value: "Kids Running Trainers", confidence: "high" }, vintedAudience: { value: "boys", confidence: "medium" } }),
+    });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.productType).toBe("Running Trainers");
+    expect(body.generatedTitle).not.toMatch(/\bKids\b/i);
+  });
+
+  it("Men's footwear is never touched by this rule, even if the model happened to carry a children's term", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow({ audience: "mens", full_path: "Men > Shoes > Trainers" })];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({
+      status: "success",
+      data: aiFields({ model: { value: "Junior Racer", confidence: "high" }, vintedAudience: { value: "mens", confidence: "high" } }),
+    });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.model).toBe("Junior Racer");
+  });
+
+  it("non-footwear text is never touched, even for a Boys/Girls draft", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({
+      status: "success",
+      data: aiFields({ productType: { value: "Girls Puffer Jacket", confidence: "high" }, vintedAudience: { value: "girls", confidence: "high" } }),
+    });
+    // Clothing + a valid (non-unknown) audience has a real automatic-selection
+    // branch to search, so the shared beforeEach's supabaseRequest mock
+    // returns its default 2-candidate fixture, requiring the AI selection
+    // call — same as every other ambiguous-candidates test in this file.
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    const response = await generateRoute(new Request("http://test"), params());
+    const body = await response.json();
+    // Non-footwear audience is unaffected too — clothing keeps Girls.
+    expect(body.vintedAudience).toBe("girls");
+    expect(body.productType).toBe("Girls Puffer Jacket");
+  });
+
+  it("REGRESSION: no AI call is added for this cleanup — same call counts as every other test in this file", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      if (path.includes("vinted_categories?id=eq.1906")) return [categoryRow()];
+      return [];
+    });
+    runListingGenerationAnalysis.mockResolvedValueOnce({
+      status: "success",
+      data: aiFields({ model: { value: "Clifton 9 Youth", confidence: "high" }, vintedAudience: { value: "girls", confidence: "medium" } }),
+    });
+    runVintedCategorySelection.mockResolvedValueOnce({ status: "success", vintedCategoryId: 1906, model: "claude-sonnet-5", inputTokens: 400, outputTokens: 10 });
+
+    await generateRoute(new Request("http://test"), params());
+    expect(runListingGenerationAnalysis).toHaveBeenCalledTimes(1);
+    expect(runVintedCategorySelection).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("POST /api/listing-studio/groups/[draftId]/generate — Milestone 7 follow-up: branch-scoped, deterministic-first category selection", () => {
   it("a validated AI category selection (ambiguous candidates) is persisted, and productType/generated title/description are unaffected by it", async () => {
     supabaseRequestAll.mockImplementation(async (path: string) => {

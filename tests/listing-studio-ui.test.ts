@@ -1041,7 +1041,26 @@ describe("components/listing-studio/EditListingFieldsDialog.tsx — Milestone 4:
   it("Follow-up correction (2026-08-04): Vinted audience is an enum <select> populated from VINTED_AUDIENCE_VALUES, never free text", () => {
     expect(source).toContain("VINTED_AUDIENCE_VALUES");
     expect(source).toContain("VINTED_AUDIENCE_LABELS");
-    expect(source).toContain("{VINTED_AUDIENCE_VALUES.map(value => <option key={value} value={value}>{VINTED_AUDIENCE_LABELS[value]}</option>)}");
+    expect(source).toContain("{audienceOptions.map(value => <option key={value} value={value}>{VINTED_AUDIENCE_LABELS[value]}</option>)}");
+  });
+
+  it("Business-rule follow-up correction: footwear must never offer Boys/Girls in the Vinted Audience selector — audienceOptions excludes them exactly when the current product type is footwear, but keeps them for clothing/uncertain", () => {
+    expect(source).toContain('const audienceOptions = deriveDraftItemFamily(draft.productType) === "footwear"');
+    expect(source).toContain('? VINTED_AUDIENCE_VALUES.filter(value => value !== "boys" && value !== "girls")');
+    expect(source).toContain(": VINTED_AUDIENCE_VALUES;");
+  });
+
+  it("Business-rule follow-up correction: a previously saved Boys/Girls footwear value is normalised to Women on load, with its category cleared so a save recomputes a compatible one", () => {
+    expect(source).toContain("function buildInitialDraft(fields: ListingFieldsDraft): ListingFieldsDraft {");
+    expect(source).toContain("const normalisedAudience = normaliseFootwearVintedAudience(fields.vintedAudience, itemFamily);");
+    expect(source).toContain("vintedCategoryId: audienceChanged ? null : fields.vintedCategoryId,");
+    expect(source).toContain("vintedCategoryPath: audienceChanged ? null : fields.vintedCategoryPath,");
+    expect(source).toContain("useState<ListingFieldsDraft>(() => buildInitialDraft(fields));");
+  });
+
+  it("Business-rule follow-up correction: a previously saved footwear model/product type carrying children's wording (e.g. 'Clifton 9 Youth') is cleaned on load too, in the same buildInitialDraft pass", () => {
+    expect(source).toContain("const cleanedModel = normaliseFootwearListingText(fields.model, itemFamily, normalisedAudience) ?? \"\";");
+    expect(source).toContain("const cleanedProductType = normaliseFootwearListingText(fields.productType, itemFamily, normalisedAudience) ?? \"\";");
   });
 
   it("REGRESSION: a colour picked in both dropdowns collapses to one entry, and clearing/reordering never exceeds 2 colours (structurally impossible — only 2 selects exist)", () => {

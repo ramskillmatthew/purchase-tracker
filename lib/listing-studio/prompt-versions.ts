@@ -55,7 +55,18 @@ export const LISTING_PROMPT_VERSIONS: Record<ListingAnalysisStage, string> = {
   // signal(s) used — which structurally discourages both a lazy "unknown"
   // (nothing to cite) and a size-only guess (size alone is explicitly
   // disqualified in the prompt).
-  generation: "listing-generation-v7",
+  // v8 (business-rule follow-up correction — children's wording in
+  // customer-facing text): MODEL and PRODUCT TYPE now explicitly forbid
+  // age/gender qualifiers (Youth/Kids/GS/Junior/Toddler/Boys/Girls) in
+  // their own reported value, even when the physical label/box prints one
+  // alongside the model name (e.g. "Clifton 9 Youth" -> model "Clifton
+  // 9") — a real listing surfaced "Youth" in a generated title despite the
+  // item correctly being categorised as Women's. The deterministic
+  // application-side helper (normaliseFootwearListingText, see
+  // lib/listing-studio/vinted-category-selection.ts) remains the actual
+  // enforcement point regardless of what the AI returns — this prompt
+  // change only reduces how often it has anything to clean up.
+  generation: "listing-generation-v8",
   // v3: replaces free-clustering with ordered boundary detection — a real
   // 24-photo/3-pair test still over-split two of three products under v2
   // (the model's own reasoning admitted a fragment might be the same item

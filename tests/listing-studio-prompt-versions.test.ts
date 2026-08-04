@@ -39,7 +39,12 @@ describe("LISTING_PROMPT_VERSIONS — Stage 1 spec §18", () => {
   });
 
   it("Follow-up correction (2026-08-05): VINTED AUDIENCE was rewritten with a priority-ordered evidence rule and a new vintedAudienceEvidence field — bumped to v7", () => {
-    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v7");
+    // Superseded by v8 below — kept as a version-history marker.
+    expect(LISTING_PROMPT_VERSIONS.generation).not.toBe("listing-generation-v5");
+  });
+
+  it("Business-rule follow-up correction (children's wording in customer-facing text): MODEL and PRODUCT TYPE now forbid age/gender qualifiers (Youth/Kids/Junior/Boys/Girls/etc) in their own value — bumped to v8", () => {
+    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v8");
   });
 
   it("Follow-up correction (2026-08-05): the new audience_reassessment stage (used by 'Assign category' and the explicit 'Reassess audience' action) has its own recorded prompt version", () => {

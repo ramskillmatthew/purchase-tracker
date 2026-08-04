@@ -456,6 +456,18 @@ describe("app/api/listing-studio/workspace/route.ts — GET (fetches the Create 
       expect(getFn).toContain(column);
     }
   });
+
+  it("Business-rule follow-up correction: applies the same read-time footwear/audience and children's-wording corrections as listings-review/route.ts, so the Create view never shows Boys/Girls or 'Youth'/'Kids'/etc for a Women's footwear listing either", () => {
+    expect(getFn).toContain("normaliseFootwearVintedAudience(draft.vinted_audience, itemFamily)");
+    expect(getFn).toContain("normaliseFootwearListingText(draft.model, itemFamily, normalisedAudience)");
+    expect(getFn).toContain("normaliseFootwearListingText(draft.product_type, itemFamily, normalisedAudience)");
+    expect(getFn).toContain("normaliseFootwearListingText(draft.generated_title, itemFamily, normalisedAudience)");
+    expect(getFn).toContain("normaliseFootwearListingText(draft.generated_description, itemFamily, normalisedAudience)");
+  });
+
+  it("REGRESSION: this correction is read-time-only — the GET handler never calls supabaseRequest (only supabaseRequestAll, a read), so it structurally cannot write the correction back to the database", () => {
+    expect(getFn).not.toContain("supabaseRequest(");
+  });
 });
 
 describe("app/api/listing-studio/workspace/route.ts — DELETE ('Clear all', workspace-wide reset)", () => {

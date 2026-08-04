@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { VINTED_COLOURS, VINTED_MATERIALS, VINTED_AUDIENCE_VALUES, VINTED_AUDIENCE_LABELS, type VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
+import { deriveDraftItemFamily, normaliseFootwearVintedAudience, normaliseFootwearListingText } from "@/lib/listing-studio/vinted-category-selection";
 import VintedCategoryPicker from "./VintedCategoryPicker";
 
 export type ListingFieldsDraft = {
@@ -43,6 +44,41 @@ export type ListingFieldsDraft = {
  * than a multi-select-with-a-cap widget, and the max is structurally
  * impossible to exceed since there are only two dropdowns.
  */
+// Business-rule follow-up correction: footwear must never be listed under
+// a children's Vinted audience — if the draft this dialog opens with is a
+// legacy footwear listing still stored as Boys/Girls (predating this
+// rule), it's normalised to Women on load so the dropdown shows the
+// correct value immediately (never Boys/Girls in the UI for footwear).
+// The category selection is cleared in the SAME step, exactly like a live
+// user change via setAudience below — so saving immediately recomputes a
+// compatible Women's category server-side instead of silently
+// re-confirming an incompatible Kids one as a fresh "manual pick".
+//
+// Business-rule follow-up correction (children's wording in customer-facing
+// text): Model/Product type are cleaned of Youth/Kids/Junior/Boys/Girls/
+// Child/Children wording on the SAME load, for a footwear/Women's draft —
+// so a legacy "Clifton 9 Youth" shows as "Clifton 9" the moment the dialog
+// opens, before the user has touched anything. `?? ""` because
+// ListingFieldsDraft's model/productType are plain (non-null) strings —
+// normaliseFootwearListingText's null-in/null-out shape is for the
+// nullable DB-row fields elsewhere, not this always-a-string UI state.
+function buildInitialDraft(fields: ListingFieldsDraft): ListingFieldsDraft {
+  const itemFamily = deriveDraftItemFamily(fields.productType);
+  const normalisedAudience = normaliseFootwearVintedAudience(fields.vintedAudience, itemFamily);
+  const cleanedModel = normaliseFootwearListingText(fields.model, itemFamily, normalisedAudience) ?? "";
+  const cleanedProductType = normaliseFootwearListingText(fields.productType, itemFamily, normalisedAudience) ?? "";
+  const audienceChanged = normalisedAudience !== fields.vintedAudience;
+  if (!audienceChanged && cleanedModel === fields.model && cleanedProductType === fields.productType) return fields;
+  return {
+    ...fields,
+    vintedAudience: normalisedAudience,
+    model: cleanedModel,
+    productType: cleanedProductType,
+    vintedCategoryId: audienceChanged ? null : fields.vintedCategoryId,
+    vintedCategoryPath: audienceChanged ? null : fields.vintedCategoryPath,
+  };
+}
+
 export default function EditListingFieldsDialog({ groupTitle, fields, loading, error, onClose, onSave }: {
   groupTitle: string;
   fields: ListingFieldsDraft;
@@ -51,7 +87,7 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
   onClose: () => void;
   onSave: (fields: ListingFieldsDraft) => void;
 }) {
-  const [draft, setDraft] = useState<ListingFieldsDraft>(fields);
+  const [draft, setDraft] = useState<ListingFieldsDraft>(() => buildInitialDraft(fields));
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) { if (event.key === "Escape" && !loading) onClose(); }
@@ -61,6 +97,22 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
 
   function set<K extends Exclude<keyof ListingFieldsDraft, "colours">>(key: K, value: string) {
     setDraft(current => ({ ...current, [key]: value }));
+  }
+
+  // Business-rule follow-up correction: if the user retypes Product Type
+  // into a footwear type while Boys/Girls is still selected (only
+  // reachable by having started as non-footwear, since the dropdown below
+  // never offers Boys/Girls once already footwear), re-normalise
+  // immediately — the audience dropdown's value must always be one of the
+  // options it currently renders, and this is also, correctly, the same
+  // "audience effectively changed" signal that clears the category
+  // selection so a save recomputes a compatible one.
+  function setProductType(value: string) {
+    setDraft(current => {
+      const normalisedAudience = normaliseFootwearVintedAudience(current.vintedAudience, deriveDraftItemFamily(value));
+      if (normalisedAudience === current.vintedAudience) return { ...current, productType: value };
+      return { ...current, productType: value, vintedAudience: normalisedAudience, vintedCategoryId: null, vintedCategoryPath: null };
+    });
   }
 
   // Each dropdown independently sets "its" slot, then the pair is
@@ -77,6 +129,13 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
 
   const colourA = draft.colours[0] ?? "";
   const colourB = draft.colours[1] ?? "";
+
+  // Business-rule follow-up correction: recomputed on every render from
+  // the CURRENT productType (not the frozen initial value), so the
+  // options list stays correct even as the user edits Product Type live.
+  const audienceOptions = deriveDraftItemFamily(draft.productType) === "footwear"
+    ? VINTED_AUDIENCE_VALUES.filter(value => value !== "boys" && value !== "girls")
+    : VINTED_AUDIENCE_VALUES;
 
   // Follow-up correction (2026-08-04): changing audience clears the local
   // category selection so the fields route's own "audience changed AND no
@@ -105,7 +164,7 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
         </label>
         <label className="field">
           <span className="label">Product type</span>
-          <input className="input" value={draft.productType} onChange={event => set("productType", event.target.value)} disabled={loading} />
+          <input className="input" value={draft.productType} onChange={event => setProductType(event.target.value)} disabled={loading} />
         </label>
         <label className="field">
           <span className="label">Colour 1</span>
@@ -139,7 +198,12 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
         <label className="field">
           <span className="label">Vinted audience</span>
           <select className="input" value={draft.vintedAudience} onChange={event => setAudience(event.target.value as VintedAudienceValue)} disabled={loading}>
-            {VINTED_AUDIENCE_VALUES.map(value => <option key={value} value={value}>{VINTED_AUDIENCE_LABELS[value]}</option>)}
+            {/* Business-rule follow-up correction: footwear must never be
+                listed under a children's Vinted audience — Boys/Girls are
+                never offered here for a footwear product type, though they
+                remain available for clothing/uncertain (e.g. kids
+                clothing genuinely needs them). */}
+            {audienceOptions.map(value => <option key={value} value={value}>{VINTED_AUDIENCE_LABELS[value]}</option>)}
           </select>
         </label>
         <label className="field">

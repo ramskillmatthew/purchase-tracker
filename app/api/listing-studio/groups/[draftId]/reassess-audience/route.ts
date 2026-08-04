@@ -8,6 +8,7 @@ import { MAX_GENERATION_IMAGES_PER_GROUP } from "@/lib/listing-studio/upload-lim
 import { prepareListingGenerationImageInputs } from "@/lib/listing-studio/listing-generation-image-input";
 import { runVintedAudiencePhotoReassessment, describeVintedAudienceReassessmentFailure } from "@/lib/listing-studio/vinted-audience-reassessment-ai";
 import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason } from "@/lib/listing-studio/vinted-category-assignment";
+import { normaliseFootwearVintedAudience, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
@@ -108,7 +109,13 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
       return NextResponse.json({ error: describeVintedAudienceReassessmentFailure(outcome.status) }, { status: 502 });
     }
 
-    const finalVintedAudience = outcome.vintedAudience;
+    // Business-rule follow-up correction: applied unconditionally, right
+    // here — never only inside the "category was audience_missing" branch
+    // below, since that branch doesn't always run (e.g. the category was
+    // already stuck for some OTHER reason), and this route is the one
+    // place that persists vinted_audience straight from a fresh AI photo
+    // result without necessarily going through resolveVintedCategoryAssignment.
+    const finalVintedAudience = normaliseFootwearVintedAudience(outcome.vintedAudience, deriveDraftItemFamily(draft.product_type));
     const finalVintedAudienceEvidence = outcome.vintedAudienceEvidence;
 
     // The audience just improved (that is the whole point of this route) —

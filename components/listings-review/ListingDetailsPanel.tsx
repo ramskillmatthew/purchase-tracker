@@ -4,6 +4,8 @@ import { memo } from "react";
 import type { ListingReviewStatus } from "@/lib/listing-studio/listing-review";
 import { VINTED_AUDIENCE_LABELS, type VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 import { deriveDraftAudience } from "@/lib/listing-studio/vinted-category-selection";
+import { describePurchaseMatch, type SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
+import SellingPriceField from "./SellingPriceField";
 
 export type ListingDetails = {
   id: string;
@@ -34,6 +36,9 @@ export type ListingDetails = {
   // audience still needs manual review (see deriveDraftAudience below),
   // never alongside a confidently-resolved audience.
   vintedAudienceEvidence: string[] | null;
+  // Milestone 6 (purchase-price lookup and manual Vinted selling price).
+  sellingPricePence: number | null;
+  purchaseMatch: SkuPurchaseMatch;
 };
 
 /**
@@ -44,7 +49,7 @@ export type ListingDetails = {
  * (missing fields always win, see listing-review.ts's own comment) and
  * nothing to do on an already-Ready one.
  */
-function ListingDetailsPanel({ listing, markingReady, assigningCategory, reassessingAudience, onOpenCarousel, onPreview, onEditFields, onAssignCategory, onReassessAudience, onMarkReady }: {
+function ListingDetailsPanel({ listing, markingReady, assigningCategory, reassessingAudience, onOpenCarousel, onPreview, onEditFields, onAssignCategory, onReassessAudience, onMarkReady, onSellingPriceSaved }: {
   listing: ListingDetails | null;
   markingReady: boolean;
   assigningCategory: boolean;
@@ -55,6 +60,7 @@ function ListingDetailsPanel({ listing, markingReady, assigningCategory, reasses
   onAssignCategory: (listingId: string) => void;
   onReassessAudience: (listingId: string) => void;
   onMarkReady: (listingId: string) => void;
+  onSellingPriceSaved: (listingId: string, pence: number) => void;
 }) {
   if (!listing) {
     return <aside className="listings-review-panel listings-review-panel-empty" aria-label="Listing details">
@@ -112,6 +118,25 @@ function ListingDetailsPanel({ listing, markingReady, assigningCategory, reasses
         {listing.vintedAudienceEvidence.map(item => <li key={item}>{item}</li>)}
       </ul>
     </div>}
+
+    {/* Milestone 6 (purchase-price lookup and manual Vinted selling
+        price) — kept close to SKU/selling price per that milestone's own
+        placement requirement. The purchase price is read-only and never
+        copied into the selling-price field below. */}
+    <div className="listings-review-panel-purchase-section">
+      <p className="listings-review-panel-purchase-line">{describePurchaseMatch(listing.purchaseMatch)}</p>
+      {listing.purchaseMatch.status === "duplicate" && <ul className="listings-review-panel-purchase-duplicates" role="list">
+        {listing.purchaseMatch.matches.map((match, index) => <li key={index}>
+          {match.orderDate ?? "Unknown date"} — {match.itemDescription} — {match.pricePence !== null ? `£${(match.pricePence / 100).toFixed(2)}` : "price unavailable"}
+        </li>)}
+      </ul>}
+      <SellingPriceField
+        key={listing.id}
+        listingId={listing.id}
+        sellingPricePence={listing.sellingPricePence}
+        onSaved={pence => onSellingPriceSaved(listing.id, pence)}
+      />
+    </div>
 
     <div className="listings-review-panel-actions">
       <button type="button" className="button-secondary" onClick={() => onPreview(listing.id)}>Preview listing</button>

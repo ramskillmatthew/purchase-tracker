@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";
 
 type CopiedField = "title" | "description" | null;
 
@@ -17,11 +18,13 @@ type CopiedField = "title" | "description" | null;
  * `condition`/`coverImageUrl` are optional so Listing Studio's own,
  * pre-existing call site (which has neither readily available) keeps
  * working completely unchanged — only Listings Review passes them.
- * Price is always a placeholder ("Price not set") — there is no price
- * field anywhere in this milestone; this is explicitly preview-only, no
- * Vinted integration.
+ * `sellingPricePence` is likewise optional, for the same reason (Milestone
+ * 6, purchase-price lookup and manual Vinted selling price) — Listing
+ * Studio's own call site has no selling price to show, so the placeholder
+ * ("Price not set") remains there; Listings Review passes the real saved
+ * value once it exists.
  */
-export default function PreviewListingDialog({ groupTitle, generatedTitle, generatedDescription, ukSize, sku, condition = null, coverImageUrl = null, onClose }: {
+export default function PreviewListingDialog({ groupTitle, generatedTitle, generatedDescription, ukSize, sku, condition = null, coverImageUrl = null, sellingPricePence = null, onClose }: {
   groupTitle: string;
   generatedTitle: string;
   generatedDescription: string;
@@ -29,6 +32,7 @@ export default function PreviewListingDialog({ groupTitle, generatedTitle, gener
   sku: string | null;
   condition?: string | null;
   coverImageUrl?: string | null;
+  sellingPricePence?: number | null;
   onClose: () => void;
 }) {
   const [copiedField, setCopiedField] = useState<CopiedField>(null);
@@ -69,7 +73,7 @@ export default function PreviewListingDialog({ groupTitle, generatedTitle, gener
             <dl className="preview-listing-vinted-meta">
               <div><dt>Condition</dt><dd>{condition || "Not set"}</dd></div>
               <div><dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : "Not set"}</dd></div>
-              <div><dt>Price</dt><dd className="preview-listing-vinted-price-placeholder">Price not set</dd></div>
+              <div><dt>Price</dt><dd className={sellingPricePence ? undefined : "preview-listing-vinted-price-placeholder"}>{sellingPricePence ? formatPenceAsGBP(sellingPricePence) : "Price not set"}</dd></div>
             </dl>
           </div>
         </section>

@@ -195,3 +195,69 @@ describe("POST /api/listing-studio/groups/[draftId]/reassess-audience — explic
     expect(costLogBody.candidate_count).toBeNull();
   });
 });
+
+describe("POST /api/listing-studio/groups/[draftId]/reassess-audience — Business-rule follow-up correction: footwear must never be listed under a children's Vinted audience", () => {
+  it("REGRESSION: a photo reassessment returning 'boys' for a footwear draft is normalised to 'womens' before being used for category resolution and persistence", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow()]; // product_type "Trainers" (footwear), vinted_category_status "audience_missing" by default
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      return [];
+    });
+    runVintedAudiencePhotoReassessment.mockResolvedValueOnce({
+      status: "success", vintedAudience: "boys", vintedAudienceEvidence: ["Box label explicitly says BOYS"],
+      model: "claude-sonnet-5", inputTokens: 900, outputTokens: 20,
+    });
+    resolveVintedCategoryAssignment.mockResolvedValueOnce({
+      result: { reason: "category_assigned", categoryId: 2632, categoryPath: "Women > Shoes > Trainers", method: "deterministic" },
+      aiCost: null, vintedAudience: "womens",
+    });
+
+    const response = await reassessAudienceRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.vintedCategoryPath).toBe("Women > Shoes > Trainers");
+    // The category resolver was called with the ALREADY-normalised audience.
+    expect(resolveVintedCategoryAssignment).toHaveBeenCalledWith(expect.objectContaining({ vintedAudience: "womens" }));
+
+    const patchCall = supabaseRequest.mock.calls.find((c) => (c[1] as RequestInit)?.method === "PATCH");
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.vinted_audience).toBe("womens");
+  });
+
+  it("REGRESSION: normalises the persisted audience even when the category-resolution block is skipped entirely (category wasn't stuck on audience_missing) — closes the exact gap where this route used to persist the raw AI result unconditionally", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow({ vinted_category_status: "no_candidates", vinted_category_source: null })];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      return [];
+    });
+    runVintedAudiencePhotoReassessment.mockResolvedValueOnce({
+      status: "success", vintedAudience: "girls", vintedAudienceEvidence: ["Style code belongs to a girls' release"],
+      model: "claude-sonnet-5", inputTokens: 1, outputTokens: 1,
+    });
+
+    const response = await reassessAudienceRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(resolveVintedCategoryAssignment).not.toHaveBeenCalled(); // confirms the gap this closes: normalisation never depended on this call running
+
+    const patchCall = supabaseRequest.mock.calls.find((c) => (c[1] as RequestInit)?.method === "PATCH");
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.vinted_audience).toBe("womens");
+  });
+
+  it("REGRESSION: 'boys'/'girls' on a non-footwear product type is returned/persisted completely unchanged", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) return [draftRow({ product_type: "Jacket", vinted_category_status: "no_candidates", vinted_category_source: null })];
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      return [];
+    });
+    runVintedAudiencePhotoReassessment.mockResolvedValueOnce({
+      status: "success", vintedAudience: "boys", vintedAudienceEvidence: ["Kids clothing tag says Boys"],
+      model: "claude-sonnet-5", inputTokens: 1, outputTokens: 1,
+    });
+
+    const response = await reassessAudienceRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("boys");
+  });
+});

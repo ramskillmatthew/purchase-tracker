@@ -68,6 +68,122 @@ describe("resolveVintedCategoryAssignment — Men + Trainers / Women + Trainers 
   });
 });
 
+describe("resolveVintedCategoryAssignment — Business-rule follow-up correction: footwear must never be listed under a children's Vinted audience (boys/girls -> womens)", () => {
+  it("Boys + footwear: searches the WOMEN'S branch, never the Kids Boys branch, and returns the normalised 'womens' audience", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 2632, full_path: "Women > Shoes > Trainers", audience: "womens" })]);
+
+    const { result, vintedAudience } = await resolveVintedCategoryAssignment({ vintedAudience: "boys", productType: "Trainers", brand: null, model: null });
+
+    expect(vintedAudience).toBe("womens");
+    expect(result).toEqual({ reason: "category_assigned", categoryId: 2632, categoryPath: "Women > Shoes > Trainers", method: "deterministic" });
+    const [path] = supabaseRequest.mock.calls[0];
+    expect(path).toContain(encodeURIComponent("Women > Shoes%"));
+    expect(path).not.toContain(encodeURIComponent("Kids"));
+  });
+
+  it("Girls + footwear: searches the WOMEN'S branch, never the Kids Girls branch, and returns the normalised 'womens' audience", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 2632, full_path: "Women > Shoes > Trainers", audience: "womens" })]);
+
+    const { result, vintedAudience } = await resolveVintedCategoryAssignment({ vintedAudience: "girls", productType: "Trainers", brand: null, model: null });
+
+    expect(vintedAudience).toBe("womens");
+    expect(result).toMatchObject({ reason: "category_assigned", categoryId: 2632 });
+    const [path] = supabaseRequest.mock.calls[0];
+    expect(path).toContain(encodeURIComponent("Women > Shoes%"));
+    expect(path).not.toContain(encodeURIComponent("Kids"));
+  });
+
+  it("REGRESSION: Boys/Girls on a CLOTHING product type is never normalised — still resolves via the real Kids branch, audience returned unchanged", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Kids")
+        ? new Response(JSON.stringify([{ id: 1195, label: "Jacket", full_path: "Kids > Girls clothing > Jacket", audience: "girls", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 1195, full_path: "Kids > Girls clothing > Jacket", audience: "girls" })]);
+
+    const { vintedAudience } = await resolveVintedCategoryAssignment({ vintedAudience: "girls", productType: "Jacket", brand: null, model: null });
+    expect(vintedAudience).toBe("girls");
+    const [path] = supabaseRequest.mock.calls[0];
+    expect(path).toContain(encodeURIComponent("Kids > Girls clothing%"));
+  });
+
+  it("Men/Women footwear are returned completely unchanged (never accidentally touched by the boys/girls-only rule)", async () => {
+    const men = await resolveVintedCategoryAssignment({ vintedAudience: "mens", productType: "Trainers", brand: null, model: null });
+    expect(men.vintedAudience).toBe("mens");
+    const women = await resolveVintedCategoryAssignment({ vintedAudience: "womens", productType: "Trainers", brand: null, model: null });
+    expect(women.vintedAudience).toBe("womens");
+  });
+
+  it("Unisex/Unknown footwear are returned completely unchanged", async () => {
+    const unisex = await resolveVintedCategoryAssignment({ vintedAudience: "unisex", productType: "Trainers", brand: null, model: null });
+    expect(unisex.vintedAudience).toBe("unisex");
+    expect(unisex.result.reason).toBe("audience_missing"); // unisex has no automatic branch — unrelated to this rule
+    const unknown = await resolveVintedCategoryAssignment({ vintedAudience: "unknown", productType: "Trainers", brand: null, model: null });
+    expect(unknown.vintedAudience).toBe("unknown");
+  });
+});
+
+describe("resolveVintedCategoryAssignmentForExistingDraft — Business-rule follow-up correction: normalises boys/girls footwear even for a manually-protected audience", () => {
+  it("a MANUALLY-protected boys/girls footwear audience is still normalised to womens — manual protection only means 'don't re-run AI reassessment', never 'keep a value that violates this business rule'", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 2632, full_path: "Women > Shoes > Trainers", audience: "womens" })]);
+
+    const outcome = await resolveVintedCategoryAssignmentForExistingDraft({
+      vintedAudience: "boys", vintedAudienceSource: "manual", vintedAudienceEvidence: null,
+      productType: "Trainers", brand: "Nike", model: "Air",
+    });
+
+    expect(outcome.vintedAudience).toBe("womens");
+    expect(runVintedAudienceTextReassessment).not.toHaveBeenCalled(); // still protected from AI re-guessing
+    expect(outcome.result).toMatchObject({ reason: "category_assigned", categoryId: 2632 });
+  });
+
+  it("a MANUALLY-protected girls footwear audience is likewise normalised", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 2632, full_path: "Women > Shoes > Trainers", audience: "womens" })]);
+
+    const outcome = await resolveVintedCategoryAssignmentForExistingDraft({
+      vintedAudience: "girls", vintedAudienceSource: "manual", vintedAudienceEvidence: null,
+      productType: "Trainers", brand: null, model: null,
+    });
+    expect(outcome.vintedAudience).toBe("womens");
+  });
+
+  it("REGRESSION: a manually-protected WOMEN'S footwear audience remains completely untouched — this rule only ever converts boys/girls, never re-decides an already-valid audience", async () => {
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+    supabaseRequestAll.mockResolvedValueOnce([categoryRow({ id: 2632, full_path: "Women > Shoes > Trainers", audience: "womens" })]);
+
+    const outcome = await resolveVintedCategoryAssignmentForExistingDraft({
+      vintedAudience: "womens", vintedAudienceSource: "manual", vintedAudienceEvidence: null,
+      productType: "Trainers", brand: null, model: null,
+    });
+    expect(outcome.vintedAudience).toBe("womens");
+    expect(runVintedAudienceTextReassessment).not.toHaveBeenCalled();
+  });
+});
+
 describe("resolveVintedCategoryAssignment — Follow-up correction (2026-08-07): production bug fix, 'Running Trainers' no longer returns no_candidates. Uses the real, live-verified catalogue leaves for both audiences (Women > Shoes > Trainers id 2632 / Women > Shoes > Sports shoes > Running shoes id 2651; Men > Shoes > Trainers id 1242 / Men > Shoes > Sports shoes > Running shoes id 1453) — see vinted-categories-data.ts's own comment for the root cause this fixes.", () => {
   it("REGRESSION (the exact ASICS Novablast 4 / On Cloud 5 production examples): Women + 'Running Trainers' returns BOTH real women's running-footwear candidates to the AI selector — never zero", async () => {
     supabaseRequest.mockImplementation(async (path: string) => (

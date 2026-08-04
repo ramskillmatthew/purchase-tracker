@@ -107,3 +107,57 @@ describe("POST /api/listing-studio/listings-review/assign-categories — bulk 'A
     expect(Object.keys(patchBody).sort()).toEqual(["updated_at", "vinted_audience", "vinted_audience_evidence", "vinted_category_id", "vinted_category_path", "vinted_category_source", "vinted_category_status"].sort());
   });
 });
+
+describe("POST /api/listing-studio/listings-review/assign-categories — Business-rule follow-up correction: footwear must never be listed under a children's Vinted audience", () => {
+  it("REGRESSION: a footwear draft with a MANUAL Kids category and a 'boys' audience is corrected in the bulk run — the incompatible manual category is cleared and replaced, audience persisted as 'womens'", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?id=in.")) {
+        return [draftRow(ID_A, {
+          vinted_audience: "boys", vinted_audience_source: "ai",
+          vinted_category_id: 1256, vinted_category_path: "Kids > Boys clothing > Shoes > Trainers", vinted_category_source: "manual",
+        })];
+      }
+      if (path.includes("vinted_categories?id=eq.2632")) return [{ id: 2632, code: null, label: "Trainers", full_path: "Women > Shoes > Trainers", parent_id: 16, root_id: 4, depth: 2, is_leaf: true, is_selectable: true, is_active: true, audience: "womens", item_family: null }];
+      return [];
+    });
+    supabaseRequest.mockImplementation(async (path: string) => (
+      path.startsWith("vinted_categories?") && path.includes("Women")
+        ? new Response(JSON.stringify([{ id: 2632, label: "Trainers", full_path: "Women > Shoes > Trainers", audience: "womens", item_family: null }]), { status: 200 })
+        : new Response(JSON.stringify([]), { status: 200 })
+    ));
+
+    const response = await bulkAssignRoute(bulkRequest([ID_A]));
+    const body = await response.json();
+    expect(body.summary.skippedCount).toBe(0); // not skipped as "already manual"
+    expect(body.results[0].reason).toBe("category_assigned");
+
+    const patchCall = supabaseRequest.mock.calls.find((c) => (c[1] as RequestInit)?.method === "PATCH");
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.vinted_audience).toBe("womens");
+    expect(patchBody.vinted_category_id).toBe(2632);
+    expect(patchBody.vinted_category_source).toBe("ai");
+    expect(patchBody.vinted_category_path).not.toContain("Kids");
+  });
+
+  it("REGRESSION: a manually-chosen WOMEN's category on a womens-audience footwear draft remains fully protected in the bulk run", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow(ID_A, {
+      vinted_audience: "womens", vinted_audience_source: "ai",
+      vinted_category_id: 2955, vinted_category_path: "Women > Shoes > Ballerinas", vinted_category_source: "manual",
+    })]);
+    const response = await bulkAssignRoute(bulkRequest([ID_A]));
+    const body = await response.json();
+    expect(body.summary.skippedCount).toBe(1);
+    expect(supabaseRequest).not.toHaveBeenCalled();
+  });
+
+  it("REGRESSION: a manually-chosen category on a non-footwear boys/girls draft (e.g. Kids clothing) remains fully protected — this correction only ever fires for footwear", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow(ID_A, {
+      product_type: "Jacket", vinted_audience: "girls", vinted_audience_source: "ai",
+      vinted_category_id: 1195, vinted_category_path: "Kids > Girls clothing > Jacket", vinted_category_source: "manual",
+    })]);
+    const response = await bulkAssignRoute(bulkRequest([ID_A]));
+    const body = await response.json();
+    expect(body.summary.skippedCount).toBe(1);
+    expect(supabaseRequest).not.toHaveBeenCalled();
+  });
+});

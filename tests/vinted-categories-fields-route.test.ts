@@ -218,3 +218,100 @@ describe("PATCH /api/listing-studio/groups/[draftId]/fields — Follow-up correc
     expect(body.sku).toBe("1648");
   });
 });
+
+describe("PATCH /api/listing-studio/groups/[draftId]/fields — Business-rule follow-up correction: footwear must never be listed under a children's Vinted audience", () => {
+  it("submitting 'boys' for a footwear product type persists 'womens' instead — never the raw submitted value", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.includes("vinted_categories?id=eq.1906")) return [category()];
+      return [draftRow({ vinted_audience: "unknown" })]; // stored value differs from "womens", so this is genuinely an audience-driven recompute
+    });
+    const response = await fieldsRoute(patchRequest(fieldsBody({ productType: "Trainers", vintedAudience: "boys" })), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+  });
+
+  it("submitting 'girls' for a footwear product type persists 'womens' too", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.includes("vinted_categories?id=eq.1906")) return [category()];
+      return [draftRow({ vinted_audience: "unknown" })];
+    });
+    const response = await fieldsRoute(patchRequest(fieldsBody({ productType: "Trainers", vintedAudience: "girls" })), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+  });
+
+  it("REGRESSION: 'boys' on a non-footwear product type (e.g. clothing) is saved completely unchanged", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.includes("vinted_categories?")) return [];
+      return [draftRow({ vinted_audience: "unknown" })];
+    });
+    const response = await fieldsRoute(patchRequest(fieldsBody({ productType: "Jacket", vintedAudience: "boys" })), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("boys");
+  });
+
+  it("REGRESSION: when the stored draft is ALREADY 'womens' (already correct, e.g. previously normalised), resubmitting 'womens' for footwear is NOT treated as an audience change — no unnecessary category recompute", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ vinted_audience: "womens", vinted_category_id: 1906, vinted_category_path: "Women > Shoes > Trainers", vinted_category_source: "ai" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ productType: "Trainers", vintedAudience: "womens", vintedCategoryId: null })), params());
+    const body = await response.json();
+    expect(body.vintedAudienceSource).toBe("ai"); // not reclassified as "manual" — nothing actually changed
+    expect(body.vintedCategoryId).toBeNull(); // vintedCategoryId: null was explicitly submitted and honoured — unrelated to this rule
+  });
+
+  it("REGRESSION: UK size is never touched by this normalisation", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.includes("vinted_categories?id=eq.1906")) return [category()];
+      return [draftRow({ vinted_audience: "unknown" })];
+    });
+    const response = await fieldsRoute(patchRequest(fieldsBody({ productType: "Trainers", vintedAudience: "boys", ukSize: "3" })), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.ukSize).toBe("3");
+  });
+});
+
+describe("PATCH /api/listing-studio/groups/[draftId]/fields — business-rule follow-up correction: Women's footwear text must never carry children's audience wording", () => {
+  it("REGRESSION (the exact production example): submitting model 'Clifton 9 Youth' for a footwear item already Women's persists 'Clifton 9' and a title with no 'Youth'", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ vinted_audience: "womens" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ brand: "Hoka", model: "Clifton 9 Youth", productType: "Running Trainers", vintedAudience: "womens", ukSize: "3" })), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.model).toBe("Clifton 9");
+    expect(body.generatedTitle).not.toMatch(/\bYouth\b/i);
+    expect(body.generatedTitle).toContain("Hoka Clifton 9 Running Trainers");
+    expect(body.ukSize).toBe("3");
+  });
+
+  it("submitting 'boys'/'girls' together with children's wording in model: both the audience AND the text are normalised in the same save", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.includes("vinted_categories?id=eq.1906")) return [category()];
+      return [draftRow({ vinted_audience: "unknown" })];
+    });
+    const response = await fieldsRoute(patchRequest(fieldsBody({ model: "Junior Clifton 9", productType: "Trainers", vintedAudience: "girls" })), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("womens");
+    expect(body.model).toBe("Clifton 9");
+  });
+
+  it("REGRESSION: non-footwear model text is never touched, even for a Boys/Girls draft", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ vinted_audience: "unknown" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ model: "Girls Puffer", productType: "Jacket", vintedAudience: "girls" })), params());
+    const body = await response.json();
+    expect(body.model).toBe("Girls Puffer");
+  });
+
+  it("Men's footwear model text is never touched by this rule", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ vinted_audience: "mens" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ model: "Junior Racer", productType: "Trainers", vintedAudience: "mens" })), params());
+    const body = await response.json();
+    expect(body.model).toBe("Junior Racer");
+  });
+
+  it("REGRESSION: resubmitting an already-clean model is not treated specially — same value in, same value out, source untouched", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ vinted_audience: "womens", model: "Clifton 9" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ model: "Clifton 9", productType: "Trainers", vintedAudience: "womens" })), params());
+    const body = await response.json();
+    expect(body.model).toBe("Clifton 9");
+  });
+});

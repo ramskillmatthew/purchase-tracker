@@ -16,6 +16,7 @@ const QUICK_FILTERS: { value: ListingQuickFilter; label: string }[] = [
   { value: "missing_brand", label: "Missing brand" },
   { value: "missing_colour", label: "Missing colour" },
   { value: "missing_category", label: "Missing category" },
+  { value: "missing_price", label: "Missing price" },
 ];
 
 /**

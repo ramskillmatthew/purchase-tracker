@@ -13,7 +13,9 @@ import { deriveUkSizeFromSource } from "@/lib/listing-studio/size-conversion";
 import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
 import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason } from "@/lib/listing-studio/vinted-category-assignment";
+import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
+import type { VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -24,7 +26,7 @@ type DraftRow = {
   id: string; title: string | null; uk_size: string | null; uk_size_source: string | null;
   vinted_category_id: number | null; vinted_category_path: string | null; vinted_category_source: "ai" | "manual" | null;
   vinted_category_status: string | null;
-  vinted_audience: string | null; vinted_audience_source: "ai" | "manual" | null;
+  vinted_audience: VintedAudienceValue | null; vinted_audience_source: "ai" | "manual" | null;
 };
 type CategoryRunOutcome = { status: "success" | "failed"; errorMessage: string | null; responseJson: unknown };
 type ImageRow = { id: string; storage_path: string; mime_type: string };
@@ -113,12 +115,11 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
     const finalUkSize = draft.uk_size ?? derived.ukSize;
     const finalUkSizeSource = draft.uk_size ? draft.uk_size_source : derived.provenance;
 
-    const structuredFields: GeneratedListingFields = {
-      brand: fields.brand.value, model: fields.model.value, productType: fields.productType.value,
-      colours: fields.colours.value, material: fields.material.value, ukSize: finalUkSize, sku: fields.sku.value,
-    };
-    const generatedTitle = generateListingTitle(structuredFields);
-    const generatedDescription = generateListingDescription(structuredFields);
+    // Item family is classified from the AI's raw productType text before
+    // any children's-wording cleanup below — the keyword match (e.g.
+    // "trainers"/"shoes") is unaffected by an extra word like "Youth", so
+    // there is no ordering hazard in deriving it first.
+    const draftItemFamily = deriveDraftItemFamily(fields.productType.value);
 
     // Follow-up correction (2026-08-04): audience now comes from the AI's
     // own independent vintedAudience field, never sourceSize.gender — see
@@ -133,13 +134,36 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
     // A manually-corrected audience (Edit Fields) is just as sticky as a
     // manually-chosen category — never silently overwritten by a later
     // regenerate with a fresh (possibly still wrong) AI guess.
-    const finalVintedAudience = draft.vinted_audience_source === "manual" ? draft.vinted_audience : fields.vintedAudience.value;
+    const rawFinalVintedAudience = draft.vinted_audience_source === "manual" ? draft.vinted_audience : fields.vintedAudience.value;
     const finalVintedAudienceSource: "ai" | "manual" = draft.vinted_audience_source === "manual" ? "manual" : "ai";
+    // Business-rule follow-up correction: footwear must never persist a
+    // children's Vinted audience — normalised here immediately, before
+    // either persistence or category resolution below, and regardless of
+    // source (a legacy manual boys/girls pick predating this rule is
+    // corrected too, same as a fresh AI one).
+    const finalVintedAudience = normaliseFootwearVintedAudience(rawFinalVintedAudience, draftItemFamily);
     // Follow-up correction (2026-08-05): the factual evidence backing an
     // AI-determined audience — null whenever the audience is a manual
     // pick (a manual choice has no AI evidence, and showing stale AI
     // evidence next to it would be misleading).
     const finalVintedAudienceEvidence = finalVintedAudienceSource === "manual" ? null : fields.vintedAudienceEvidence;
+
+    // Business-rule follow-up correction (children's wording in
+    // customer-facing text): footwear listed as Women's must never carry
+    // Youth/Kids/Junior/Boys/Girls/Child/Children wording in its title —
+    // the STRUCTURED source fields (model/productType) are cleaned here,
+    // before title/description generation, rather than scrubbing only the
+    // rendered title string — so the same clean values are what's actually
+    // persisted, displayed in Edit Fields, and re-derived from on every
+    // future regeneration.
+    const structuredFields: GeneratedListingFields = {
+      brand: fields.brand.value,
+      model: normaliseFootwearListingText(fields.model.value, draftItemFamily, finalVintedAudience),
+      productType: normaliseFootwearListingText(fields.productType.value, draftItemFamily, finalVintedAudience),
+      colours: fields.colours.value, material: fields.material.value, ukSize: finalUkSize, sku: fields.sku.value,
+    };
+    const generatedTitle = generateListingTitle(structuredFields);
+    const generatedDescription = generateListingDescription(structuredFields);
 
     let categoryId = draft.vinted_category_id;
     let categoryPath = draft.vinted_category_path;
@@ -150,7 +174,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
 
     if (draft.vinted_category_source !== "manual") {
       const { result, aiCost } = await resolveVintedCategoryAssignment({
-        vintedAudience: finalVintedAudience as "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null, productType: structuredFields.productType,
+        vintedAudience: finalVintedAudience, productType: structuredFields.productType,
         brand: structuredFields.brand, model: structuredFields.model,
       });
       categoryStatus = result.reason;

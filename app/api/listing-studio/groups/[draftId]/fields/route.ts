@@ -6,6 +6,7 @@ import { updateListingFieldsRequestSchema, uuidSchema } from "@/lib/validation/l
 import { generateListingTitle, generateListingDescription, LISTING_CONDITION_TEXT, type GeneratedListingFields } from "@/lib/listing-studio/listing-template";
 import { getVintedCategoryById, isPublishableVintedCategory } from "@/lib/listing-studio/vinted-categories-data";
 import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason } from "@/lib/listing-studio/vinted-category-assignment";
+import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
@@ -62,8 +63,30 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     const draft = drafts[0];
     if (!draft) return NextResponse.json({ error: "Group not found." }, { status: 404 });
 
+    const rawModel = normalize(body.model);
+    const rawProductType = normalize(body.productType);
+    const draftItemFamily = deriveDraftItemFamily(rawProductType);
+
+    // Business-rule follow-up correction: footwear must never persist a
+    // children's Vinted audience — normalised BEFORE the "did the audience
+    // change" comparison, so a submitted "boys"/"girls" for a footwear
+    // item is compared (and ultimately persisted) as "womens" here, same
+    // as everywhere else this rule applies.
+    const normalisedVintedAudience = normaliseFootwearVintedAudience(body.vintedAudience, draftItemFamily);
+    const audienceChanged = normalisedVintedAudience !== draft.vinted_audience;
+    const finalVintedAudience = normalisedVintedAudience;
+    const finalVintedAudienceSource: "ai" | "manual" | null = audienceChanged ? "manual" : draft.vinted_audience_source;
+
+    // Business-rule follow-up correction (children's wording in
+    // customer-facing text): the structured source fields are cleaned
+    // BEFORE title/description regeneration below — see
+    // vinted-category-selection.ts's normaliseFootwearListingText for why
+    // this must happen to model/productType themselves, not just the
+    // rendered title string.
     const structuredFields: GeneratedListingFields = {
-      brand: normalize(body.brand), model: normalize(body.model), productType: normalize(body.productType),
+      brand: normalize(body.brand),
+      model: normaliseFootwearListingText(rawModel, draftItemFamily, finalVintedAudience),
+      productType: normaliseFootwearListingText(rawProductType, draftItemFamily, finalVintedAudience),
       // colours/material are already exact Vinted-enum values (or empty/null)
       // once updateListingFieldsRequestSchema has parsed the body — nothing
       // free-text to trim/normalize here, unlike the plain-string fields above.
@@ -71,10 +94,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     };
     const generatedTitle = generateListingTitle(structuredFields);
     const generatedDescription = generateListingDescription(structuredFields);
-
-    const audienceChanged = body.vintedAudience !== draft.vinted_audience;
-    const finalVintedAudience = body.vintedAudience;
-    const finalVintedAudienceSource: "ai" | "manual" | null = audienceChanged ? "manual" : draft.vinted_audience_source;
 
     let categoryId = draft.vinted_category_id;
     let categoryPath: string | null = draft.vinted_category_path;

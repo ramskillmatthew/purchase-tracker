@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   validateSelectedVintedCategory, deriveDraftAudience, deriveDraftItemFamily,
   selectAutomaticSelectionBranches, AUTOMATIC_SELECTION_BRANCHES, extractCategorySearchKeywords,
+  normaliseFootwearVintedAudience, stripChildrensAudienceWording, normaliseFootwearListingText,
 } from "@/lib/listing-studio/vinted-category-selection";
 import type { VintedCategoryRow } from "@/lib/listing-studio/vinted-categories-data";
 
@@ -99,6 +100,148 @@ describe("extractCategorySearchKeywords — follow-up correction (2026-08-07): t
 
   it("splits on any non-alphanumeric separator, not just spaces", () => {
     expect(extractCategorySearchKeywords("Football-Boots/Cleats")).toEqual(["football", "boots", "cleats"]);
+  });
+});
+
+describe("normaliseFootwearVintedAudience — business rule: footwear must never be listed under a children's Vinted audience", () => {
+  it("Boys + footwear normalises to Women", () => {
+    expect(normaliseFootwearVintedAudience("boys", "footwear")).toBe("womens");
+  });
+
+  it("Girls + footwear normalises to Women", () => {
+    expect(normaliseFootwearVintedAudience("girls", "footwear")).toBe("womens");
+  });
+
+  it("Men + footwear remains Men", () => {
+    expect(normaliseFootwearVintedAudience("mens", "footwear")).toBe("mens");
+  });
+
+  it("Women + footwear remains Women", () => {
+    expect(normaliseFootwearVintedAudience("womens", "footwear")).toBe("womens");
+  });
+
+  it("Unisex + footwear remains Unisex", () => {
+    expect(normaliseFootwearVintedAudience("unisex", "footwear")).toBe("unisex");
+  });
+
+  it("Unknown + footwear remains Unknown", () => {
+    expect(normaliseFootwearVintedAudience("unknown", "footwear")).toBe("unknown");
+  });
+
+  it("null + footwear remains null", () => {
+    expect(normaliseFootwearVintedAudience(null, "footwear")).toBeNull();
+  });
+
+  it("REGRESSION: Boys/Girls on non-footwear (clothing or uncertain) remain completely unchanged — Vinted's own Kids clothing branches are still a valid destination there", () => {
+    expect(normaliseFootwearVintedAudience("boys", "clothing")).toBe("boys");
+    expect(normaliseFootwearVintedAudience("girls", "clothing")).toBe("girls");
+    expect(normaliseFootwearVintedAudience("boys", "uncertain")).toBe("boys");
+    expect(normaliseFootwearVintedAudience("girls", "uncertain")).toBe("girls");
+  });
+
+  it("REGRESSION: never a size-based decision — this function has no ukSize/sourceSize parameter at all, only (audience, itemFamily)", () => {
+    expect(normaliseFootwearVintedAudience.length).toBe(2);
+  });
+
+  it("REGRESSION: no AI call is involved — the function is synchronous (returns a value directly, never a Promise) and this module never imports the Anthropic SDK or any runVinted*/run*Analysis AI-calling function", async () => {
+    expect(normaliseFootwearVintedAudience("boys", "footwear")).not.toBeInstanceOf(Promise);
+    const source = await import("node:fs").then(fs => fs.readFileSync("lib/listing-studio/vinted-category-selection.ts", "utf8"));
+    expect(source).not.toContain("@anthropic-ai/sdk");
+    expect(source).not.toMatch(/^import.*Anthropic/m);
+    expect(source).not.toMatch(/import\s*"server-only"/);
+  });
+});
+
+describe("stripChildrensAudienceWording — business rule: Women's footwear text must never carry children's audience wording", () => {
+  it("Clifton 9 Youth -> Clifton 9 (the exact production example)", () => {
+    expect(stripChildrensAudienceWording("Clifton 9 Youth")).toBe("Clifton 9");
+  });
+
+  it("Junior Clifton 9 -> Clifton 9", () => {
+    expect(stripChildrensAudienceWording("Junior Clifton 9")).toBe("Clifton 9");
+  });
+
+  it("Kids' Running Trainers -> Running Trainers", () => {
+    expect(stripChildrensAudienceWording("Kids' Running Trainers")).toBe("Running Trainers");
+  });
+
+  it("removes Boys/Girls wording", () => {
+    expect(stripChildrensAudienceWording("Boys Running Trainers")).toBe("Running Trainers");
+    expect(stripChildrensAudienceWording("Girls Cloud 5")).toBe("Cloud 5");
+    expect(stripChildrensAudienceWording("Boy's Trainers")).toBe("Trainers");
+    expect(stripChildrensAudienceWording("Girl's Trainers")).toBe("Trainers");
+  });
+
+  it("is case-insensitive", () => {
+    expect(stripChildrensAudienceWording("YOUTH Cloud 5")).toBe("Cloud 5");
+    expect(stripChildrensAudienceWording("boys Cloud 5")).toBe("Cloud 5");
+    expect(stripChildrensAudienceWording("KiDs Cloud 5")).toBe("Cloud 5");
+  });
+
+  it("removes every children's term named by the business rule (Kid/Kids/Junior/Juniors/Child/Children/Children's too)", () => {
+    expect(stripChildrensAudienceWording("Kid Trainers")).toBe("Trainers");
+    expect(stripChildrensAudienceWording("Juniors Trainers")).toBe("Trainers");
+    expect(stripChildrensAudienceWording("Child Trainers")).toBe("Trainers");
+    expect(stripChildrensAudienceWording("Children Trainers")).toBe("Trainers");
+    expect(stripChildrensAudienceWording("Children's Trainers")).toBe("Trainers");
+  });
+
+  it("removes multiple terms in the same value safely", () => {
+    expect(stripChildrensAudienceWording("Youth Kids Boys Trainers")).toBe("Trainers");
+  });
+
+  it("REGRESSION: never removes text merely because it contains the same letters inside another legitimate word — only whole, standalone terms are removed", () => {
+    expect(stripChildrensAudienceWording("Skidmore")).toBe("Skidmore");
+    expect(stripChildrensAudienceWording("Cowboy")).toBe("Cowboy");
+    expect(stripChildrensAudienceWording("Tomboys")).toBe("Tomboys");
+    expect(stripChildrensAudienceWording("Kanye Boyfriend Jeans")).toBe("Kanye Boyfriend Jeans");
+  });
+
+  it("collapses duplicate whitespace and removes awkward leftover punctuation left behind by a removed term", () => {
+    expect(stripChildrensAudienceWording("Running Kids' Trainers")).toBe("Running Trainers");
+    expect(stripChildrensAudienceWording("On Cloud   5")).toBe("On Cloud 5");
+  });
+
+  it("preserves the remaining model/product name exactly, in order, once the term is gone", () => {
+    expect(stripChildrensAudienceWording("Hoka Clifton 9 Youth Running Trainers")).toBe("Hoka Clifton 9 Running Trainers");
+  });
+
+  it("returns null for null, and null (never an empty string) when nothing but children's wording was present", () => {
+    expect(stripChildrensAudienceWording(null)).toBeNull();
+    expect(stripChildrensAudienceWording("Youth")).toBeNull();
+  });
+
+  it("a value with no children's wording at all is returned completely unchanged", () => {
+    expect(stripChildrensAudienceWording("Clifton 9")).toBe("Clifton 9");
+  });
+});
+
+describe("normaliseFootwearListingText — the gated, business-rule application of stripChildrensAudienceWording", () => {
+  it("footwear + womens: children's wording is stripped", () => {
+    expect(normaliseFootwearListingText("Clifton 9 Youth", "footwear", "womens")).toBe("Clifton 9");
+  });
+
+  it("REGRESSION: footwear + mens is NEVER touched by this rule, even if the text happened to contain a children's term", () => {
+    expect(normaliseFootwearListingText("Junior Racer", "footwear", "mens")).toBe("Junior Racer");
+  });
+
+  it("REGRESSION: footwear + unisex/unknown are never touched either — this rule is specifically scoped to Women's", () => {
+    expect(normaliseFootwearListingText("Junior Racer", "footwear", "unisex")).toBe("Junior Racer");
+    expect(normaliseFootwearListingText("Junior Racer", "footwear", "unknown")).toBe("Junior Racer");
+    expect(normaliseFootwearListingText("Junior Racer", "footwear", null)).toBe("Junior Racer");
+  });
+
+  it("REGRESSION: non-footwear (clothing/uncertain) is never touched, even for Women's — Kids clothing wording is legitimate there", () => {
+    expect(normaliseFootwearListingText("Girls Puffer Jacket", "clothing", "womens")).toBe("Girls Puffer Jacket");
+    expect(normaliseFootwearListingText("Girls Puffer Jacket", "uncertain", "womens")).toBe("Girls Puffer Jacket");
+  });
+
+  it("the title never needs to say Women/Women's — a clean value with no children's wording is returned exactly as-is, not appended to", () => {
+    expect(normaliseFootwearListingText("Cloud 5", "footwear", "womens")).toBe("Cloud 5");
+  });
+
+  it("null passes through as null regardless of gating", () => {
+    expect(normaliseFootwearListingText(null, "footwear", "womens")).toBeNull();
   });
 });
 

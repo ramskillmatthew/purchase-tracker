@@ -32,18 +32,28 @@ function completeListing(overrides: Partial<ReviewableListing> = {}): Reviewable
     vintedCategoryId: 1906, vintedCategoryValid: true, vintedCategorySource: "ai",
     // Follow-up correction (2026-08-04).
     vintedCategoryStatus: "category_assigned", vintedAudienceSource: "ai",
+    // Milestone 6 (purchase-price lookup and manual Vinted selling price)
+    // — a valid price by default so pre-existing tests' "nothing missing"
+    // baseline still holds.
+    sellingPricePence: 4500,
+    // Follow-up correction (closing the Mark Ready readiness gap) — valid
+    // defaults for every newly-required field, same reasoning.
+    vintedAudience: "womens",
+    generatedTitle: "Nike Pegasus Trainers", generatedDescription: "A great pair of trainers.",
+    condition: "Good condition from photos", hasPhoto: true,
     ...overrides,
   };
 }
 
-describe("getMissingRequiredFields — brand/model/colours/ukSize/sku, never productType or material", () => {
+describe("getMissingRequiredFields — brand/model/productType/colours/ukSize/sku, never material", () => {
   it("reports nothing missing when every required field is set", () => {
     expect(getMissingRequiredFields(completeListing())).toEqual([]);
   });
 
-  it("reports each of the 5 required fields when blank (null, whitespace-only, or an empty colours array)", () => {
+  it("reports each of the 6 required fields when blank (null, whitespace-only, or an empty colours array)", () => {
     expect(getMissingRequiredFields(completeListing({ brand: null }))).toEqual(["brand"]);
     expect(getMissingRequiredFields(completeListing({ model: "   " }))).toEqual(["model"]);
+    expect(getMissingRequiredFields(completeListing({ productType: null }))).toEqual(["productType"]);
     expect(getMissingRequiredFields(completeListing({ colours: [] }))).toEqual(["colours"]);
     expect(getMissingRequiredFields(completeListing({ ukSize: null }))).toEqual(["ukSize"]);
     expect(getMissingRequiredFields(completeListing({ sku: "" }))).toEqual(["sku"]);
@@ -57,9 +67,22 @@ describe("getMissingRequiredFields — brand/model/colours/ukSize/sku, never pro
     expect(getMissingRequiredFields(completeListing({ colours: ["Black"] }))).toEqual([]);
   });
 
-  it("REGRESSION: a missing productType or material is never reported — neither is a required field for review purposes", () => {
-    expect(getMissingRequiredFields(completeListing({ productType: null }))).toEqual([]);
+  it("Follow-up correction (closing the Mark Ready readiness gap): a missing product type IS now reported — Vinted genuinely needs one", () => {
+    expect(getMissingRequiredFields(completeListing({ productType: null }))).toEqual(["productType"]);
+  });
+
+  it("REGRESSION: a missing material is never reported — Vinted only requires it for SOME categories, and this app has no reliable per-category signal for that, so it stays universally optional", () => {
     expect(getMissingRequiredFields(completeListing({ material: null }))).toEqual([]);
+  });
+
+  it("Follow-up correction: UK size is only required for footwear/clothing item families (derived from productType) — an item type outside that scope (or with no product type at all, since 'uncertain' never requires a size) is never blocked on a missing size", () => {
+    expect(getMissingRequiredFields(completeListing({ productType: "Handbag", ukSize: null }))).toEqual([]);
+    expect(getMissingRequiredFields(completeListing({ productType: null, ukSize: null }))).toEqual(["productType"]);
+  });
+
+  it("UK size IS still required for a recognised footwear or clothing product type", () => {
+    expect(getMissingRequiredFields(completeListing({ productType: "Trainers", ukSize: null }))).toEqual(["ukSize"]);
+    expect(getMissingRequiredFields(completeListing({ productType: "Jacket", ukSize: null }))).toEqual(["ukSize"]);
   });
 
   it("reports every missing field at once, in REVIEW_REQUIRED_FIELDS order", () => {
@@ -111,10 +134,68 @@ describe("buildListingWarnings — human-readable, in the spec's own example ord
     expect(buildListingWarnings(completeListing({ vintedCategoryId: null, vintedCategoryValid: false, vintedCategoryStatus: "audience_missing" }))).toEqual(["Audience required"]);
   });
 
+  it("Follow-up correction (closing the Mark Ready readiness gap): a missing/blank generated title is reported", () => {
+    expect(buildListingWarnings(completeListing({ generatedTitle: "" }))).toEqual(["Missing title"]);
+    expect(buildListingWarnings(completeListing({ generatedTitle: "   " }))).toEqual(["Missing title"]);
+  });
+
+  it("a missing/blank generated description is reported", () => {
+    expect(buildListingWarnings(completeListing({ generatedDescription: "" }))).toEqual(["Missing description"]);
+  });
+
+  it("a missing/blank condition is reported", () => {
+    expect(buildListingWarnings(completeListing({ condition: null }))).toEqual(["Missing condition"]);
+  });
+
+  it("a null or 'unknown' Vinted audience is reported as 'Missing audience' — distinct from the category warning", () => {
+    expect(buildListingWarnings(completeListing({ vintedAudience: null }))).toEqual(["Missing audience"]);
+    expect(buildListingWarnings(completeListing({ vintedAudience: "unknown" }))).toEqual(["Missing audience"]);
+  });
+
+  it("REGRESSION: a resolved 'unisex' (or boys/girls) audience is never treated as missing", () => {
+    expect(buildListingWarnings(completeListing({ vintedAudience: "unisex" }))).toEqual([]);
+    expect(buildListingWarnings(completeListing({ vintedAudience: "boys" }))).toEqual([]);
+    expect(buildListingWarnings(completeListing({ vintedAudience: "girls" }))).toEqual([]);
+  });
+
+  it("having no uploaded photo at all is reported as 'No uploaded photos'", () => {
+    expect(buildListingWarnings(completeListing({ hasPhoto: false }))).toEqual(["No uploaded photos"]);
+  });
+
+  it("every new check can fire together with the pre-existing ones, each exactly once, in the documented order", () => {
+    const listing = completeListing({
+      sku: null, generatedTitle: "", generatedDescription: "", condition: null, vintedAudience: null,
+      vintedCategoryId: null, vintedCategoryValid: false, vintedCategoryStatus: "no_candidates",
+      hasPhoto: false, sellingPricePence: null,
+    });
+    expect(buildListingWarnings(listing)).toEqual([
+      "Missing SKU", "Missing title", "Missing description", "Missing condition", "Missing audience",
+      "Missing category", "No uploaded photos", "Missing selling price",
+    ]);
+  });
+
   it("every other category-assignment reason still falls back to the generic 'Missing category' — never a raw internal code shown to the user", () => {
     for (const status of ["item_family_uncertain", "no_candidates", "too_many_candidates", "ai_selection_failed", "ai_selection_invalid", null]) {
       expect(buildListingWarnings(completeListing({ vintedCategoryId: null, vintedCategoryValid: false, vintedCategoryStatus: status }))).toEqual(["Missing category"]);
     }
+  });
+
+  it("Milestone 6 (selling price): 'Missing selling price' is appended last when no valid price is saved", () => {
+    expect(buildListingWarnings(completeListing({ sellingPricePence: null }))).toEqual(["Missing selling price"]);
+    expect(buildListingWarnings(completeListing({ sellingPricePence: 0 }))).toEqual(["Missing selling price"]);
+    expect(buildListingWarnings(completeListing({ sellingPricePence: -100 }))).toEqual(["Missing selling price"]);
+  });
+
+  it("REGRESSION: the warning disappears immediately once a valid price is present — recomputed fresh every time", () => {
+    const missing = completeListing({ sellingPricePence: null });
+    const fixed: ReviewableListing = { ...missing, sellingPricePence: 4500 };
+    expect(buildListingWarnings(missing)).toContain("Missing selling price");
+    expect(buildListingWarnings(fixed)).not.toContain("Missing selling price");
+  });
+
+  it("category and price warnings can both appear together, category first", () => {
+    expect(buildListingWarnings(completeListing({ vintedCategoryId: null, vintedCategoryValid: false, vintedCategoryStatus: "no_candidates", sellingPricePence: null })))
+      .toEqual(["Missing category", "Missing selling price"]);
   });
 });
 
@@ -132,6 +213,13 @@ describe("matchesQuickFilter — Missing SKU / Missing Size / Missing Brand / Mi
     expect(matchesQuickFilter(completeListing({ vintedCategoryId: null, vintedCategoryValid: false }), "missing_category")).toBe(true);
     expect(matchesQuickFilter(completeListing({ vintedCategoryId: 1906, vintedCategoryValid: false }), "missing_category")).toBe(true);
     expect(matchesQuickFilter(completeListing(), "missing_category")).toBe(false);
+  });
+
+  it("Milestone 6: missing_price matches a null, zero, or negative selling price", () => {
+    expect(matchesQuickFilter(completeListing({ sellingPricePence: null }), "missing_price")).toBe(true);
+    expect(matchesQuickFilter(completeListing({ sellingPricePence: 0 }), "missing_price")).toBe(true);
+    expect(matchesQuickFilter(completeListing({ sellingPricePence: -1 }), "missing_price")).toBe(true);
+    expect(matchesQuickFilter(completeListing(), "missing_price")).toBe(false);
   });
 });
 
@@ -191,6 +279,35 @@ describe("isListingEdited — differs from the frozen ai_result_json snapshot, o
   it("Follow-up correction: false when vintedAudienceSource is 'ai' and nothing else changed", () => {
     expect(isListingEdited(completeListing({ vintedAudienceSource: "ai" }))).toBe(false);
   });
+
+  it("business-rule follow-up correction (children's wording in customer-facing text): a footwear/Women's listing whose LIVE model was automatically cleaned of children's wording (but the frozen ai_result_json snapshot still has the AI's raw 'Clifton 9 Youth') is NOT reported as edited — the automatic cleanup itself is not a user edit", () => {
+    expect(isListingEdited(completeListing({
+      model: "Clifton 9",
+      aiResultJson: aiFields({ model: "Clifton 9 Youth" }),
+    }))).toBe(false);
+  });
+
+  it("same as above, for productType", () => {
+    expect(isListingEdited(completeListing({
+      productType: "Running Trainers",
+      aiResultJson: aiFields({ productType: "Youth Running Trainers" }),
+    }))).toBe(false);
+  });
+
+  it("REGRESSION: a REAL edit to model is still correctly detected on a footwear/Women's listing — the comparison normalises both sides, it doesn't just always return 'not edited'", () => {
+    expect(isListingEdited(completeListing({
+      model: "Vomero",
+      aiResultJson: aiFields({ model: "Pegasus" }),
+    }))).toBe(true);
+  });
+
+  it("REGRESSION: the same automatic-cleanup scenario on a NON-footwear listing is still correctly detected as a genuine edit — this rule never masks a real diff outside footwear/Women's", () => {
+    expect(isListingEdited(completeListing({
+      productType: "Jacket", vintedAudience: "womens",
+      model: "Puffer", // genuinely different from the AI's own value below, no children's wording involved
+      aiResultJson: aiFields({ productType: "Jacket", model: "Girls Puffer" }),
+    }))).toBe(true);
+  });
 });
 
 describe("computeListingReviewStatus — Needs Review always wins; Mark Ready only ever resolves Edited, never a genuinely incomplete listing", () => {
@@ -242,6 +359,60 @@ describe("computeListingReviewStatus — Needs Review always wins; Mark Ready on
       reviewMarkedReadyAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
     });
     expect(computeListingReviewStatus(listing)).toBe("needs_review");
+  });
+
+  it("Milestone 6: Needs Review whenever the selling price is missing/zero/negative, even with nothing else missing/edited", () => {
+    expect(computeListingReviewStatus(completeListing({ sellingPricePence: null }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ sellingPricePence: 0 }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ sellingPricePence: -50 }))).toBe("needs_review");
+  });
+
+  it("Milestone 6: the selling-price rule wins over Mark Ready too, exactly like a missing required field or category", () => {
+    const listing = completeListing({
+      sellingPricePence: null,
+      reviewMarkedReadyAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(computeListingReviewStatus(listing)).toBe("needs_review");
+  });
+
+  it("Milestone 6: saving a valid price on an otherwise-complete, unedited listing resolves straight to Ready — no separate Mark Ready click required", () => {
+    const listing = completeListing({ sellingPricePence: 4500 });
+    expect(computeListingReviewStatus(listing)).toBe("ready");
+  });
+
+  it("Milestone 6: a listing may still be Ready when its SKU has no matching purchase — the purchase-price lookup itself is never a readiness requirement (isMissingSellingPrice only ever reads sellingPricePence)", () => {
+    // sellingPricePence is set via the dedicated save route regardless of
+    // whether a matching purchase was ever found — readiness only cares
+    // that a valid price was saved, never about the purchase match status.
+    expect(computeListingReviewStatus(completeListing({ sellingPricePence: 4500 }))).toBe("ready");
+  });
+
+  it("Follow-up correction (closing the Mark Ready readiness gap): Needs Review whenever title/description/condition/audience/photo is missing, even with nothing else missing/edited", () => {
+    expect(computeListingReviewStatus(completeListing({ generatedTitle: "" }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ generatedDescription: "" }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ condition: null }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ vintedAudience: "unknown" }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ hasPhoto: false }))).toBe("needs_review");
+  });
+
+  it("Follow-up correction: each new rule wins over Mark Ready too, exactly like every pre-existing automatic rule", () => {
+    const base = { reviewMarkedReadyAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+    expect(computeListingReviewStatus(completeListing({ ...base, hasPhoto: false }))).toBe("needs_review");
+    expect(computeListingReviewStatus(completeListing({ ...base, vintedAudience: "unknown" }))).toBe("needs_review");
+  });
+
+  it("REGRESSION (the anti-drift guarantee): computeListingReviewStatus's 'is anything missing' answer is ALWAYS identical to buildListingWarnings(listing).length > 0 — the UI and the server literally cannot disagree, because there is only one function deciding this", () => {
+    const scenarios: Partial<ReviewableListing>[] = [
+      {}, { sku: null }, { productType: null }, { hasPhoto: false }, { generatedTitle: "" },
+      { condition: null }, { vintedAudience: "unknown" }, { sellingPricePence: null },
+      { vintedCategoryId: null, vintedCategoryValid: false },
+    ];
+    for (const overrides of scenarios) {
+      const listing = completeListing(overrides);
+      const hasWarnings = buildListingWarnings(listing).length > 0;
+      const isNeedsReview = computeListingReviewStatus(listing) === "needs_review";
+      expect(isNeedsReview).toBe(hasWarnings);
+    }
   });
 });
 

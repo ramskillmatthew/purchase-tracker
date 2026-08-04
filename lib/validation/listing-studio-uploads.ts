@@ -153,3 +153,14 @@ export const updateListingFieldsRequestSchema = z.object({
   vintedAudience: vintedAudienceFieldSchema,
   vintedCategoryId: vintedCategoryIdFieldSchema,
 }).strict();
+
+// Milestone 6 (purchase-price lookup and manual Vinted selling price) — the
+// details panel's dedicated selling-price save. Deliberately just the raw
+// pounds string exactly as typed (never a client-computed pence value) —
+// lib/listing-studio/selling-price.ts's parseSellingPricePounds is the
+// SOLE authoritative parser/validator, called server-side by the route
+// itself; this schema only guards the shape/length of what's allowed to
+// reach that function at all.
+export const updateSellingPriceRequestSchema = z.object({
+  sellingPrice: z.string().trim().min(1).max(20),
+}).strict();

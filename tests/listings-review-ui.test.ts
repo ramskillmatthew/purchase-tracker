@@ -88,10 +88,20 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
 
     it("bulk mark-ready and bulk delete both run with a concurrency limit, one request per selected listing, continuing past individual failures", () => {
       expect(source).toContain("await runWithConcurrencyLimit(ids, 5, async id => {");
-      const bulkMarkReadyBlock = source.slice(source.indexOf("async function handleBulkMarkReady"), source.indexOf("async function commitDelete"));
-      expect(bulkMarkReadyBlock).toContain("failureCount += 1");
       const deleteBlock = source.slice(source.indexOf("async function commitDelete"), source.indexOf("function handleBulkDelete"));
       expect(deleteBlock).toContain("failureCount += 1");
+    });
+
+    it("Milestone 6: bulk mark-ready groups skip reasons (the route's own per-listing error message) into a useful summary, never just a blind failure count", () => {
+      const bulkMarkReadyBlock = source.slice(source.indexOf("async function handleBulkMarkReady"), source.indexOf("async function commitDelete"));
+      expect(bulkMarkReadyBlock).toContain("skipReasonCounts.set(reason, (skipReasonCounts.get(reason) ?? 0) + 1);");
+      expect(bulkMarkReadyBlock).toContain("succeededCount += 1;");
+    });
+
+    it("Follow-up correction (closing the Mark Ready readiness gap): the bulk summary tallies each individual missing-field reason from the route's `warnings` array, not just the whole joined error string — so 'Missing SKU (3), No uploaded photos (2)' is possible instead of one bucket per unique combination", () => {
+      const bulkMarkReadyBlock = source.slice(source.indexOf("async function handleBulkMarkReady"), source.indexOf("async function commitDelete"));
+      expect(bulkMarkReadyBlock).toContain("Array.isArray(body.warnings)");
+      expect(bulkMarkReadyBlock).toContain("for (const reason of reasons)");
     });
 
     it("bulk delete reuses the EXISTING single-group DELETE route with mode 'delete_photos' — never a new bulk-delete endpoint", () => {
@@ -317,10 +327,14 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 5: ex
     expect(source).toContain("condition = null, coverImageUrl = null,");
   });
 
-  it("shows condition, size, and an explicit price placeholder — never a real computed price", () => {
+  it("shows condition and size directly from props", () => {
     expect(source).toContain("<dt>Condition</dt><dd>{condition || \"Not set\"}</dd>");
     expect(source).toContain("<dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : \"Not set\"}</dd>");
-    expect(source).toContain('<dt>Price</dt><dd className="preview-listing-vinted-price-placeholder">Price not set</dd>');
+  });
+
+  it("Milestone 6: shows the real saved selling price when set, the explicit placeholder only when it isn't — sellingPricePence defaults to null so Listing Studio's own call site (which has none) still shows the placeholder unchanged", () => {
+    expect(source).toContain("sellingPricePence = null,");
+    expect(source).toContain('<dd className={sellingPricePence ? undefined : "preview-listing-vinted-price-placeholder"}>{sellingPricePence ? formatPenceAsGBP(sellingPricePence) : "Price not set"}</dd>');
   });
 
   it("shows a large cover image when provided, and a distinct empty state when not", () => {
@@ -350,5 +364,93 @@ describe("app/globals.css — Milestone 5: Listings Review styling exists for ev
     expect(css).toMatch(/\.listings-review-status-ready\s*\{[^}]*color:\s*#16845d/);
     expect(css).toMatch(/\.listings-review-status-needs_review\s*\{[^}]*color:\s*var\(--danger\)/);
     expect(css).toMatch(/\.listings-review-status-edited\s*\{[^}]*color:\s*#b4740e/);
+  });
+
+  it("Milestone 6: styles the purchase-price section and the selling-price control", () => {
+    for (const selector of [".listings-review-panel-purchase-section", ".listings-review-panel-purchase-line", ".listings-review-selling-price-row", ".listings-review-selling-price-status"]) {
+      expect(css).toContain(selector);
+    }
+  });
+});
+
+describe("Milestone 6 (purchase-price lookup and manual Vinted selling price) — UI wiring", () => {
+  const filterBarSource = read("components/listings-review/ListingsFilterBar.tsx");
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const fieldSource = read("components/listings-review/SellingPriceField.tsx");
+
+  it("adds a 'Missing price' quick filter alongside the existing ones", () => {
+    expect(filterBarSource).toContain('{ value: "missing_price", label: "Missing price" }');
+  });
+
+  it("the details panel renders the purchase-match line and the selling-price field close to SKU, never inside the Edit Fields dialog", () => {
+    expect(panelSource).toContain("describePurchaseMatch(listing.purchaseMatch)");
+    expect(panelSource).toContain("<SellingPriceField");
+    expect(panelSource).toContain("key={listing.id}");
+  });
+
+  it("REGRESSION: the purchase price is never copied into the selling-price field — SellingPriceField only ever receives sellingPricePence (confirmed_price_pence), never purchaseMatch's price", () => {
+    const sellingFieldUsageIndex = panelSource.indexOf("<SellingPriceField");
+    const sellingFieldUsageBlock = panelSource.slice(sellingFieldUsageIndex, panelSource.indexOf("/>", sellingFieldUsageIndex));
+    expect(sellingFieldUsageBlock).toContain("sellingPricePence={listing.sellingPricePence}");
+    expect(sellingFieldUsageBlock).not.toContain("purchaseMatch");
+  });
+
+  it("duplicate purchase matches render safe identifying info (order date, description, price) — never silently picking one", () => {
+    expect(panelSource).toContain('listing.purchaseMatch.status === "duplicate"');
+    expect(panelSource).toContain("match.orderDate");
+    expect(panelSource).toContain("match.itemDescription");
+  });
+
+  it("the workspace fetches confirmed_price_pence/purchase_match from the SAME existing listings-review feed — no separate purchases fetch on the client", () => {
+    expect(workspaceSource).toContain("confirmed_price_pence: number | null;");
+    expect(workspaceSource).toContain("purchase_match: SkuPurchaseMatch;");
+    expect(workspaceSource).not.toContain('fetch("/api/purchases');
+  });
+
+  it("saving a price updates local state via handleSellingPriceSaved with no extra network round-trip", () => {
+    expect(workspaceSource).toContain("const handleSellingPriceSaved = useCallback((listingId: string, pence: number) => {");
+    expect(workspaceSource).toContain("onSellingPriceSaved={handleSellingPriceSaved}");
+  });
+
+  it("SellingPriceField: prevents duplicate submissions, keeps the entered value on a failed save, and shows Saving/Saved/Save failed states", () => {
+    expect(fieldSource).toContain('if (status === "saving") return; // prevent duplicate submissions');
+    expect(fieldSource).toMatch(/status === "saving" \? "Saving…" : "Save"/);
+    expect(fieldSource).toContain('status === "saved"');
+    expect(fieldSource).toContain('status === "error"');
+    // On a failed save, inputValue is never reset — only status/errorMessage change.
+    const catchBlockIndex = fieldSource.indexOf("if (!response.ok) {");
+    const catchBlock = fieldSource.slice(catchBlockIndex, fieldSource.indexOf("}", fieldSource.indexOf("return;", catchBlockIndex)));
+    expect(catchBlock).not.toContain("setInputValue");
+  });
+
+  it("SellingPriceField: uses the same parseSellingPricePounds the server authoritatively validates with, for instant client-side feedback", () => {
+    expect(fieldSource).toContain('import { parseSellingPricePounds } from "@/lib/listing-studio/selling-price";');
+    expect(fieldSource).toContain("const parsed = parseSellingPricePounds(inputValue);");
+  });
+
+  it("SellingPriceField: saves to the dedicated selling-price route, never the big Edit Fields PATCH route — no duplicated business logic", () => {
+    expect(fieldSource).toContain("/selling-price`, {");
+    expect(fieldSource).not.toContain("/fields`");
+  });
+
+  it("SellingPriceField: the initial input value is derived directly from the sellingPricePence prop — an existing saved price loads pre-filled, and survives a page refresh since it's re-fetched fresh from the server on every load", () => {
+    expect(fieldSource).toContain('useState(sellingPricePence !== null ? (sellingPricePence / 100).toFixed(2) : "")');
+  });
+
+  it("SellingPriceField: the input is never disabled except while actively saving — a previously-saved price can always be edited again", () => {
+    expect(fieldSource).toContain('disabled={status === "saving"}');
+    expect(fieldSource).not.toMatch(/disabled\s*(?:=\s*\{)?(?:true|readOnly)/);
+  });
+
+  it("REGRESSION: no AI involvement anywhere in this feature — no Anthropic import, no analysis-run write, no AI cost-log write, in the selling-price route, the purchase-match lib, or the listings-review feed route", () => {
+    const sellingPriceRouteSource = read("app/api/listing-studio/groups/[draftId]/selling-price/route.ts");
+    const purchaseMatchLibSource = read("lib/listing-studio/purchase-match.ts");
+    const listingsReviewRouteSource = read("app/api/listing-studio/listings-review/route.ts");
+    for (const source of [sellingPriceRouteSource, purchaseMatchLibSource, listingsReviewRouteSource, fieldSource]) {
+      expect(source).not.toContain("@anthropic-ai/sdk");
+      expect(source).not.toContain("listing_analysis_runs");
+      expect(source).not.toContain("vinted_category_selection_ai_calls");
+    }
   });
 });

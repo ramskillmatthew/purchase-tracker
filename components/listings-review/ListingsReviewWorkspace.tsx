@@ -13,6 +13,7 @@ import {
   type ListingQuickFilter, type ListingReviewStatusFilter, type ReviewableListing,
 } from "@/lib/listing-studio/listing-review";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
+import type { SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
 
 type ReviewDraftRow = {
   id: string; created_at: string; updated_at: string;
@@ -33,6 +34,11 @@ type ReviewDraftRow = {
   vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
   vinted_audience_source: "ai" | "manual" | null;
   vinted_audience_evidence: string[] | null;
+  // Milestone 6 (purchase-price lookup and manual Vinted selling price).
+  // purchase_match is computed server-side from a batched lookup (never
+  // one request per listing) — see app/api/listing-studio/listings-review/route.ts.
+  confirmed_price_pence: number | null;
+  purchase_match: SkuPurchaseMatch;
 };
 type ReviewImageRow = { id: string; draft_id: string; sort_order: number };
 type ReviewData = { drafts: ReviewDraftRow[]; images: ReviewImageRow[] };
@@ -125,23 +131,27 @@ export default function ListingsReviewWorkspace() {
   // Status/warnings/edited-ness computed exactly once per listing here —
   // never recomputed by ListingsTable or ListingDetailsPanel themselves.
   const listingRows: ListingRow[] = useMemo(() => drafts.map(draft => {
+    const photoIds = photoIdsByDraftId.get(draft.id) ?? [];
     const reviewable: ReviewableListing = {
       brand: draft.brand, model: draft.model, productType: draft.product_type, colours: draft.colours ?? [], material: draft.material,
       ukSize: draft.uk_size, sku: draft.sku, ukSizeSource: draft.uk_size_source,
       aiResultJson: draft.ai_result_json, reviewMarkedReadyAt: draft.review_marked_ready_at, updatedAt: draft.updated_at,
       vintedCategoryId: draft.vinted_category_id, vintedCategoryValid: draft.vinted_category_valid, vintedCategorySource: draft.vinted_category_source,
       vintedCategoryStatus: draft.vinted_category_status, vintedAudienceSource: draft.vinted_audience_source,
+      sellingPricePence: draft.confirmed_price_pence,
+      // Follow-up correction (closing the Mark Ready readiness gap) — the
+      // remaining ReadinessCheckFields buildListingWarnings/
+      // computeListingReviewStatus now also require.
+      vintedAudience: draft.vinted_audience,
+      generatedTitle: draft.generated_title ?? "", generatedDescription: draft.generated_description ?? "",
+      condition: draft.condition, hasPhoto: photoIds.length > 0,
     };
-    const photoIds = photoIdsByDraftId.get(draft.id) ?? [];
     return {
       ...reviewable,
       id: draft.id,
-      generatedTitle: draft.generated_title ?? "",
-      generatedDescription: draft.generated_description ?? "",
-      condition: draft.condition,
       vintedCategoryPath: draft.vinted_category_path,
-      vintedAudience: draft.vinted_audience,
       vintedAudienceEvidence: draft.vinted_audience_evidence,
+      purchaseMatch: draft.purchase_match,
       status: computeListingReviewStatus(reviewable),
       warnings: buildListingWarnings(reviewable),
       coverPhotoId: photoIds[0] ?? null,
@@ -195,6 +205,16 @@ export default function ListingsReviewWorkspace() {
   const openCarousel = useCallback((listingId: string, initialPhotoId?: string) => {
     setCarouselListingId(listingId);
     setCarouselInitialPhotoId(initialPhotoId ?? null);
+  }, []);
+
+  // Milestone 6 (purchase-price lookup and manual Vinted selling price) —
+  // SellingPriceField itself already did the network round-trip and
+  // parsed the authoritative server response; this just reflects the
+  // already-saved pence value into local state so the "Missing selling
+  // price" warning/status/quick-filter recompute immediately, with no
+  // extra fetch.
+  const handleSellingPriceSaved = useCallback((listingId: string, pence: number) => {
+    setDrafts(current => current.map(draft => draft.id === listingId ? { ...draft, confirmed_price_pence: pence, updated_at: new Date().toISOString() } : draft));
   }, []);
 
   async function handleMarkReady(listingId: string) {
@@ -303,21 +323,51 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
+  // Milestone 6 (purchase-price lookup and manual Vinted selling price)
+  // follow-up: still one independent POST per selected listing (each call
+  // re-validates that ONE listing's price/category fresh from the
+  // database — see mark-ready/route.ts's own comment, "never trust the
+  // browser's warning state" applies per-listing here too), but now
+  // collects and groups every skip REASON (the route's own error message)
+  // instead of only a blind count, so the summary says what actually
+  // blocked each listing.
   async function handleBulkMarkReady() {
     const ids = [...bulkSelectedIds];
     if (!ids.length) return;
     setBulkActionRunning(true);
     setBulkActionError("");
-    let failureCount = 0;
+    setBulkActionMessage("");
+    let succeededCount = 0;
+    const skipReasonCounts = new Map<string, number>();
     await runWithConcurrencyLimit(ids, 5, async id => {
       try {
         const response = await fetch(`/api/listing-studio/groups/${id}/mark-ready`, { method: "POST" });
         const body = await response.json().catch(() => ({}));
-        if (!response.ok) { failureCount += 1; return; }
+        if (!response.ok) {
+          // Follow-up correction (closing the Mark Ready readiness gap):
+          // the route now returns a real `warnings` array (one entry per
+          // genuinely missing/invalid thing — Missing SKU, No uploaded
+          // photos, etc.) — tallying each one individually across the
+          // whole batch is far more useful than grouping by the full
+          // joined error string, which would fragment into a separate
+          // bucket for every distinct COMBINATION of missing fields.
+          const reasons: string[] = Array.isArray(body.warnings) && body.warnings.length ? body.warnings : [body.error || "Could not be marked ready"];
+          for (const reason of reasons) skipReasonCounts.set(reason, (skipReasonCounts.get(reason) ?? 0) + 1);
+          return;
+        }
+        succeededCount += 1;
         setDrafts(current => current.map(draft => draft.id === id ? { ...draft, review_marked_ready_at: body.reviewMarkedReadyAt } : draft));
-      } catch { failureCount += 1; }
+      } catch {
+        skipReasonCounts.set("Network error", (skipReasonCounts.get("Network error") ?? 0) + 1);
+      }
     });
-    if (failureCount > 0) setBulkActionError(`${failureCount} of ${ids.length} listing${ids.length === 1 ? "" : "s"} could not be marked ready.`);
+    const skippedCount = ids.length - succeededCount;
+    if (skippedCount > 0) {
+      const reasonParts = [...skipReasonCounts.entries()].map(([reason, count]) => `${reason} (${count})`);
+      setBulkActionError(`${succeededCount} marked ready, ${skippedCount} skipped: ${reasonParts.join(", ")}.`);
+    } else {
+      setBulkActionMessage(`${succeededCount} listing${succeededCount === 1 ? "" : "s"} marked ready.`);
+    }
     setBulkSelectedIds(new Set());
     setBulkActionRunning(false);
   }
@@ -437,6 +487,7 @@ export default function ListingsReviewWorkspace() {
         onAssignCategory={handleAssignCategory}
         onReassessAudience={handleReassessAudience}
         onMarkReady={handleMarkReady}
+        onSellingPriceSaved={handleSellingPriceSaved}
       />
     </div>}
 
@@ -455,6 +506,7 @@ export default function ListingsReviewWorkspace() {
       sku={previewListing.sku}
       condition={previewListing.condition}
       coverImageUrl={previewListing.coverPhotoId ? `/api/listing-studio/images/${previewListing.coverPhotoId}/view` : null}
+      sellingPricePence={previewListing.sellingPricePence}
       onClose={() => setPreviewListingId(null)}
     />}
 

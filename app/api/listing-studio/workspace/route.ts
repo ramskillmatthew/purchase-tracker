@@ -4,6 +4,7 @@ import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { LISTING_STUDIO_BUCKET, parseDraftImageStoragePath } from "@/lib/listing-studio/storage-paths";
 import { deleteStorageObjects } from "@/lib/listing-studio/storage-rest";
+import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -50,7 +51,25 @@ export async function GET() {
         `listing_draft_images?owner_id=eq.${user.id}&select=id,draft_id,original_filename,mime_type,file_size,width,height,sort_order,detected_role,confirmed_role,upload_state,preview_available&order=sort_order.asc`,
       ),
     ]);
-    return NextResponse.json({ drafts, images });
+    // Business-rule follow-up corrections (footwear must never show a
+    // children's Vinted audience, and Women's footwear text must never
+    // carry children's wording) — same read-time-only pattern as
+    // listings-review/route.ts's own GET: a legacy draft shows corrected
+    // immediately, without waiting for Assign Category / a save / the
+    // "Refresh listing text" repair action to actually persist it.
+    const normalisedDrafts = drafts.map(draft => {
+      const itemFamily = deriveDraftItemFamily(draft.product_type);
+      const normalisedAudience = normaliseFootwearVintedAudience(draft.vinted_audience, itemFamily);
+      return {
+        ...draft,
+        vinted_audience: normalisedAudience,
+        model: normaliseFootwearListingText(draft.model, itemFamily, normalisedAudience),
+        product_type: normaliseFootwearListingText(draft.product_type, itemFamily, normalisedAudience),
+        generated_title: normaliseFootwearListingText(draft.generated_title, itemFamily, normalisedAudience),
+        generated_description: normaliseFootwearListingText(draft.generated_description, itemFamily, normalisedAudience),
+      };
+    });
+    return NextResponse.json({ drafts: normalisedDrafts, images });
   } catch (error) { return safeApiError(error); }
 }
 
