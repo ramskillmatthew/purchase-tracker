@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isAcceptedImageMimeType, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE, MAX_FILES_PER_SELECTION } from "@/lib/listing-studio/upload-limits";
 import { autoGroupToolInputSchema } from "@/lib/listing-studio/auto-group-schemas";
+import { VINTED_COLOURS, VINTED_MATERIALS, VINTED_AUDIENCE_VALUES } from "@/lib/listing-studio/listing-generation-schemas";
 
 // Milestone 2 request-body schemas: photo upload, confirmation, and manual
 // grouping (create/rename/move/reorder/split/merge). Every field is
@@ -117,16 +118,38 @@ export const applyAutoGroupSessionRequestSchema = z.object({
 // Milestone 4 (AI listing generation) — the "Edit fields" modal's own save
 // request (see app/api/listing-studio/groups/[draftId]/fields/route.ts).
 // Every field is optional/nullable: a blank field is a legitimate value
-// (the AI leaves brand/model/colour/ukSize/sku null rather than guess, and
-// the user can leave it blank too) — this is never itself a validation
+// (the AI leaves brand/model/ukSize/sku null rather than guess, and the
+// user can leave it blank too) — this is never itself a validation
 // failure, only a missing-data state the UI already expects. An empty
 // string is normalized to null by the route, not this schema.
 const listingFieldTextSchema = z.string().trim().max(150).nullable();
+// Milestone 6 (Vinted-aware colours/materials): colours/material are no
+// longer free text — a manual Edit Fields save is validated against the
+// exact same Vinted enum lists the AI is constrained to (VINTED_COLOURS/
+// VINTED_MATERIALS), so a value outside either list is rejected here
+// exactly like an out-of-enum AI tool call would be. Vinted allows at
+// most two colours per listing.
+const vintedColoursFieldSchema = z.array(z.enum(VINTED_COLOURS)).max(2);
+const vintedMaterialFieldSchema = z.enum(VINTED_MATERIALS).nullable();
+// Milestone 7 (Vinted category catalogue sync): the manual category picker
+// only ever sends back a real Vinted numeric id (or null to clear it) —
+// never free text. The route itself re-validates this id against the live
+// vinted_categories table (active/selectable/leaf) before it's ever
+// persisted; this schema only guards the shape.
+const vintedCategoryIdFieldSchema = z.number().int().positive().nullable();
+// Follow-up correction (2026-08-04): a real, dedicated audience field —
+// see listing-generation-schemas.ts's own comment for why this is now
+// independent of sourceSize.gender. Always required (never omitted) so
+// the fields route can reliably detect "did the user just change this".
+const vintedAudienceFieldSchema = z.enum(VINTED_AUDIENCE_VALUES);
 export const updateListingFieldsRequestSchema = z.object({
   brand: listingFieldTextSchema,
   model: listingFieldTextSchema,
   productType: listingFieldTextSchema,
-  colour: listingFieldTextSchema,
+  colours: vintedColoursFieldSchema,
+  material: vintedMaterialFieldSchema,
   ukSize: z.string().trim().max(20).nullable(),
   sku: z.string().trim().max(50).nullable(),
+  vintedAudience: vintedAudienceFieldSchema,
+  vintedCategoryId: vintedCategoryIdFieldSchema,
 }).strict();

@@ -28,7 +28,34 @@ export const LISTING_PROMPT_VERSIONS: Record<ListingAnalysisStage, string> = {
   // a 4th sourceSize.gender value, "childrens" — reported only when the
   // label itself states it (e.g. "Kids"/"Youth"/"Toddler" wording), never
   // inferred from the shoe's general style.
-  generation: "listing-generation-v4",
+  // v5 (Milestone 6, Vinted-aware colours/materials): COLOUR was rewritten
+  // to COLOURS (up to 2, exact Vinted enum values only, empty array if
+  // unclear) and a new MATERIAL instruction was added (single exact Vinted
+  // enum value or null) — free-text colour/invented material can no
+  // longer be published to Vinted, which only accepts its own fixed lists.
+  // v6 (2026-08-04 follow-up correction): added a new, independent
+  // VINTED AUDIENCE instruction (mens/womens/boys/girls/unisex/unknown),
+  // determined from ALL evidence together, never from sourceSize.gender
+  // alone — a real bug traced sourceSize.gender being null/unisex (very
+  // common for footwear, whose size tags rarely print a gender marker) to
+  // silently skipping Vinted category assignment entirely, with no
+  // failure record. The SIZE instruction was also reworded to make clear
+  // sourceSize.gender describes the size SCALE only and must never be
+  // read as an audience signal.
+  // v7 (2026-08-05 follow-up correction): real testing showed "unknown"
+  // returned for clearly-gendered products, AND the one real generation
+  // run in the live database showed the opposite failure — deciding
+  // audience from shoe size alone ("at UK 5 / EU 37.5 this sits in the
+  // womens size range"). VINTED AUDIENCE was rewritten with an explicit
+  // 5-tier evidence priority order (label/department text > model-specific
+  // knowledge > brand knowledge > design > size-as-support-only), an
+  // explicit instruction that "unknown" must follow genuinely weighing
+  // evidence rather than being a default, and a new required
+  // vintedAudienceEvidence field forcing the model to name the actual
+  // signal(s) used — which structurally discourages both a lazy "unknown"
+  // (nothing to cite) and a size-only guess (size alone is explicitly
+  // disqualified in the prompt).
+  generation: "listing-generation-v7",
   // v3: replaces free-clustering with ordered boundary detection — a real
   // 24-photo/3-pair test still over-split two of three products under v2
   // (the model's own reasoning admitted a fragment might be the same item
@@ -36,4 +63,19 @@ export const LISTING_PROMPT_VERSIONS: Record<ListingAnalysisStage, string> = {
   // primary task for a workflow where photos are uploaded in photography
   // order. See AUTO_GROUP_SYSTEM_PROMPT's own comment.
   product_grouping: "listing-product-grouping-v3",
+  // v1 (Milestone 7, Vinted category catalogue sync): a new, separate,
+  // text-only step — given only the structured fields already extracted
+  // by "generation" plus a compact candidate list (id + full path) looked
+  // up from the synced catalogue, picks one candidate id or null. Never
+  // shown photos, never given the full catalogue, never allowed to invent
+  // an id or free-text category — see
+  // lib/listing-studio/vinted-category-selection-ai.ts.
+  category_selection: "listing-category-selection-v1",
+  // v1 (2026-08-05 follow-up correction) — a separate, bounded step that
+  // re-determines JUST vintedAudience (+ evidence) for an already-generated
+  // draft, either from stored text fields alone (cheap, no photos — the
+  // default) or by re-examining the draft's stored photos with a narrow
+  // audience-only tool (more expensive, only via the explicit "Reassess
+  // audience" action) — see lib/listing-studio/vinted-audience-reassessment-ai.ts.
+  audience_reassessment: "listing-audience-reassessment-v1",
 };

@@ -1023,10 +1023,29 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
 describe("components/listing-studio/EditListingFieldsDialog.tsx — Milestone 4: the only place structured listing fields are edited", () => {
   const source = read("components/listing-studio/EditListingFieldsDialog.tsx");
 
-  it("has exactly the six required fields — Brand, Model, Product type, Colour, UK size, SKU — and nothing else editable", () => {
-    for (const label of ["Brand", "Model", "Product type", "Colour", "UK size", "SKU"]) {
+  it("has exactly the required fields — Brand, Model, Product type, Colour 1, Colour 2 (optional), Material, UK size, SKU, Vinted audience, Vinted category — and nothing else editable", () => {
+    for (const label of ["Brand", "Model", "Product type", "Colour 1", "Colour 2 (optional)", "Material", "UK size", "SKU", "Vinted audience", "Vinted category"]) {
       expect(source).toContain(`<span className="label">${label}</span>`);
     }
+  });
+
+  it("Milestone 6 (Vinted-aware colours/materials): Colour 1/Colour 2/Material are enum <select>s populated from VINTED_COLOURS/VINTED_MATERIALS, never free-text <input>s", () => {
+    expect(source).toContain("VINTED_COLOURS, VINTED_MATERIALS");
+    expect(source).toContain('from "@/lib/listing-studio/listing-generation-schemas";');
+    expect(source).toContain("{VINTED_COLOURS.map(colour => <option key={colour} value={colour}>{colour}</option>)}");
+    expect(source).toContain("{VINTED_MATERIALS.map(material => <option key={material} value={material}>{material}</option>)}");
+    // Colour 1, Colour 2, Material, Vinted audience (follow-up correction, 2026-08-04).
+    expect(source.match(/<select className="input"/g)?.length).toBe(4);
+  });
+
+  it("Follow-up correction (2026-08-04): Vinted audience is an enum <select> populated from VINTED_AUDIENCE_VALUES, never free text", () => {
+    expect(source).toContain("VINTED_AUDIENCE_VALUES");
+    expect(source).toContain("VINTED_AUDIENCE_LABELS");
+    expect(source).toContain("{VINTED_AUDIENCE_VALUES.map(value => <option key={value} value={value}>{VINTED_AUDIENCE_LABELS[value]}</option>)}");
+  });
+
+  it("REGRESSION: a colour picked in both dropdowns collapses to one entry, and clearing/reordering never exceeds 2 colours (structurally impossible — only 2 selects exist)", () => {
+    expect(source).toContain("return { ...current, colours: [...new Set(slots.filter(Boolean))] };");
   });
 
   it("REGRESSION: has no title or description field anywhere — those are never directly editable", () => {
@@ -1037,7 +1056,7 @@ describe("components/listing-studio/EditListingFieldsDialog.tsx — Milestone 4:
 
   it("while saving, disables every input and both buttons, and the save button reads 'Saving…'", () => {
     expect(source).toContain('disabled={loading}');
-    expect(source.match(/disabled=\{loading\}/g)?.length).toBeGreaterThanOrEqual(8); // 6 inputs + cancel + save
+    expect(source.match(/disabled=\{loading\}/g)?.length).toBeGreaterThanOrEqual(10); // 5 inputs + 3 selects + cancel + save
     expect(source).toContain('{loading ? "Saving…" : "Save"}');
   });
 
@@ -1130,7 +1149,7 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Edit
 
   it("REGRESSION: on success, updates local state with the server's own returned structured + generated fields — never assumes the client-typed values are what got saved", () => {
     const fn = handlerFn();
-    expect(fn).toContain("brand: body.brand, model: body.model, product_type: body.productType, colour: body.colour,");
+    expect(fn).toContain("brand: body.brand, model: body.model, product_type: body.productType, colours: body.colours, material: body.material,");
     expect(fn).toContain("uk_size: body.ukSize, sku: body.sku, generated_title: body.generatedTitle, generated_description: body.generatedDescription,");
   });
 

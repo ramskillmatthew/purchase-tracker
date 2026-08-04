@@ -16,7 +16,16 @@ export type GeneratedListingFields = {
   brand: string | null;
   model: string | null;
   productType: string | null;
-  colour: string | null;
+  // Milestone 6 (Vinted-aware colours/materials): up to 2 exact Vinted
+  // colour-list values (see lib/listing-studio/listing-generation-schemas.ts's
+  // VINTED_COLOURS) — never free text. Empty array, never null, when none
+  // is set.
+  colours: string[];
+  // Milestone 6: a single exact Vinted material-list value, or null.
+  // Not part of the title/description below (neither ever referenced a
+  // material field before this milestone, and neither does now) — it's
+  // stored/edited/displayed alongside the other structured fields only.
+  material: string | null;
   ukSize: string | null;
   sku: string | null;
 };
@@ -33,18 +42,24 @@ function normalizePart(value: string | null): string | null {
 
 /**
  * Exact format: `Brand Model Product Type - "Colour" - Very Good Condition - Size UK X`.
- * Any missing structured field (brand/model/productType/colour/ukSize can
+ * Any missing structured field (brand/model/productType/colours/ukSize can
  * all legitimately be blank — see the AI schema's own "never guess, leave
  * blank" rules) is simply omitted from its segment rather than producing
  * malformed text like a double space or a bare "Size UK " — this is a
  * graceful-degradation choice, not part of the literal spec (every given
  * example has every field populated).
+ *
+ * Milestone 6: `fields.colours` is now an array of up to 2 exact Vinted
+ * colour-list values rather than one free-text string — joined with the
+ * exact same " & " this title already used for a multi-colour free-text
+ * value (e.g. "White & Blue"), so a two-colour Vinted-enum result and the
+ * old free-text convention it replaced read identically in the title.
  */
 export function generateListingTitle(fields: GeneratedListingFields): string {
   const namePart = [normalizePart(fields.brand), normalizePart(fields.model), normalizePart(fields.productType)]
     .filter((part): part is string => part !== null)
     .join(" ");
-  const colour = normalizePart(fields.colour);
+  const colour = fields.colours.length ? fields.colours.join(" & ") : null;
   const ukSize = normalizePart(fields.ukSize);
 
   const segments = [

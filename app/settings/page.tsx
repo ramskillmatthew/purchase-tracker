@@ -9,13 +9,104 @@ type IndexStatus = {
   inProgress: { rangeStart: string; rangeEnd: string; indexedSoFar: number; lastPassAt: string } | null;
   lastFailure: { rangeStart: string; rangeEnd: string; occurredAt: string; reason: string | null } | null;
 };
+// Milestone 7 (Vinted category catalogue sync) — backs the admin refresh
+// control below. Mirrors app/api/listing-studio/vinted-categories/status/route.ts's
+// response shape exactly.
+type VintedCategoryStatus = {
+  sourceMarket: string; sourceEndpoint: string;
+  lastAttemptedAt: string | null; lastSucceededAt: string | null;
+  lastStatus: "success" | "failed" | "rejected_shrinkage" | "rejected_invalid_response" | null;
+  lastError: string | null; fetchedCount: number | null; activeCount: number | null;
+  // Milestone 7 follow-up (2026-08-03, verified browser snapshot import) —
+  // which path produced the last successful import.
+  lastSourceType: "live_endpoint" | "verified_browser_snapshot" | null;
+  lastCapturedAt: string | null;
+};
+// A verified snapshot's own validated preview, held in state between
+// "choose file" and "confirm import" — `snapshot` is the exact parsed
+// JSON re-sent unchanged on confirm, so the server validates the SAME
+// data twice rather than trusting the first validation's result.
+type VintedSnapshotPreview = {
+  fileName: string; snapshot: unknown;
+  pageUrl: string; capturedAt: string; categoryCount: number; leafCount: number;
+  selectableCount: number; maxDepth: number; rootIds: number[]; fingerprint: string;
+};
 
 export default function SettingsPage() {
   const today = new Date().toISOString().slice(0, 10); const ago = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const [theme, setTheme] = useState<"light" | "dark">("light"); const [yahoo, setYahoo] = useState<YahooStatus | null>(null); const [gmail,setGmail]=useState<GmailStatus|null>(null); const [testing, setTesting] = useState(false); const [connectionError, setConnectionError] = useState("");
   const [index, setIndex] = useState<IndexStatus | null>(null); const [startDate, setStartDate] = useState(ago); const [endDate, setEndDate] = useState(today); const [syncing, setSyncing] = useState(false); const [indexMessage, setIndexMessage] = useState("");
+  const [vintedStatus, setVintedStatus] = useState<VintedCategoryStatus | null>(null); const [vintedRefreshing, setVintedRefreshing] = useState(false); const [vintedResult, setVintedResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [vintedImportPreview, setVintedImportPreview] = useState<VintedSnapshotPreview | null>(null);
+  const [vintedImportBusy, setVintedImportBusy] = useState(false);
+  const [vintedImportError, setVintedImportError] = useState("");
+  const [vintedImportResult, setVintedImportResult] = useState<{ ok: boolean; message: string } | null>(null);
   async function loadIndex() { const response = await fetch("/api/yahoo/index"); if (response.ok) setIndex(await response.json()); }
-  useEffect(() => { setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light"); fetch("/api/yahoo/connection").then(async response => response.ok && setYahoo(await response.json())); fetch("/api/gmail/accounts").then(async response=>response.ok&&setGmail(await response.json())); loadIndex(); }, []);
+  async function loadVintedStatus() { const response = await fetch("/api/listing-studio/vinted-categories/status"); if (response.ok) setVintedStatus(await response.json()); }
+  useEffect(() => { setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light"); fetch("/api/yahoo/connection").then(async response => response.ok && setYahoo(await response.json())); fetch("/api/gmail/accounts").then(async response=>response.ok&&setGmail(await response.json())); loadIndex(); loadVintedStatus(); }, []);
+  async function refreshVintedCategories() {
+    if (vintedRefreshing) return;
+    setVintedRefreshing(true); setVintedResult(null);
+    const response = await fetch("/api/listing-studio/vinted-categories/refresh", { method: "POST" });
+    const body = await response.json();
+    setVintedResult(response.ok
+      ? { ok: true, message: `Refreshed: ${body.activeCount} active categories (${body.createdCount} new, ${body.updatedCount} updated, ${body.deactivatedCount} deactivated).` }
+      : { ok: false, message: body.error || "Refresh failed." });
+    await loadVintedStatus();
+    setVintedRefreshing(false);
+  }
+  // Milestone 7 follow-up (2026-08-03) — the "Import verified browser
+  // snapshot" workflow. Choosing a file only ever previews it (a
+  // server-side validate-only call, confirm:false — no database write);
+  // the exact same parsed JSON is re-sent unchanged on explicit confirm,
+  // so the import is validated twice, never trusted from the preview
+  // alone. Deliberately distinct from "Refresh from Vinted" above, which
+  // never touches a locally chosen file at all.
+  async function handleVintedSnapshotSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // lets the same file be re-selected later (e.g. after fixing it)
+    if (!file) return;
+    setVintedImportError(""); setVintedImportResult(null); setVintedImportPreview(null); setVintedImportBusy(true);
+    try {
+      const text = await file.text();
+      let snapshot: unknown;
+      try { snapshot = JSON.parse(text); } catch { setVintedImportError("That file is not valid JSON."); return; }
+      const response = await fetch("/api/listing-studio/vinted-categories/import", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ snapshot, confirm: false }),
+      });
+      const body = await response.json();
+      if (!response.ok) { setVintedImportError(body.error || "This snapshot could not be validated."); return; }
+      setVintedImportPreview({
+        fileName: file.name, snapshot,
+        pageUrl: body.pageUrl, capturedAt: body.capturedAt, categoryCount: body.categoryCount,
+        leafCount: body.leafCount, selectableCount: body.selectableCount, maxDepth: body.maxDepth,
+        rootIds: body.rootIds, fingerprint: body.fingerprint,
+      });
+    } catch {
+      setVintedImportError("Network error — could not validate this snapshot.");
+    } finally {
+      setVintedImportBusy(false);
+    }
+  }
+  async function confirmVintedSnapshotImport() {
+    if (!vintedImportPreview || vintedImportBusy) return;
+    setVintedImportBusy(true); setVintedImportError("");
+    try {
+      const response = await fetch("/api/listing-studio/vinted-categories/import", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ snapshot: vintedImportPreview.snapshot, confirm: true }),
+      });
+      const body = await response.json();
+      if (!response.ok) { setVintedImportError(body.error || "This snapshot could not be imported."); return; }
+      setVintedImportResult({ ok: true, message: `Imported: ${body.activeCount} active categories (${body.createdCount} new, ${body.updatedCount} updated, ${body.deactivatedCount} deactivated).` });
+      setVintedImportPreview(null);
+      await loadVintedStatus();
+    } catch {
+      setVintedImportError("Network error — could not import this snapshot.");
+    } finally {
+      setVintedImportBusy(false);
+    }
+  }
+  function cancelVintedSnapshotImport() { setVintedImportPreview(null); setVintedImportError(""); }
   async function disconnectGmail(id:string){if(!window.confirm("Disconnect this Gmail account?"))return;const response=await fetch("/api/gmail/accounts",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});if(response.ok)setGmail(current=>current?{...current,accounts:current.accounts.filter(account=>account.id!==id)}:current);}
   function chooseTheme(next: "light" | "dark") { setTheme(next); document.documentElement.classList.toggle("dark", next === "dark"); localStorage.setItem("purchase-tracker-theme", next); window.dispatchEvent(new Event("purchase-theme-change")); }
   async function testConnection() { setTesting(true); setConnectionError(""); const response = await fetch("/api/yahoo/connection", { method: "POST" }); const body = await response.json(); if (response.ok) setYahoo(current => ({ configured: true, maskedAddress: body.maskedAddress || current?.maskedAddress || null, connected: true, testedAt: body.testedAt })); else setConnectionError(body.error || "Connection test failed."); setTesting(false); }
@@ -32,6 +123,49 @@ export default function SettingsPage() {
     <div className="settings-row"><div><h2>Workspace</h2><p>Personal workspace · Supabase database</p></div><span className="status-badge"><i />Protected</span></div>
     <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Yahoo Mail</h2><p>Read-only IMAP access is configured only through server environment variables.</p><ol><li>Enable Yahoo two-step verification.</li><li>Create a Yahoo app password.</li><li>Set YAHOO_EMAIL and YAHOO_APP_PASSWORD locally and in Vercel.</li></ol></div><div className="yahoo-status"><span className={yahoo?.configured ? "status-badge" : "status-badge status-off"}><i />{yahoo?.configured ? "Configured" : "Not configured"}</span><strong>{yahoo?.maskedAddress || "No address configured"}</strong>{yahoo?.connected && <small>Connected · tested {yahoo.testedAt ? new Date(yahoo.testedAt).toLocaleString() : "just now"}</small>}{!yahoo?.connected && yahoo?.lastSuccessful && <small>Last successful connection or sync: {new Date(yahoo.lastSuccessful).toLocaleString()}</small>}{connectionError && <small className="purchase-form-error">{connectionError}</small>}<button className="button-secondary" disabled={testing || !yahoo?.configured} onClick={testConnection}>{testing ? "Testing…" : "Test connection"}</button></div></div>
     <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Private email index</h2><p>Stores only sender, subject, date, email type and extracted order fields in your protected Supabase workspace. Bodies, HTML, attachments and Yahoo credentials stay out of the index.</p><p>An automatic sync runs once a day and keeps the index up to date on its own. Use &quot;Sync now&quot; for an immediate update or to backfill an older date range.</p><p>{index?.count || 0} metadata records indexed{index?.lastSyncedAt ? ` · last successful sync ${new Date(index.lastSyncedAt).toLocaleString()}` : ""}.</p>{index?.currentlyIndexing && <p className="status-badge"><i />Currently indexing {index.currentlyIndexing.rangeStart} to {index.currentlyIndexing.rangeEnd} (started {new Date(index.currentlyIndexing.startedAt).toLocaleString()})</p>}{index?.inProgress && <p className="status-badge"><i />In progress: {index.inProgress.rangeStart} to {index.inProgress.rangeEnd} — {index.inProgress.indexedSoFar} indexed so far, last pass {new Date(index.inProgress.lastPassAt).toLocaleString()}. Continues automatically.</p>}{index?.lastFailure && <p className="purchase-form-error">Last failed sync: {index.lastFailure.rangeStart} to {index.lastFailure.rangeEnd} at {new Date(index.lastFailure.occurredAt).toLocaleString()} — {index.lastFailure.reason || "Unknown reason."}</p>}</div><div className="index-controls"><label>From<input type="date" value={startDate} max={endDate} onChange={event => setStartDate(event.target.value)} /></label><label>To<input type="date" value={endDate} min={startDate} max={today} onChange={event => setEndDate(event.target.value)} /></label>{indexMessage && <small>{indexMessage}</small>}<button className="button-secondary" disabled={syncing || !yahoo?.configured} onClick={syncIndex}>{syncing ? "Syncing…" : "Sync now"}</button><button className="button-danger" disabled={syncing || !index?.count} onClick={clearIndex}>Clear index</button></div></div>
+    <div className="settings-section yahoo-settings">
+      <div className="settings-copy">
+        <h2>Vinted categories</h2>
+        <p>
+          {vintedStatus?.lastSourceType === "verified_browser_snapshot"
+            ? `Current source: verified browser snapshot${vintedStatus.lastCapturedAt ? ` (captured ${new Date(vintedStatus.lastCapturedAt).toLocaleDateString()})` : ""}.`
+            : vintedStatus?.lastSourceType === "live_endpoint"
+              ? "Current source: Vinted UK (live refresh)."
+              : "Current source: not yet synced."}
+          {" "}Neither path ever refreshes automatically when this page loads.
+        </p>
+      </div>
+      <div className="yahoo-status">
+        <span className={vintedStatus?.lastSucceededAt ? "status-badge" : "status-badge status-off"}><i />{vintedStatus?.lastSucceededAt ? "Synced" : "Never synced"}</span>
+        <strong>{vintedStatus?.activeCount ?? 0} active categories</strong>
+        {vintedStatus?.lastSucceededAt ? <small>Last successful sync: {new Date(vintedStatus.lastSucceededAt).toLocaleString()}</small> : <small>No successful sync yet.</small>}
+        {vintedStatus?.lastStatus && vintedStatus.lastStatus !== "success" && vintedStatus.lastError && <small className="purchase-form-error">Last attempt failed: {vintedStatus.lastError}</small>}
+        {vintedResult && <small className={vintedResult.ok ? undefined : "purchase-form-error"}>{vintedResult.message}</small>}
+        <button className="button-secondary" disabled={vintedRefreshing} onClick={refreshVintedCategories}>{vintedRefreshing ? "Refreshing…" : "Refresh from Vinted"}</button>
+      </div>
+
+      <div className="yahoo-status vinted-snapshot-import">
+        <strong>Import verified browser snapshot</strong>
+        <small>Use this when &quot;Refresh from Vinted&quot; fails (Vinted currently blocks unauthenticated requests to its live category endpoint). Export a snapshot from Vinted UK&apos;s signed-in Create Listing page, then choose the file below.</small>
+        <label className="button-secondary vinted-snapshot-file-label">
+          {vintedImportBusy && !vintedImportPreview ? "Validating…" : "Choose snapshot file…"}
+          <input type="file" accept="application/json" onChange={handleVintedSnapshotSelected} disabled={vintedImportBusy} hidden />
+        </label>
+        {vintedImportError && <small className="purchase-form-error">{vintedImportError}</small>}
+        {vintedImportResult && <small className={vintedImportResult.ok ? undefined : "purchase-form-error"}>{vintedImportResult.message}</small>}
+
+        {vintedImportPreview && <div className="vinted-snapshot-preview">
+          <p><strong>{vintedImportPreview.fileName}</strong> — captured {new Date(vintedImportPreview.capturedAt).toLocaleString()}</p>
+          <p>{vintedImportPreview.categoryCount} categories · {vintedImportPreview.selectableCount} selectable · {vintedImportPreview.leafCount} leaves · max depth {vintedImportPreview.maxDepth}</p>
+          <p>Roots: {vintedImportPreview.rootIds.join(", ")}</p>
+          <p className="vinted-snapshot-fingerprint">Fingerprint: {vintedImportPreview.fingerprint}</p>
+          <div className="vinted-snapshot-preview-actions">
+            <button type="button" className="button-secondary" disabled={vintedImportBusy} onClick={cancelVintedSnapshotImport}>Cancel</button>
+            <button type="button" className="button" disabled={vintedImportBusy} onClick={confirmVintedSnapshotImport}>{vintedImportBusy ? "Importing…" : "Confirm import"}</button>
+          </div>
+        </div>}
+      </div>
+    </div>
     <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Gmail accounts</h2><p>Connect Gmail with read-only OAuth. Connected accounts are searched alongside Yahoo by Email Assistant and Purchase Import.</p><p>Refresh tokens are encrypted server-side.</p></div><div className="yahoo-status">{gmail?.accounts.map(account=><div key={account.id}><span className="status-badge"><i />Connected</span><strong>{account.emailAddress}</strong><button className="button-danger" onClick={()=>disconnectGmail(account.id)}>Disconnect</button></div>)}{!gmail?.accounts.length&&<span className="status-badge status-off"><i />Not connected</span>}<a className="button-secondary" href="/api/gmail/connect">Connect Gmail</a>{gmail&&!gmail.configured&&<small className="purchase-form-error">Google OAuth environment variables are not configured.</small>}</div></div>
   </div></section>;
 }

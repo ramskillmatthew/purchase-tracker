@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { imageRoles, listingDraftStatuses } from "@/lib/listing-studio/types";
+import { imageRoles, listingDraftStatuses, listingAnalysisStages } from "@/lib/listing-studio/types";
 
 const migration = readFileSync("supabase-listing-studio.sql", "utf8");
 
@@ -12,8 +12,10 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
   });
 
   it("every table uses owner_id uuid, matching the app's single-owner convention (not user_id)", () => {
+    // 4 core tables + vinted_category_selection_ai_calls (Milestone 7
+    // follow-up, AI cost tracking — also owner_id-scoped).
     const ownerIdCount = migration.match(/owner_id uuid not null/g) ?? [];
-    expect(ownerIdCount.length).toBe(4);
+    expect(ownerIdCount.length).toBe(5);
   });
 
   it("every table enables RLS with no policies, matching every RLS-enabled table in this repo, and revokes anon/authenticated access as defence in depth", () => {
@@ -25,8 +27,10 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
   });
 
   it("listing_draft_images, listing_analysis_runs, and listing_status_history all cascade-delete when their draft is deleted", () => {
+    // 3 core tables + vinted_category_selection_ai_calls (Milestone 7
+    // follow-up — also cascade-deletes with its draft).
     const cascadeCount = migration.match(/references public\.listing_drafts \(id\)\s*\n\s*on delete cascade/g) ?? [];
-    expect(cascadeCount.length).toBe(3);
+    expect(cascadeCount.length).toBe(4);
   });
 
   it("the status check constraint on listing_drafts matches lib/listing-studio/types.ts's listingDraftStatuses exactly", () => {
@@ -37,6 +41,54 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     expect(migration).toContain("'product_grouping'");
     expect(migration).toContain("alter table public.listing_analysis_runs drop constraint if exists listing_analysis_runs_stage_check;");
     expect(migration).toContain("alter table public.listing_analysis_runs add constraint listing_analysis_runs_stage_check");
+  });
+
+  describe("Follow-up correction (2026-08-06): listing_analysis_runs_stage_check must never regress — a rerun of this whole file against a live, populated database validates every ALTER's CHECK body against ALL existing rows, so an intermediate block whose list omits a stage older rows already use fails outright (the exact 'category_selection' migration failure this fixes)", () => {
+    // Every `stage in (...)` block in the file — the fresh-install inline
+    // check plus every widening ALTER — extracted independently, so a
+    // regression that reintroduces a narrower intermediate block is
+    // caught structurally, not just by string-containment of one value.
+    const stageBlocks = [...migration.matchAll(/stage in \(([\s\S]*?)\)/g)].map(m => m[1]);
+
+    it("finds at least one stage_in block (sanity check that the extraction pattern itself still matches the file)", () => {
+      expect(stageBlocks.length).toBeGreaterThan(0);
+    });
+
+    it("every single stage_in block — the fresh-install table definition AND every widening ALTER — permits the COMPLETE current stage list, with no narrower intermediate version left in the file", () => {
+      for (const block of stageBlocks) {
+        for (const stage of listingAnalysisStages) expect(block).toContain(`'${stage}'`);
+      }
+    });
+
+    it("'category_selection' (the historical stage whose omission from an intermediate block broke a live rerun) is permitted", () => {
+      expect(listingAnalysisStages).toContain("category_selection");
+      for (const block of stageBlocks) expect(block).toContain("'category_selection'");
+    });
+
+    it("'audience_reassessment' (the newest stage) is permitted", () => {
+      expect(listingAnalysisStages).toContain("audience_reassessment");
+      for (const block of stageBlocks) expect(block).toContain("'audience_reassessment'");
+    });
+
+    it("all five original Stage-1 pipeline stages remain permitted", () => {
+      for (const stage of ["image_quality", "label_extraction", "visual_identification", "consistency_check", "generation"]) {
+        for (const block of stageBlocks) expect(block).toContain(`'${stage}'`);
+      }
+    });
+
+    it("REGRESSION: exactly ONE drop+add pair exists for listing_analysis_runs_stage_check — never a sequence of narrower-then-wider blocks that could re-narrow the constraint on a rerun", () => {
+      const dropCount = (migration.match(/alter table public\.listing_analysis_runs drop constraint if exists listing_analysis_runs_stage_check;/g) ?? []).length;
+      const addCount = (migration.match(/alter table public\.listing_analysis_runs add constraint listing_analysis_runs_stage_check/g) ?? []).length;
+      expect(dropCount).toBe(1);
+      expect(addCount).toBe(1);
+    });
+
+    it("matches lib/listing-studio/types.ts's listingAnalysisStages exactly — no SQL/TypeScript drift, and no stray value the TS enum doesn't know about", () => {
+      for (const block of stageBlocks) {
+        const quoted = [...block.matchAll(/'([a-z_]+)'/g)].map(m => m[1]);
+        expect(new Set(quoted)).toEqual(new Set(listingAnalysisStages));
+      }
+    });
   });
 
   it("the detected_role/confirmed_role check constraints match lib/listing-studio/types.ts's imageRoles exactly", () => {
@@ -176,6 +228,13 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     }
   });
 
+  it("Milestone 6 (Vinted-aware colours/materials): listing_drafts gets colours (a text array) and material, added idempotently, without dropping the superseded free-text colour column", () => {
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists colours text[];");
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists material text;");
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists colour text;");
+    expect(migration).not.toMatch(/drop column\s+colour\b/);
+  });
+
   it("REGRESSION: generated_title/generated_description are distinct new columns from the pre-existing title/description columns — the migration never renames or repurposes the originals", () => {
     expect(migration).toContain("title text,");
     expect(migration).toContain("description text,");
@@ -195,6 +254,10 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
 
   it("Milestone 4 sizing coverage correction: listing_drafts gets uk_size_source, added idempotently, recording how uk_size was obtained (observed/brand_converted/fallback_converted/manual)", () => {
     expect(migration).toContain("alter table public.listing_drafts add column if not exists uk_size_source text;");
+  });
+
+  it("Milestone 5 (Listings Review): listing_drafts gets review_marked_ready_at, added idempotently — the one write Milestone 5 adds; Ready/Needs Review/Edited are otherwise computed, no other schema change", () => {
+    expect(migration).toContain("alter table public.listing_drafts add column if not exists review_marked_ready_at timestamptz;");
   });
 
   it("useful indexes exist for the query patterns Saved Drafts needs (status filter, SKU search, per-draft image order, per-draft analysis history)", () => {

@@ -237,7 +237,7 @@ describe("Never interpolates — exact match only, at either tier", () => {
 describe("A converted UK size flows into title/description exactly the same way an observed one does", () => {
   it("a brand-converted UK size produces an identical title/description shape to a directly observed one", () => {
     const converted = deriveUkSizeFromSource({ brand: "Merrell", sourceSizeSystem: "EU", sourceSizeValue: "41", sourceSizeGender: "mens" });
-    const observedFields = { brand: "Merrell", model: "Moab 3", productType: "Trainers", colour: "Black & Grey", ukSize: "7", sku: "1648" };
+    const observedFields = { brand: "Merrell", model: "Moab 3", productType: "Trainers", colours: ["Black", "Grey"], material: null, ukSize: "7", sku: "1648" };
     const convertedFields = { ...observedFields, ukSize: converted.ukSize };
 
     expect(converted).toEqual({ ukSize: "7", provenance: "brand_converted" });
@@ -248,7 +248,7 @@ describe("A converted UK size flows into title/description exactly the same way 
 
   it("a blank (unsupported/ambiguous) conversion degrades the title/description exactly the same way a directly-unread UK size already does", () => {
     const blank = deriveUkSizeFromSource({ brand: "SomeRandomBrand", sourceSizeSystem: "US", sourceSizeValue: "9", sourceSizeGender: null });
-    const fieldsWithBlank = { brand: "SomeRandomBrand", model: "Whatever", productType: "Trainers", colour: "Black", ukSize: blank.ukSize, sku: "1648" };
+    const fieldsWithBlank = { brand: "SomeRandomBrand", model: "Whatever", productType: "Trainers", colours: ["Black"], material: null, ukSize: blank.ukSize, sku: "1648" };
     const fieldsWithDirectlyUnreadUkSize = { ...fieldsWithBlank, ukSize: null };
 
     expect(blank).toEqual({ ukSize: null, provenance: null });

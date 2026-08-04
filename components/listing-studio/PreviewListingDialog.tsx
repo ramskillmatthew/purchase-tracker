@@ -5,20 +5,30 @@ import { useEffect, useState } from "react";
 type CopiedField = "title" | "description" | null;
 
 /**
- * Read-only full preview of a generated listing (Milestone 4 UX fix) — the
+ * Read-only full preview of a generated listing (Milestone 4 UX fix,
+ * extended in Milestone 5 with a Vinted-style card at the top) — the
  * card itself only ever shows a truncated description, with no way to
  * inspect the complete text or copy it. This modal never edits anything:
  * the structured fields (and therefore the title/description) can only
  * ever be changed via EditListingFieldsDialog. No AI call, no new data —
  * every value here is exactly what's already stored and already rendered
  * (in truncated form) on the card.
+ *
+ * `condition`/`coverImageUrl` are optional so Listing Studio's own,
+ * pre-existing call site (which has neither readily available) keeps
+ * working completely unchanged — only Listings Review passes them.
+ * Price is always a placeholder ("Price not set") — there is no price
+ * field anywhere in this milestone; this is explicitly preview-only, no
+ * Vinted integration.
  */
-export default function PreviewListingDialog({ groupTitle, generatedTitle, generatedDescription, ukSize, sku, onClose }: {
+export default function PreviewListingDialog({ groupTitle, generatedTitle, generatedDescription, ukSize, sku, condition = null, coverImageUrl = null, onClose }: {
   groupTitle: string;
   generatedTitle: string;
   generatedDescription: string;
   ukSize: string | null;
   sku: string | null;
+  condition?: string | null;
+  coverImageUrl?: string | null;
   onClose: () => void;
 }) {
   const [copiedField, setCopiedField] = useState<CopiedField>(null);
@@ -49,6 +59,21 @@ export default function PreviewListingDialog({ groupTitle, generatedTitle, gener
         <button type="button" onClick={onClose} aria-label="Close">×</button>
       </div>
       <div className="task-modal-body preview-listing-body">
+        <section className="preview-listing-vinted-card" aria-label="Listing preview">
+          {coverImageUrl
+            // eslint-disable-next-line @next/next/no-img-element -- private, per-request signed redirect URL, matching every other listing-studio photo <img>
+            ? <img className="preview-listing-vinted-image" src={coverImageUrl} alt="" />
+            : <div className="preview-listing-vinted-image preview-listing-vinted-image-empty" aria-hidden="true">No photo</div>}
+          <div className="preview-listing-vinted-details">
+            <p className="preview-listing-vinted-title">{generatedTitle || "No title generated yet."}</p>
+            <dl className="preview-listing-vinted-meta">
+              <div><dt>Condition</dt><dd>{condition || "Not set"}</dd></div>
+              <div><dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : "Not set"}</dd></div>
+              <div><dt>Price</dt><dd className="preview-listing-vinted-price-placeholder">Price not set</dd></div>
+            </dl>
+          </div>
+        </section>
+
         <section className="preview-listing-section">
           <div className="preview-listing-section-heading">
             <span className="label">Title</span>

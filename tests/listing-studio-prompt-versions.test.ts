@@ -27,7 +27,22 @@ describe("LISTING_PROMPT_VERSIONS — Stage 1 spec §18", () => {
     expect(LISTING_PROMPT_VERSIONS.product_grouping).toBe("listing-product-grouping-v3"); // v3: replaces free-clustering with ordered boundary detection
   });
 
-  it("Milestone 4 sizing coverage correction: the SIZE instructions gained childrens-category guidance — bumped to v4, after the v3 rewrite that introduced sourceSize", () => {
-    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v4");
+  it("Milestone 6 (Vinted-aware colours/materials): COLOUR was rewritten to COLOURS (Vinted enum, max 2) and a new MATERIAL instruction was added — bumped to v5, after the v4 childrens-category addition", () => {
+    // Superseded by v6 below — kept as a version-history marker; the
+    // constant itself always reflects the CURRENT version.
+    expect(LISTING_PROMPT_VERSIONS.generation).not.toBe("listing-generation-v5");
+  });
+
+  it("Follow-up correction (2026-08-04): a new independent VINTED AUDIENCE instruction was added, and SIZE was reworded to stop sourceSize.gender being mistaken for audience — bumped to v6", () => {
+    // Superseded by v7 below — kept as a version-history marker.
+    expect(LISTING_PROMPT_VERSIONS.generation).not.toBe("listing-generation-v5");
+  });
+
+  it("Follow-up correction (2026-08-05): VINTED AUDIENCE was rewritten with a priority-ordered evidence rule and a new vintedAudienceEvidence field — bumped to v7", () => {
+    expect(LISTING_PROMPT_VERSIONS.generation).toBe("listing-generation-v7");
+  });
+
+  it("Follow-up correction (2026-08-05): the new audience_reassessment stage (used by 'Assign category' and the explicit 'Reassess audience' action) has its own recorded prompt version", () => {
+    expect(LISTING_PROMPT_VERSIONS.audience_reassessment).toBe("listing-audience-reassessment-v1");
   });
 });

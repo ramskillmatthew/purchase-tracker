@@ -29,6 +29,36 @@ function structuredField<T extends z.ZodTypeAny>(valueSchema: T) {
   return z.object({ value: valueSchema, confidence: confidenceSchema }).strict();
 }
 
+// Milestone 6 (Vinted-aware colours/materials). Vinted only accepts a
+// value from its own fixed lists for both fields — a free-text colour
+// like "Cream & Grey & Tan" or an invented material can never be
+// published. These are the ONE source of truth for both lists (the AI
+// tool schema below, the Edit Fields validation schema, and the UI enum
+// pickers all import from here — never re-declared anywhere else).
+export const VINTED_COLOURS = [
+  "Black", "Grey", "White", "Cream", "Beige", "Apricot", "Orange", "Coral", "Red", "Burgundy",
+  "Pink", "Rose", "Purple", "Lilac", "Light blue", "Blue", "Navy", "Turquoise", "Mint", "Green",
+  "Dark green", "Khaki", "Brown", "Mustard", "Yellow", "Silver", "Gold", "Multi", "Clear",
+] as const;
+export type VintedColour = typeof VINTED_COLOURS[number];
+const vintedColourSchema = z.enum(VINTED_COLOURS);
+
+export const VINTED_MATERIALS = [
+  "Acrylic", "Alpaca", "Bamboo", "Canvas", "Cardboard", "Cashmere", "Ceramic", "Chiffon", "Corduroy", "Cotton",
+  "Denim", "Down", "Elastane", "Faux fur", "Faux leather", "Felt", "Flannel", "Fleece", "Foam", "Glass",
+  "Gold", "Jute", "Lace", "Latex", "Leather", "Linen", "Merino", "Mesh", "Metal", "Mohair",
+  "Neoprene", "Nylon", "Paper", "Patent leather", "Plastic", "Polyester", "Porcelain", "Rattan", "Rubber", "Satin",
+  "Sequin", "Silicone", "Silk", "Silver", "Steel", "Stone", "Straw", "Suede", "Tulle", "Tweed",
+  "Velour", "Velvet", "Viscose", "Wood", "Wool",
+] as const;
+export type VintedMaterial = typeof VINTED_MATERIALS[number];
+const vintedMaterialSchema = z.enum(VINTED_MATERIALS);
+
+// Vinted allows at most two colours per listing — enforced here, not just
+// documented in the prompt, so a malformed/over-long tool call is rejected
+// regardless of what the model actually returns.
+const vintedColoursValueSchema = z.array(vintedColourSchema).max(2);
+
 // Milestone 4 sizing correction: the AI must never perform or invent a
 // size-system conversion itself (lib/listing-studio/size-conversion.ts is
 // the ONE place that happens, deterministically, brand-aware). This field
@@ -55,31 +85,108 @@ const sourceSizeSchema = z.object({
 }).strict();
 export type SourceSize = z.infer<typeof sourceSizeSchema>;
 
+// Follow-up correction (2026-08-04): sourceSize.gender above is read ONLY
+// off a size label (or absent entirely — most footwear size tags print no
+// gender marker at all) and exists purely for size-system conversion
+// (lib/listing-studio/size-conversion.ts). It is NOT a reliable signal for
+// which Vinted marketplace audience a listing belongs under — a real
+// production bug (a New Balance 9060 with no gender printed on its size
+// tag) proved sourceSize.gender being null/unisex silently produced NO
+// Vinted category at all, with no failure record to explain why. This is
+// now a genuinely separate, independently-determined field: the AI uses
+// EVERY available signal (labels, product type, brand/model knowledge,
+// the photos themselves, whether the item is explicitly marketed as
+// men's/women's/kids'/unisex) — never just the size tag — and "unknown"
+// is the correct, honest answer when genuinely unclear, never invented.
+// See lib/listing-studio/vinted-category-selection.ts's deriveDraftAudience,
+// which reads ONLY this field now, never sourceSize.gender.
+export const VINTED_AUDIENCE_VALUES = ["mens", "womens", "boys", "girls", "unisex", "unknown"] as const;
+export type VintedAudienceValue = typeof VINTED_AUDIENCE_VALUES[number];
+const vintedAudienceValueSchema = z.enum(VINTED_AUDIENCE_VALUES);
+
+// The one shared display-label map for VINTED_AUDIENCE_VALUES — used by
+// both the Edit Fields audience selector and Listings Review's details
+// panel, so the wording never drifts between the two.
+export const VINTED_AUDIENCE_LABELS: Record<VintedAudienceValue, string> = {
+  mens: "Men", womens: "Women", boys: "Boys", girls: "Girls",
+  unisex: "Unisex / requires choice", unknown: "Unknown / requires choice",
+};
+
+// Follow-up correction (2026-08-05): real production testing showed
+// "unknown" being returned for products that were, in fact, clearly
+// men's or women's — traced to the v6 prompt giving the model an easy
+// out ("unknown... never a failure to avoid") with no priority ordering
+// between evidence types and no requirement to actually articulate
+// evidence before answering. The one real generation run in the live
+// database at the time of this fix proved the INVERSE failure mode too:
+// its own notes admitted reasoning "at UK 5 / EU 37.5 this sits in the
+// womens size range" — deciding audience from shoe size alone, exactly
+// what must never happen. vintedAudienceEvidence forces the model to
+// name the actual signal(s) it used, which structurally discourages both
+// failure modes: a lazy "unknown" (nothing to cite) and a size-only
+// guess (size alone is explicitly disqualified as sufficient evidence in
+// the prompt below). Short factual statements only, e.g. "Model
+// identified as the men's version" — never a confidence percentage,
+// never a restatement of the whole photo.
+const vintedAudienceEvidenceSchema = z.array(z.string().trim().min(1).max(200)).max(6);
+
 export const listingGenerationFieldsSchema = z.object({
   brand: structuredField(fieldValueSchema),
   model: structuredField(fieldValueSchema),
   productType: structuredField(fieldValueSchema),
-  colour: structuredField(fieldValueSchema),
+  // Milestone 6: colour is no longer free text — up to 2 exact values from
+  // VINTED_COLOURS, or an empty array when none can be confidently
+  // matched. `.max(2)` above rejects anything longer at the schema level.
+  colours: structuredField(vintedColoursValueSchema),
+  // Milestone 6: a single exact value from VINTED_MATERIALS, or null when
+  // it can't be confidently identified — never invented, never a synonym.
+  material: structuredField(vintedMaterialSchema.nullable()),
   sourceSize: sourceSizeSchema,
+  // Follow-up correction (2026-08-04) — see this field's own comment
+  // above sourceSizeSchema for why this exists separately from
+  // sourceSize.gender.
+  vintedAudience: structuredField(vintedAudienceValueSchema),
+  // Follow-up correction (2026-08-05) — see vintedAudienceEvidenceSchema's
+  // own comment. Sibling to vintedAudience, not nested inside its
+  // structuredField wrapper, since it isn't itself a confidence-bearing
+  // value — it's the supporting evidence for the value next to it.
+  vintedAudienceEvidence: vintedAudienceEvidenceSchema,
   sku: structuredField(fieldValueSchema),
   notes: notesSchema,
 }).strict();
 export type ListingGenerationFields = z.infer<typeof listingGenerationFieldsSchema>;
+
+// Follow-up correction (2026-08-05): shared between the main generation
+// prompt and lib/listing-studio/vinted-audience-reassessment-ai.ts's two
+// reassessment prompts (text-only and photo-based), so the priority-order
+// reasoning never drifts between the three places that ask for it.
+export const VINTED_AUDIENCE_GUIDANCE =
+  "Do NOT default to \"unknown\" just because the size label has no explicit M/W marker — most labels don't, and that alone tells you nothing either way. Work through evidence in this priority order, using the highest-priority signal that is actually available: "
+  + "(1) Explicit gender or department text visible on labels, packaging, or product information — the strongest signal, e.g. a box or label that says \"WMNS\", \"Men's\", \"Boys\", \"Girls\". "
+  + "(2) A model name or style code that you know is specifically sold as a men's or women's release (or a boys'/girls' release) — e.g. a silhouette you know exists as a distinct men's-only or women's-only line, or a style-code prefix/pattern you recognise as gender-specific. "
+  + "(3) Reliable general brand/model knowledge even without a specific style code — e.g. a silhouette you know is predominantly or exclusively marketed to one audience. "
+  + "(4) Product design and construction, ONLY where strongly indicative (e.g. unambiguous cut, styling, or branding conventions for that audience) — weaker than (1)-(3), use with care. "
+  + "(5) Size range — SUPPORTING evidence only, and only alongside at least one of (1)-(4). A low or high UK/EU/US size ALONE is never sufficient by itself to decide mens/womens/boys/girls — if size is the only thing you have, the correct answer is \"unknown\", not a guess. Never reason like \"this size sits in the womens range\" as your sole justification. "
+  + "Report \"mens\" or \"womens\" when evidence (per the priority order above) clearly supports an adult item for that audience. Report \"boys\" or \"girls\" when evidence clearly supports a children's item for that specific audience. When multiple signals are available and they agree, that agreement makes the answer more confident, not less — choose that audience. Report \"unisex\" ONLY when the item is explicitly evidenced as a genuinely unisex product with no gendered distinction (e.g. explicitly marketed as unisex, or a silhouette you know is sold as one single unisex line with no separate men's/women's version) — never as a default and never merely because you are unsure. Report \"unknown\" when evidence is genuinely absent or conflicting (e.g. one signal points mens, another points womens, with nothing to break the tie) — after actually working through priorities (1)-(5) above, not as a first resort. "
+  + "vintedAudienceEvidence: list the SPECIFIC factual signal(s) that led to your vintedAudience answer, as short plain statements — for example \"Model identified as the men's version\", \"Style code belongs to women's release\", \"Box label explicitly says WMNS\". List every signal you actually relied on (multiple agreeing signals should each be listed). Leave this an empty array only when vintedAudience is \"unknown\" because there was genuinely nothing to cite. Never include a confidence percentage or number in this list — confidence is reported separately. ";
 
 export const LISTING_GENERATION_SYSTEM_PROMPT =
   "You extract structured product data for ONE physical product from every photo of it, for a resale listing tool, using the propose_listing_fields tool. You must call that tool exactly once. Never return a title, a description, or any free-form prose — only the structured fields the tool defines; the application generates the actual listing title and description from those fields itself. "
   + "BRAND: identify the manufacturer only from clear visible evidence in the photos (a logo, label, or embossed marking) — for example Nike, Adidas, On, ASICS, New Balance, Hoka, Birkenstock. Never invent a brand you cannot see evidence for — if genuinely unclear, leave the value null. "
   + "MODEL / SILHOUETTE: the specific model or silhouette name, for example Cloudmonster, Cloud 5, Gel Kayano 14, Pegasus Trail 5, Arizona, Boston. If you cannot confidently identify it, leave the value null — never guess. "
   + "PRODUCT TYPE: a generic product type, for example Running Trainers, Trail Running Trainers, Walking Shoes, Sandals, Slides, Football Boots. "
-  + "COLOUR: either a plain description joining the visible colours with \"&\" (for example \"White & Blue\"), or the official colourway name ONLY if you confidently recognise it (for example \"Solar Red\", \"OG Neon\") — never guess an official colourway name; a plain colour description is always the safer choice when unsure. "
-  + "SIZE: read whichever size marking is printed on the label — report it in sourceSize, exactly as printed, in only ONE system. If a UK size is clearly printed (for example \"UK 9\", \"UK9\"), report system \"UK\" with that value — always prefer a directly printed UK size over any EU or US size shown on the very same label, even when more than one system is printed together. Only if no UK size is visible anywhere: if a EU size is clearly printed (for example \"EU 44\", \"42.5\"), report system \"EU\" with that value. Only if neither UK nor EU is visible: if a US size is clearly printed (for example \"US 10\", \"M 10\"), report system \"US\" with that value. You must NEVER convert between sizing systems yourself, and never write a converted value — the application does that separately, deterministically. If the label itself indicates whether this is a men's, women's, or unisex size (for example a printed \"M\"/\"W\"/\"Mens\"/\"Womens\", or two separate size columns on the same label), report that as sourceSize.gender — leave gender null if the label doesn't state it; never guess gender from the shoe's general style or appearance. Only report sourceSize.gender as \"childrens\" when the label or packaging itself explicitly says so — wording like \"Kids\", \"Youth\", \"Toddler\", \"Infant\", or a size clearly printed in a children's-specific range (for example \"UK 10.5\" alongside a \"Kids\" label) — never inferred just because the shoe looks small or youth-styled. If different photos of this product show conflicting size information (labels that disagree with each other), or you cannot confidently read any size marking at all, leave sourceSize.system and sourceSize.value both null rather than picking one. "
+  + "COLOURS: choose UP TO TWO colours, and ONLY from this exact Vinted list — Black, Grey, White, Cream, Beige, Apricot, Orange, Coral, Red, Burgundy, Pink, Rose, Purple, Lilac, Light blue, Blue, Navy, Turquoise, Mint, Green, Dark green, Khaki, Brown, Mustard, Yellow, Silver, Gold, Multi, Clear. Never invent a colour and never use a synonym or shade name that isn't on this list (for example never \"Tan\", \"Maroon\", \"Ivory\", \"Olive\" — pick the closest listed colour instead, or leave it out entirely if genuinely unclear). A rainbow or many-coloured item is \"Multi\"; a transparent item is \"Clear\". Never return more than two values. If you cannot confidently match even one colour from this list, return an empty array — never guess. "
+  + "MATERIAL: identify the single primary material, and ONLY from this exact Vinted list — Acrylic, Alpaca, Bamboo, Canvas, Cardboard, Cashmere, Ceramic, Chiffon, Corduroy, Cotton, Denim, Down, Elastane, Faux fur, Faux leather, Felt, Flannel, Fleece, Foam, Glass, Gold, Jute, Lace, Latex, Leather, Linen, Merino, Mesh, Metal, Mohair, Neoprene, Nylon, Paper, Patent leather, Plastic, Polyester, Porcelain, Rattan, Rubber, Satin, Sequin, Silicone, Silk, Silver, Steel, Stone, Straw, Suede, Tulle, Tweed, Velour, Velvet, Viscose, Wood, Wool. Never invent a material and never use a synonym that isn't on this list. If you cannot confidently identify one, leave the value null — never guess. "
+  + "SIZE: read whichever size marking is printed on the label — report it in sourceSize, exactly as printed, in only ONE system. If a UK size is clearly printed (for example \"UK 9\", \"UK9\"), report system \"UK\" with that value — always prefer a directly printed UK size over any EU or US size shown on the very same label, even when more than one system is printed together. Only if no UK size is visible anywhere: if a EU size is clearly printed (for example \"EU 44\", \"42.5\"), report system \"EU\" with that value. Only if neither UK nor EU is visible: if a US size is clearly printed (for example \"US 10\", \"M 10\"), report system \"US\" with that value. You must NEVER convert between sizing systems yourself, and never write a converted value — the application does that separately, deterministically. If the label itself indicates whether this is a men's, women's, or unisex SIZE SCALE (for example a printed \"M\"/\"W\"/\"Mens\"/\"Womens\", or two separate size columns on the same label), report that as sourceSize.gender — leave gender null if the label doesn't state it; never guess gender from the shoe's general style or appearance. Only report sourceSize.gender as \"childrens\" when the label or packaging itself explicitly says so — wording like \"Kids\", \"Youth\", \"Toddler\", \"Infant\", or a size clearly printed in a children's-specific range (for example \"UK 10.5\" alongside a \"Kids\" label) — never inferred just because the shoe looks small or youth-styled. If different photos of this product show conflicting size information (labels that disagree with each other), or you cannot confidently read any size marking at all, leave sourceSize.system and sourceSize.value both null rather than picking one. sourceSize.gender describes the SIZE SCALE ONLY and is very often null (most size tags print no gender marker at all) — it is NOT the same question as vintedAudience below, and a null/absent sourceSize.gender must never be treated as evidence that vintedAudience is unclear. "
+  + "VINTED AUDIENCE: separately from sourceSize.gender, actively determine which Vinted marketplace audience this listing belongs under. "
+  + VINTED_AUDIENCE_GUIDANCE
   + "SKU: read the white inventory sticker inside the shoe, for example 1648, 1672, 1728 — search every single photo you are shown for it, since it may only be visible in one. If more than one sticker is visible and they disagree with each other, or none can be found at all, leave the value null. Never invent a SKU. "
-  + "For every field, also report your own confidence: \"high\" only when you are genuinely certain, \"medium\" when reasonably confident but not fully certain, \"low\" for a weak guess. Prefer leaving a value null over a low-confidence guess, especially for model, colour, sourceSize, and SKU. "
+  + "For every field, also report your own confidence: \"high\" only when you are genuinely certain, \"medium\" when reasonably confident but not fully certain, \"low\" for a weak guess. Prefer leaving a value null (or, for colours, an empty array, or for vintedAudience, \"unknown\") over a low-confidence guess, especially for model, colours, material, sourceSize, vintedAudience, and SKU. "
   + "Use notes only for a brief remark about something genuinely ambiguous or uncertain about this product (for example conflicting SKU stickers, conflicting size labels, or a partly obscured label) — leave notes null otherwise, never pad it with a description of what you saw.";
 
 export const LISTING_GENERATION_TOOL: Anthropic.Tool = {
   name: "propose_listing_fields",
-  description: "Report the structured product fields (brand, model, product type, colour, source size, SKU) identified from this one product's photos. Call this exactly once. Never include a title, description, or a converted size — only the size exactly as printed on the label.",
+  description: "Report the structured product fields (brand, model, product type, colours, material, source size, Vinted audience + evidence, SKU) identified from this one product's photos. Call this exactly once. Never include a title, description, or a converted size — only the size exactly as printed on the label. Colours and material must come only from the exact Vinted enum lists provided — never invented, never a synonym. vintedAudience is independent of sourceSize.gender — work through the priority-ordered evidence in the system prompt (label/department text, then model-specific knowledge, then brand knowledge, then design, then size only as support) and report \"unknown\" only after genuinely doing so, never as a first resort and never from size alone.",
   input_schema: {
     type: "object",
     properties: {
@@ -98,9 +205,26 @@ export const LISTING_GENERATION_TOOL: Anthropic.Tool = {
         properties: { value: { type: ["string", "null"] }, confidence: { type: "string", enum: ["high", "medium", "low"] } },
         required: ["value", "confidence"], additionalProperties: false,
       },
-      colour: {
+      colours: {
         type: "object",
-        properties: { value: { type: ["string", "null"] }, confidence: { type: "string", enum: ["high", "medium", "low"] } },
+        properties: {
+          value: {
+            type: "array", items: { type: "string", enum: [...VINTED_COLOURS] }, maxItems: 2,
+            description: "Up to 2 exact values from the Vinted colour list. Empty array if none can be confidently matched. Never a synonym, never invented.",
+          },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+        },
+        required: ["value", "confidence"], additionalProperties: false,
+      },
+      material: {
+        type: "object",
+        properties: {
+          value: {
+            type: ["string", "null"], enum: [...VINTED_MATERIALS, null],
+            description: "One exact value from the Vinted material list, or null if it can't be confidently identified. Never a synonym, never invented.",
+          },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+        },
         required: ["value", "confidence"], additionalProperties: false,
       },
       sourceSize: {
@@ -113,6 +237,21 @@ export const LISTING_GENERATION_TOOL: Anthropic.Tool = {
         },
         required: ["system", "value", "gender", "confidence"], additionalProperties: false,
       },
+      vintedAudience: {
+        type: "object",
+        properties: {
+          value: {
+            type: "string", enum: [...VINTED_AUDIENCE_VALUES],
+            description: "The Vinted marketplace audience, determined by working through the priority-ordered evidence in the system prompt — NOT just sourceSize.gender, which is a different, size-conversion-only signal, and NEVER from size alone. \"unknown\" only after genuinely weighing the available evidence, never as a first resort.",
+          },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+        },
+        required: ["value", "confidence"], additionalProperties: false,
+      },
+      vintedAudienceEvidence: {
+        type: "array", items: { type: "string" }, maxItems: 6,
+        description: "Short factual statements naming the specific signal(s) relied on for vintedAudience, e.g. \"Model identified as the men's version\", \"Box label explicitly says WMNS\". Empty array only if vintedAudience is \"unknown\" with genuinely nothing to cite. Never a confidence percentage or number.",
+      },
       sku: {
         type: "object",
         properties: { value: { type: ["string", "null"] }, confidence: { type: "string", enum: ["high", "medium", "low"] } },
@@ -121,7 +260,7 @@ export const LISTING_GENERATION_TOOL: Anthropic.Tool = {
       },
       notes: { type: ["string", "null"], description: "A brief note about genuine ambiguity/uncertainty only. Null otherwise." },
     },
-    required: ["brand", "model", "productType", "colour", "sourceSize", "sku", "notes"],
+    required: ["brand", "model", "productType", "colours", "material", "sourceSize", "vintedAudience", "vintedAudienceEvidence", "sku", "notes"],
     additionalProperties: false,
   },
 } as const;

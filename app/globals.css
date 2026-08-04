@@ -102,6 +102,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .global-result-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
 .global-result-copy strong { overflow: hidden; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
 .global-result-copy small { color: var(--muted); font-size: 9px; }
+
+/* Milestone 7 (Vinted category catalogue sync) — components/listing-studio/VintedCategoryPicker.tsx */
+.vinted-category-picker { position: relative; }
+.vinted-category-picker-chosen { display: flex; align-items: center; gap: 8px; justify-content: space-between; min-height: 34px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface-2); }
+.vinted-category-picker-path { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.vinted-category-picker-dropdown { position: absolute; z-index: 20; top: calc(100% + 5px); left: 0; right: 0; overflow-y: auto; max-height: 220px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.vinted-category-picker-option { display: block; width: 100%; padding: 7px 8px; border: 0; border-radius: 6px; color: var(--text); background: transparent; font-size: 12px; text-align: left; }
+.vinted-category-picker-option:hover { background: var(--primary-soft); }
+.vinted-category-picker-status { padding: 7px 8px; color: var(--muted); font-size: 11px; }
 .global-result-enter { color: var(--subtle); font-size: 8px; font-weight: 700; white-space: nowrap; }
 .global-search-no-results { display: flex; min-height: 72px; padding: 12px; flex-direction: column; justify-content: center; }
 .global-search-no-results strong { font-size: 11px; }
@@ -774,6 +783,14 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .index-controls small { grid-column: 1 / -1; color: var(--muted); font-size: 8px; }
 .status-off i { background: var(--subtle) !important; }
 
+/* Milestone 7 follow-up (2026-08-03) — app/settings/page.tsx's "Import verified browser snapshot" workflow */
+.vinted-snapshot-import { width: 100%; align-items: flex-start; padding-top: 10px; border-top: 1px dashed var(--line); }
+.vinted-snapshot-file-label { display: inline-flex; align-items: center; cursor: pointer; }
+.vinted-snapshot-preview { display: flex; width: 100%; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-2); font-size: 10px; }
+.vinted-snapshot-preview p { margin: 0; }
+.vinted-snapshot-fingerprint { overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.vinted-snapshot-preview-actions { display: flex; margin-top: 4px; gap: 8px; }
+
 /* --- Tasks --------------------------------------------------------- */
 .task-tabs { display: inline-flex; overflow-x: auto; margin-bottom: 12px; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .task-tab { display: flex; min-height: 30px; padding: 0 12px; align-items: center; gap: 6px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 650; white-space: nowrap; }
@@ -1089,6 +1106,8 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .listing-card { margin: 0 0 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--line)); border-radius: 9px; background: var(--primary-soft); }
 .listing-card-title { margin: 0; color: var(--text); font-size: 12px; font-weight: 700; line-height: 1.4; }
 .listing-card-description { overflow: hidden; display: -webkit-box; margin: 6px 0 8px; color: var(--muted); font-size: 10.5px; line-height: 1.5; white-space: pre-line; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.listing-card-meta { display: flex; flex-wrap: wrap; margin: 0 0 8px; gap: 6px; }
+.listing-card-meta-item { padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 9.5px; font-weight: 650; }
 .listing-card-actions { display: flex; gap: 8px; }
 .listing-card-actions button { min-height: 28px; padding: 0 10px; font-size: 9px; }
 
@@ -1195,4 +1214,78 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .auto-group-proposal-card { grid-template-columns: 1fr; }
   .auto-group-proposal-thumbs { width: 100%; }
   .auto-group-proposal-actions { flex-direction: row; }
+}
+
+/* Milestone 5 — Listings Review workspace */
+.listings-review-page { max-width: 1560px; }
+.listings-review-layout { display: flex; flex-direction: column; gap: 12px; }
+
+.listings-review-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.listings-review-search { flex: 1 1 260px; min-width: 220px; }
+.listings-review-status-tabs { flex: 0 0 auto; }
+.listings-review-quick-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.listings-review-quick-filter { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 11px; font-weight: 650; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
+.listings-review-quick-filter-active { color: var(--primary-strong); border-color: color-mix(in srgb, var(--primary) 40%, var(--line)); background: var(--primary-soft); }
+
+.listings-review-bulk-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 10px; background: var(--primary-soft); }
+.listings-review-bulk-count { margin-right: auto; color: var(--text); font-size: 12px; font-weight: 700; }
+.listings-review-bulk-message { padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-2); font-size: 11px; }
+
+.listings-review-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; align-items: start; gap: 14px; }
+
+.listings-review-table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.listings-review-table { width: 100%; }
+.listings-review-table th:first-child, .listings-review-table td.listings-review-checkbox-cell { width: 34px; text-align: center; }
+.listings-review-table td, .listings-review-table th { padding: 9px 10px; }
+.listings-review-row { cursor: pointer; }
+.listings-review-row-active { background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
+.listings-review-title-cell { max-width: 320px; overflow: hidden; color: var(--text); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.listings-review-cover-thumb { width: 40px; height: 40px; border-radius: 7px; object-fit: cover; }
+.listings-review-cover-thumb-empty { border: 1px dashed var(--line-strong); background: var(--surface-2); }
+
+.listings-review-status-badge { display: inline-flex; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.listings-review-status-ready { color: #16845d; background: rgba(38, 190, 131, .12); }
+.listings-review-status-needs_review { color: var(--danger); background: var(--danger-soft); }
+.listings-review-status-edited { color: #b4740e; background: rgba(228, 155, 27, .14); }
+
+.listings-review-panel { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.listings-review-panel-empty { align-items: center; justify-content: center; min-height: 220px; color: var(--muted); font-size: 12px; text-align: center; }
+.listings-review-panel-image-button { padding: 0; border: 0; border-radius: 10px; overflow: hidden; cursor: pointer; }
+.listings-review-panel-image-button:disabled { cursor: default; }
+.listings-review-panel-image { display: block; width: 100%; height: 260px; object-fit: cover; }
+.listings-review-panel-image-empty { display: grid; place-items: center; color: var(--subtle); background: var(--surface-2); font-size: 11px; }
+.listings-review-warnings { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.listings-review-warning { padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--line)); border-radius: 7px; color: var(--danger); background: var(--danger-soft); font-size: 11px; font-weight: 650; }
+.listings-review-panel-title { margin: 0; color: var(--text); font-size: 14px; font-weight: 700; line-height: 1.4; }
+.listings-review-panel-description { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.listings-review-panel-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 0; }
+.listings-review-panel-fields dt { color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.listings-review-panel-fields dd { margin: 2px 0 0; color: var(--text); font-size: 12px; font-weight: 600; }
+.listings-review-panel-audience-evidence { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.listings-review-panel-audience-evidence-label { margin: 0 0 4px; color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.listings-review-panel-audience-evidence ul { margin: 0; padding: 0 0 0 16px; }
+.listings-review-panel-audience-evidence li { color: var(--text); font-size: 11.5px; line-height: 1.6; }
+.listings-review-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.photo-carousel-modal { width: min(720px, 100%); }
+.photo-carousel-body { display: grid; place-items: center; min-height: 320px; padding: 12px; background: var(--surface-2); }
+.photo-carousel-main-image { max-width: 100%; max-height: 60vh; border-radius: 8px; object-fit: contain; }
+.photo-carousel-thumbnail-strip { display: flex; gap: 8px; padding: 10px 14px; overflow-x: auto; border-top: 1px solid var(--line); }
+.photo-carousel-thumbnail { flex: 0 0 auto; padding: 0; border: 2px solid transparent; border-radius: 7px; overflow: hidden; opacity: .6; transition: opacity 140ms ease, border-color 140ms ease; }
+.photo-carousel-thumbnail img { display: block; width: 56px; height: 56px; object-fit: cover; }
+.photo-carousel-thumbnail-active { opacity: 1; border-color: var(--primary); }
+
+.preview-listing-vinted-card { display: flex; gap: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.preview-listing-vinted-image { width: 120px; height: 120px; border-radius: 8px; object-fit: cover; flex: 0 0 auto; }
+.preview-listing-vinted-image-empty { display: grid; place-items: center; color: var(--subtle); background: var(--surface-3); font-size: 10px; }
+.preview-listing-vinted-details { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.preview-listing-vinted-title { margin: 0; color: var(--text); font-size: 13px; font-weight: 700; line-height: 1.4; }
+.preview-listing-vinted-meta { display: flex; flex-wrap: wrap; gap: 14px; margin: 0; }
+.preview-listing-vinted-meta dt { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.preview-listing-vinted-meta dd { margin: 2px 0 0; color: var(--text); font-size: 11.5px; font-weight: 650; }
+.preview-listing-vinted-price-placeholder { color: var(--subtle); font-style: italic; }
+
+@media (max-width: 980px) {
+  .listings-review-split { grid-template-columns: 1fr; }
+  .listings-review-panel { position: static; }
 }

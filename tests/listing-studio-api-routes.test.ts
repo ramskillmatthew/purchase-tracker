@@ -452,7 +452,7 @@ describe("app/api/listing-studio/workspace/route.ts — GET (fetches the Create 
   });
 
   it("Milestone 4: selects every structured/generated listing field the Create view needs to render a listing card", () => {
-    for (const column of ["brand", "model", "product_type", "colour", "uk_size", "sku", "generated_title", "generated_description"]) {
+    for (const column of ["brand", "model", "product_type", "colours", "material", "uk_size", "sku", "generated_title", "generated_description"]) {
       expect(getFn).toContain(column);
     }
   });
@@ -562,7 +562,7 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
     const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
     const patchBlock = source.slice(patchStart, source.indexOf("await supabaseRequest(\"listing_analysis_runs\"", patchStart));
     expect(patchBlock).not.toContain(".catch(() => {})"); // the real write is never best-effort
-    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: finalUkSize", "uk_size_source: finalUkSizeSource", "sku: structuredFields.sku", "source_size_system: fields.sourceSize.system", "source_size_value: fields.sourceSize.value", "source_size_gender: fields.sourceSize.gender", "condition: LISTING_CONDITION_TEXT", "generated_title: generatedTitle", "generated_description: generatedDescription", 'status: "ready"', "ai_result_json: fields"]) {
+    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colours: structuredFields.colours", "material: structuredFields.material", "uk_size: finalUkSize", "uk_size_source: finalUkSizeSource", "sku: structuredFields.sku", "source_size_system: fields.sourceSize.system", "source_size_value: fields.sourceSize.value", "source_size_gender: fields.sourceSize.gender", "condition: LISTING_CONDITION_TEXT", "generated_title: generatedTitle", "generated_description: generatedDescription", 'status: "ready"', "ai_result_json: fields"]) {
       expect(patchBlock).toContain(field);
     }
   });
@@ -592,7 +592,7 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
 
   it("returns the persisted structured fields and both generated fields to the client", () => {
     const responseBlock = source.slice(source.lastIndexOf("return NextResponse.json({"), source.length);
-    for (const field of ["brand:", "model:", "productType:", "colour:", "ukSize:", "sku:", "generatedTitle,", "generatedDescription,"]) {
+    for (const field of ["brand:", "model:", "productType:", "colours:", "material:", "ukSize:", "sku:", "generatedTitle,", "generatedDescription,"]) {
       expect(responseBlock).toContain(field);
     }
   });
@@ -602,7 +602,7 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
   });
 });
 
-describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 4: 'Edit fields' — no AI call, ever", () => {
+describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 4: 'Edit fields' — no photo-analysis AI call, ever", () => {
   const source = read("app/api/listing-studio/groups/[draftId]/fields/route.ts");
 
   it("requires the owner, validates the group id and request body strictly", () => {
@@ -611,8 +611,15 @@ describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 
     expect(source).toContain("updateListingFieldsRequestSchema.parse(await request.json())");
   });
 
-  it("REGRESSION: never imports or calls anything AI-related — this is a pure database-and-template operation", () => {
-    expect(source).not.toMatch(/anthropic|Anthropic|runListingGenerationAnalysis|prepareListingGenerationImageInputs/);
+  it("REGRESSION: never imports or calls the photo-analysis/generation AI, and title/description are still always template-derived, never AI-authored", () => {
+    expect(source).not.toMatch(/runListingGenerationAnalysis|prepareListingGenerationImageInputs/);
+    expect(source).toContain("generateListingTitle(structuredFields)");
+    expect(source).toContain("generateListingDescription(structuredFields)");
+  });
+
+  it("Follow-up correction (2026-08-04): MAY trigger the bounded, text-only category-selection AI step, but ONLY when the audience actually changed — never on every save", () => {
+    expect(source).toContain("import { resolveVintedCategoryAssignment");
+    expect(source).toContain("if (audienceChanged) {");
   });
 
   it("normalizes an empty/whitespace-only field to null — never stores a blank string as a 'set' value", () => {
@@ -626,7 +633,7 @@ describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 
     const patchBlock = source.slice(patchStart, source.indexOf("return NextResponse.json({", patchStart));
     expect(source).toContain("generateListingTitle(structuredFields)");
     expect(source).toContain("generateListingDescription(structuredFields)");
-    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colour: structuredFields.colour", "uk_size: structuredFields.ukSize", "sku: structuredFields.sku", "generated_title: generatedTitle", "generated_description: generatedDescription"]) {
+    for (const field of ["brand: structuredFields.brand", "model: structuredFields.model", "product_type: structuredFields.productType", "colours: structuredFields.colours", "material: structuredFields.material", "uk_size: structuredFields.ukSize", "sku: structuredFields.sku", "generated_title: generatedTitle", "generated_description: generatedDescription"]) {
       expect(patchBlock).toContain(field);
     }
   });

@@ -16,7 +16,11 @@ export type GeneratedListingSummary = {
   brand: string | null;
   model: string | null;
   productType: string | null;
-  colour: string | null;
+  // Milestone 6 (Vinted-aware colours/materials): up to 2 exact Vinted
+  // colour-list values (never free text) plus a single exact Vinted
+  // material-list value or null.
+  colours: string[];
+  material: string | null;
   ukSize: string | null;
   sku: string | null;
   generatedTitle: string;
@@ -153,6 +157,10 @@ function ProductGroupCard({
     {listing && <div className="listing-card">
       <p className="listing-card-title">{listing.generatedTitle}</p>
       <p className="listing-card-description">{listing.generatedDescription}</p>
+      {(listing.colours.length > 0 || listing.material) && <p className="listing-card-meta">
+        {listing.colours.length > 0 && <span className="listing-card-meta-item">{listing.colours.join(" & ")}</span>}
+        {listing.material && <span className="listing-card-meta-item">{listing.material}</span>}
+      </p>}
       <div className="listing-card-actions">
         <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview listing</button>
         <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>

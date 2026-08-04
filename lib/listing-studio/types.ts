@@ -100,14 +100,19 @@ export type ListingDraft = {
   condition: string | null;
   sizeLabel: string | null;
   // Milestone 4 (AI listing generation) — see lib/listing-studio/listing-template.ts.
-  // `productType`/`colour`/`ukSize` are the structured fields the AI
-  // returns (alongside the reused `brand`/`model`/`sku` above);
+  // `productType`/`colours`/`material`/`ukSize` are the structured fields
+  // the AI returns (alongside the reused `brand`/`model`/`sku` above);
   // `generatedTitle`/`generatedDescription` are the application-derived
   // marketplace listing text, deliberately separate from `title`/
   // `description` above (which remain this group's own editable display
   // name — unrelated to the generated listing).
   productType: string | null;
-  colour: string | null;
+  // Milestone 6 (Vinted-aware colours/materials): up to 2 exact Vinted
+  // colour-list values (never free text) — see
+  // lib/listing-studio/listing-generation-schemas.ts's VINTED_COLOURS.
+  colours: string[];
+  // Milestone 6: a single exact Vinted material-list value, or null.
+  material: string | null;
   ukSize: string | null;
   // Milestone 4 sizing correction — see lib/listing-studio/size-conversion.ts.
   // The AI never converts a size itself; it only ever reports the system
@@ -125,6 +130,15 @@ export type ListingDraft = {
   // 'manual' | null (see lib/listing-studio/size-conversion.ts's
   // UkSizeProvenance). Internal bookkeeping only, never shown in the UI.
   ukSizeSource: string | null;
+  // Milestone 7 (Vinted category catalogue sync). vintedCategoryId is the
+  // one publishing-relevant value — always a real, currently-synced
+  // vinted_categories.id or null, never free text (see
+  // lib/listing-studio/vinted-catalogue.ts's own top comment). vintedCategoryPath
+  // is a display-only cached copy of that category's full_path at the time
+  // it was chosen (AI or manual) — never itself re-parsed back into an id.
+  vintedCategoryId: number | null;
+  vintedCategoryPath: string | null;
+  vintedCategorySource: "ai" | "manual" | null;
   generatedTitle: string | null;
   generatedDescription: string | null;
   suggestedPricePence: number | null;
@@ -154,7 +168,15 @@ export type ListingDraftImage = {
   createdAt: string;
 };
 
-export const listingAnalysisStages = ["image_quality", "label_extraction", "visual_identification", "consistency_check", "generation", "product_grouping"] as const;
+// "category_selection" (Milestone 7): a separate, bounded, text-only AI
+// step run after "generation" that picks a Vinted category id from a
+// small candidate list — see lib/listing-studio/vinted-category-selection-ai.ts.
+// "audience_reassessment" (2026-08-05 follow-up correction): a separate,
+// bounded step that re-determines vintedAudience (+ evidence) for an
+// already-generated draft, either from stored text alone (cheap) or by
+// re-examining stored photos with a narrow audience-only tool (explicit
+// action, real cost) — see lib/listing-studio/vinted-audience-reassessment-ai.ts.
+export const listingAnalysisStages = ["image_quality", "label_extraction", "visual_identification", "consistency_check", "generation", "product_grouping", "category_selection", "audience_reassessment"] as const;
 export type ListingAnalysisStage = typeof listingAnalysisStages[number];
 
 export const listingAnalysisRunStatuses = ["running", "success", "failed"] as const;

@@ -28,8 +28,12 @@ const validToolInput = {
   brand: { value: "On", confidence: "high" },
   model: { value: "Cloudmonster", confidence: "high" },
   productType: { value: "Running Trainers", confidence: "high" },
-  colour: { value: "White & Blue", confidence: "medium" },
+  colours: { value: ["White", "Blue"], confidence: "medium" },
+  material: { value: "Mesh", confidence: "medium" },
   sourceSize: { system: "UK", value: "10.5", gender: null, confidence: "high" },
+  // Follow-up correction (2026-08-04, extended 2026-08-05).
+  vintedAudience: { value: "unisex", confidence: "medium" },
+  vintedAudienceEvidence: ["Item design has no gendered distinction"],
   sku: { value: "1648", confidence: "high" },
   notes: null,
 };
@@ -120,8 +124,13 @@ describe("runListingGenerationAnalysis — genuine runtime path (mocked Anthropi
   it("every field may legitimately be null (nothing confidently identified) and still succeeds", async () => {
     const allBlank = {
       brand: { value: null, confidence: "low" }, model: { value: null, confidence: "low" },
-      productType: { value: null, confidence: "low" }, colour: { value: null, confidence: "low" },
-      sourceSize: { system: null, value: null, gender: null, confidence: "low" }, sku: { value: null, confidence: "low" },
+      productType: { value: null, confidence: "low" }, colours: { value: [], confidence: "low" }, material: { value: null, confidence: "low" },
+      sourceSize: { system: null, value: null, gender: null, confidence: "low" },
+      // Follow-up correction (2026-08-04): "unknown" (never null) is
+      // vintedAudience's own honest "genuinely uncertain" value.
+      vintedAudience: { value: "unknown", confidence: "low" },
+      vintedAudienceEvidence: [],
+      sku: { value: null, confidence: "low" },
       notes: "Item too obscured to identify confidently.",
     };
     mockCreate.mockResolvedValue({ content: [{ type: "tool_use", name: "propose_listing_fields", input: allBlank }] });

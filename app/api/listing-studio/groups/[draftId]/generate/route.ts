@@ -12,13 +12,21 @@ import { generateListingTitle, generateListingDescription, LISTING_CONDITION_TEX
 import { deriveUkSizeFromSource } from "@/lib/listing-studio/size-conversion";
 import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
+import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason } from "@/lib/listing-studio/vinted-category-assignment";
+import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const UNSORTED_TITLE = "Unsorted";
 
-type DraftRow = { id: string; title: string | null; uk_size: string | null; uk_size_source: string | null };
+type DraftRow = {
+  id: string; title: string | null; uk_size: string | null; uk_size_source: string | null;
+  vinted_category_id: number | null; vinted_category_path: string | null; vinted_category_source: "ai" | "manual" | null;
+  vinted_category_status: string | null;
+  vinted_audience: string | null; vinted_audience_source: "ai" | "manual" | null;
+};
+type CategoryRunOutcome = { status: "success" | "failed"; errorMessage: string | null; responseJson: unknown };
 type ImageRow = { id: string; storage_path: string; mime_type: string };
 
 /**
@@ -44,7 +52,9 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
     const { draftId } = await params;
     if (!uuidSchema.safeParse(draftId).success) return NextResponse.json({ error: "Invalid group id." }, { status: 400 });
 
-    const drafts = await supabaseRequestAll<DraftRow>(`listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source`);
+    const drafts = await supabaseRequestAll<DraftRow>(
+      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source`,
+    );
     const draft = drafts[0];
     if (!draft) return NextResponse.json({ error: "Group not found." }, { status: 404 });
     if (draft.title === UNSORTED_TITLE) return NextResponse.json({ error: "Cannot generate a listing for the Unsorted group." }, { status: 400 });
@@ -105,10 +115,55 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
 
     const structuredFields: GeneratedListingFields = {
       brand: fields.brand.value, model: fields.model.value, productType: fields.productType.value,
-      colour: fields.colour.value, ukSize: finalUkSize, sku: fields.sku.value,
+      colours: fields.colours.value, material: fields.material.value, ukSize: finalUkSize, sku: fields.sku.value,
     };
     const generatedTitle = generateListingTitle(structuredFields);
     const generatedDescription = generateListingDescription(structuredFields);
+
+    // Follow-up correction (2026-08-04): audience now comes from the AI's
+    // own independent vintedAudience field, never sourceSize.gender — see
+    // listing-generation-schemas.ts's own comment on exactly why. Run only
+    // if this draft's category isn't already a manual choice (never
+    // silently overwritten by regeneration — same rule as finalUkSize
+    // above). resolveVintedCategoryAssignment is deterministic-first (a
+    // single unambiguous match needs no AI call at all) and never throws;
+    // only a genuinely SUCCESSFUL, validated outcome ever changes the
+    // stored category — any other outcome leaves it exactly as it was, so
+    // a bad/failed attempt can never destroy a previously good one.
+    // A manually-corrected audience (Edit Fields) is just as sticky as a
+    // manually-chosen category — never silently overwritten by a later
+    // regenerate with a fresh (possibly still wrong) AI guess.
+    const finalVintedAudience = draft.vinted_audience_source === "manual" ? draft.vinted_audience : fields.vintedAudience.value;
+    const finalVintedAudienceSource: "ai" | "manual" = draft.vinted_audience_source === "manual" ? "manual" : "ai";
+    // Follow-up correction (2026-08-05): the factual evidence backing an
+    // AI-determined audience — null whenever the audience is a manual
+    // pick (a manual choice has no AI evidence, and showing stale AI
+    // evidence next to it would be misleading).
+    const finalVintedAudienceEvidence = finalVintedAudienceSource === "manual" ? null : fields.vintedAudienceEvidence;
+
+    let categoryId = draft.vinted_category_id;
+    let categoryPath = draft.vinted_category_path;
+    let categorySource = draft.vinted_category_source;
+    let categoryStatus = draft.vinted_category_status;
+    let categoryRunOutcome: CategoryRunOutcome | null = null;
+    let categoryAiCostLog: { model: string | null; inputTokens: number | null; outputTokens: number | null; candidateCount: number; status: "success" | "failed" } | null = null;
+
+    if (draft.vinted_category_source !== "manual") {
+      const { result, aiCost } = await resolveVintedCategoryAssignment({
+        vintedAudience: finalVintedAudience as "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null, productType: structuredFields.productType,
+        brand: structuredFields.brand, model: structuredFields.model,
+      });
+      categoryStatus = result.reason;
+      categoryAiCostLog = aiCost;
+      if (result.reason === "category_assigned") {
+        categoryId = result.categoryId;
+        categoryPath = result.categoryPath;
+        categorySource = "ai";
+        categoryRunOutcome = { status: "success", errorMessage: null, responseJson: { vintedCategoryId: result.categoryId, method: result.method } };
+      } else {
+        categoryRunOutcome = { status: "failed", errorMessage: describeVintedCategoryAssignmentReason(result.reason), responseJson: { reason: result.reason } };
+      }
+    }
 
     // The structured fields + derived title/description are the real,
     // load-bearing write — never swallowed on failure (unlike the audit
@@ -118,9 +173,11 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
       method: "PATCH", headers: { Prefer: "return=minimal" },
       body: JSON.stringify({
         brand: structuredFields.brand, model: structuredFields.model, product_type: structuredFields.productType,
-        colour: structuredFields.colour, uk_size: finalUkSize, uk_size_source: finalUkSizeSource, sku: structuredFields.sku,
+        colours: structuredFields.colours, material: structuredFields.material, uk_size: finalUkSize, uk_size_source: finalUkSizeSource, sku: structuredFields.sku,
         source_size_system: fields.sourceSize.system, source_size_value: fields.sourceSize.value,
         source_size_gender: fields.sourceSize.gender,
+        vinted_audience: finalVintedAudience, vinted_audience_source: finalVintedAudienceSource, vinted_audience_evidence: finalVintedAudienceEvidence,
+        vinted_category_id: categoryId, vinted_category_path: categoryPath, vinted_category_source: categorySource, vinted_category_status: categoryStatus,
         condition: LISTING_CONDITION_TEXT,
         generated_title: generatedTitle, generated_description: generatedDescription,
         status: "ready", ai_result_json: fields, updated_at: completedAt,
@@ -136,12 +193,44 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
       }),
     }).catch(() => {});
 
+    if (categoryRunOutcome) {
+      await supabaseRequest("listing_analysis_runs", {
+        method: "POST", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          draft_id: draftId, owner_id: user.id, stage: "category_selection", status: categoryRunOutcome.status,
+          model, prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
+          response_json: categoryRunOutcome.responseJson, error_message: categoryRunOutcome.errorMessage,
+          started_at: completedAt, completed_at: new Date().toISOString(),
+        }),
+      }).catch(() => {});
+    }
+
+    // Milestone 7 follow-up (cost tracking) — only ever recorded when the
+    // bounded category-selection AI call was ACTUALLY made (never for a
+    // deterministic single-candidate match, which needed no AI call at
+    // all) — see supabase-listing-studio.sql's vinted_category_selection_ai_calls.
+    if (categoryAiCostLog) {
+      await supabaseRequest("vinted_category_selection_ai_calls", {
+        method: "POST", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          draft_id: draftId, owner_id: user.id, model: categoryAiCostLog.model,
+          input_tokens: categoryAiCostLog.inputTokens, output_tokens: categoryAiCostLog.outputTokens,
+          prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
+          candidate_count: categoryAiCostLog.candidateCount,
+          estimated_cost_usd: estimateAnthropicCostUsd(categoryAiCostLog.model, categoryAiCostLog.inputTokens, categoryAiCostLog.outputTokens),
+          status: categoryAiCostLog.status,
+        }),
+      }).catch(() => {});
+    }
+
     return NextResponse.json({
       draftId,
       brand: structuredFields.brand, model: structuredFields.model, productType: structuredFields.productType,
-      colour: structuredFields.colour, ukSize: structuredFields.ukSize, sku: structuredFields.sku,
+      colours: structuredFields.colours, material: structuredFields.material, ukSize: structuredFields.ukSize, sku: structuredFields.sku,
       condition: LISTING_CONDITION_TEXT,
       generatedTitle, generatedDescription, status: "ready",
+      vintedAudience: finalVintedAudience, vintedAudienceSource: finalVintedAudienceSource, vintedAudienceEvidence: finalVintedAudienceEvidence,
+      vintedCategoryId: categoryId, vintedCategoryPath: categoryPath, vintedCategorySource: categorySource, vintedCategoryStatus: categoryStatus,
     });
   } catch (error) { return safeApiError(error, "Could not generate this listing."); }
 }

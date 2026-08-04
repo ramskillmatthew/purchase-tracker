@@ -132,6 +132,23 @@ authenticated;
 alter table public.listing_drafts add column if not exists product_type text;
 alter table public.listing_drafts add column if not exists colour text;
 alter table public.listing_drafts add column if not exists uk_size text;
+
+-- Milestone 6 (Vinted-aware colours/materials): `colour` above was a
+-- single free-text field ("Cream & Grey & Tan") — Vinted only accepts a
+-- value from its own fixed colour list (lib/listing-studio/listing-generation-schemas.ts's
+-- VINTED_COLOURS), and allows at most two per listing. `colour` (singular,
+-- free text) is no longer written by the app at all, superseded by
+-- `colours` below (a Postgres array of up to two exact Vinted colour-list
+-- values). The old column is deliberately left in place, not dropped —
+-- so any already-generated listing's prior value isn't destroyed — it
+-- simply stops being read or written going forward.
+alter table public.listing_drafts add column if not exists colours text[];
+
+-- Milestone 6: the single primary material, restricted to Vinted's exact
+-- material list (VINTED_MATERIALS, same file) — null whenever it can't be
+-- confidently identified, never invented. A genuinely new field: no prior
+-- material column existed to supersede.
+alter table public.listing_drafts add column if not exists material text;
 alter table public.listing_drafts add column if not exists generated_title text;
 alter table public.listing_drafts add column if not exists generated_description text;
 
@@ -161,6 +178,290 @@ alter table public.listing_drafts add column if not exists source_size_gender te
 -- later regeneration and the manual-entry protection above can tell these
 -- apart without re-deriving anything.
 alter table public.listing_drafts add column if not exists uk_size_source text;
+
+-- Milestone 5 (Listings Review workspace). The review status shown in the
+-- UI (Ready/Needs Review/Edited) is otherwise computed entirely from data
+-- that already exists (missing required fields -> Needs Review; current
+-- field values differing from the frozen ai_result_json snapshot, or
+-- uk_size_source = 'manual' -> Edited; lib/listing-studio/listing-review.ts
+-- is the single source of truth for that logic) — genuinely no schema
+-- change was needed for either of those. This ONE column exists only for
+-- the explicit "Mark Ready" action: a user confirming an Edited listing is
+-- fine as-is. Null until first marked ready; a later edit (which bumps
+-- updated_at past this timestamp) makes the listing show as Edited again
+-- without needing to clear this column — see isListingEdited's own comment.
+alter table public.listing_drafts add column if not exists review_marked_ready_at timestamptz;
+
+
+-- ============================================================================
+-- Milestone 7 (Vinted category catalogue sync).
+--
+-- Source: Vinted UK's own authenticated "Sell an item" (Create Listing)
+-- page, which loads its real category tree from
+--   GET https://www.vinted.co.uk/api/v2/item_upload/catalogs
+-- Verified/accessed: 2026-08-03. This is NOT a documented public API — it
+-- is a live endpoint observed from Vinted's own web app, and may change,
+-- start requiring authentication, or be rate-limited/blocked at any time.
+-- Confirmed live from this project's own environment during this
+-- milestone: a direct unauthenticated request returned HTTP 403 with a
+-- Cloudflare "Please wait" JS-challenge page (text/html, not JSON) — see
+-- lib/listing-studio/vinted-catalogue-client.ts's own comment and this
+-- milestone's completion report for the exact finding. Every piece of
+-- code that talks to this endpoint is written to fail safely and never
+-- destroy the last known-good catalogue when that happens.
+--
+-- Categories are never deleted once seen — only marked inactive
+-- (is_active = false) — so a historical draft's chosen category always
+-- stays joinable/readable even after a later refresh removes it from
+-- Vinted's live tree. Not owner-scoped (no owner_id, no per-row RLS
+-- policy beyond the blanket revoke below): this is shared reference data
+-- for the single Vinted UK catalogue, not per-user content, matching how
+-- e.g. a lookup/reference table would be modelled if this app had
+-- multiple owners — every access still goes through a requireOwner()-gated
+-- route using the service-role key, same as every other table here.
+create table if not exists public.vinted_categories (
+  -- Vinted's own real numeric category id — the stable external
+  -- identifier, never one this app invents.
+  id bigint primary key
+    check (id > 0),
+
+  code text,
+  label text not null,
+
+  -- "Men > Shoes > Sports shoes > Running" — root-to-here, " > "-separated,
+  -- built once during flattening (lib/listing-studio/vinted-catalogue.ts)
+  -- from each node's own supplied `path` + `title`.
+  full_path text not null,
+
+  parent_id bigint
+    references public.vinted_categories (id)
+    on delete set null
+    deferrable initially deferred,
+  root_id bigint not null,
+  depth integer not null
+    check (depth >= 0),
+  sort_order integer not null default 0,
+
+  is_leaf boolean not null default false,
+  -- Whether this category can actually be chosen as a listing's final
+  -- publishing category. Verified 2026-08-03 directly against the live
+  -- Create Listing UI (leaf rows expose a radio control and enable Save;
+  -- parent rows only navigate to their children and expose no selection
+  -- control) — is_leaf is a reliable proxy for selectability, not merely
+  -- the documented assumption this started as.
+  is_selectable boolean not null default false,
+  is_active boolean not null default true,
+
+  -- Normalised helpers, derived only from verified root ids/codes/ancestry
+  -- (lib/listing-studio/vinted-catalogue.ts) — never guessed from
+  -- arbitrary English words. `id` + `full_path` above remain authoritative;
+  -- these exist purely to narrow AI category-candidate searches.
+  audience text
+    check (audience is null or audience in ('mens', 'womens', 'kids', 'unisex')),
+  item_family text
+    check (item_family is null or item_family in ('footwear', 'clothing', 'accessories', 'home', 'electronics', 'entertainment', 'sports', 'collectables', 'other')),
+
+  vinted_url text,
+
+  -- Vinted field-visibility metadata, normalised to a real boolean
+  -- regardless of whether Vinted's response represented a given flag as
+  -- 0/1 or true/false (both were observed in the one verified example
+  -- response) — see the transformer's own comment.
+  color_field_visibility boolean,
+  size_field_visibility boolean,
+  measurements_field_visibility boolean,
+  brand_field_visibility boolean,
+
+  -- The node as returned by Vinted (minus its nested `catalogs`, which is
+  -- flattened into separate rows instead) — forward compatibility, so a
+  -- later field becomes usable without needing a new migration first.
+  raw_json jsonb,
+
+  source_endpoint text not null,
+  source_market text not null default 'vinted_uk',
+  -- Which exact refresh (see vinted_category_sync_status.fingerprint)
+  -- last touched this row.
+  source_fingerprint text,
+
+  -- Follow-up correction (2026-08-03): the live endpoint above returned a
+  -- Cloudflare challenge page in every test performed against it (see
+  -- lib/listing-studio/vinted-catalogue-client.ts's own comment) — the
+  -- ONLY genuine full catalogue actually obtained so far was a verified
+  -- snapshot exported from Vinted UK's own signed-in Create Listing page
+  -- (`https://www.vinted.co.uk/items/new`, embedded `catalogTree`), never
+  -- the live_endpoint path. source_type records which one produced this
+  -- row; captured_at is when the browser session captured it (snapshot
+  -- only, null for a live refresh); imported_at is when THIS application
+  -- actually applied it, always set.
+  source_type text not null default 'live_endpoint'
+    check (source_type in ('live_endpoint', 'verified_browser_snapshot')),
+  captured_at timestamptz,
+  imported_at timestamptz,
+
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  last_updated_at timestamptz not null default now()
+);
+
+-- Safe on an already-existing install from before this correction — a
+-- fresh install's create table above already has these columns.
+alter table public.vinted_categories add column if not exists source_type text not null default 'live_endpoint';
+alter table public.vinted_categories drop constraint if exists vinted_categories_source_type_check;
+alter table public.vinted_categories add constraint vinted_categories_source_type_check
+  check (source_type in ('live_endpoint', 'verified_browser_snapshot'));
+alter table public.vinted_categories add column if not exists captured_at timestamptz;
+alter table public.vinted_categories add column if not exists imported_at timestamptz;
+
+create index if not exists vinted_categories_parent_idx on public.vinted_categories (parent_id);
+create index if not exists vinted_categories_root_idx on public.vinted_categories (root_id);
+create index if not exists vinted_categories_active_selectable_idx on public.vinted_categories (source_market, is_active, is_selectable);
+create index if not exists vinted_categories_audience_family_idx on public.vinted_categories (audience, item_family) where is_active;
+
+alter table public.vinted_categories enable row level security;
+revoke all on public.vinted_categories from anon, authenticated;
+
+-- One row per market (currently just 'vinted_uk') — always the LATEST
+-- attempt's outcome, success or failure. A failed attempt updates
+-- last_attempted_at/last_status/last_error but leaves last_succeeded_at
+-- and the counts exactly as they were after the last SUCCESSFUL refresh —
+-- this row never has to be reconciled against vinted_categories itself to
+-- know whether the last attempt actually changed anything.
+create table if not exists public.vinted_category_sync_status (
+  source_market text primary key,
+  source_endpoint text not null,
+  last_attempted_at timestamptz,
+  last_succeeded_at timestamptz,
+  last_status text
+    check (last_status is null or last_status in ('success', 'failed', 'rejected_shrinkage', 'rejected_invalid_response')),
+  last_error text,
+  fetched_count integer,
+  active_count integer,
+  fingerprint text,
+  duration_ms integer,
+  -- Follow-up correction (2026-08-03) — see vinted_categories.source_type's
+  -- own comment. Records which path produced the LAST successful import,
+  -- so the Settings UI can show "Current source: verified browser
+  -- snapshot (captured 2026-08-03)" honestly instead of always claiming
+  -- the live endpoint.
+  last_source_type text
+    check (last_source_type is null or last_source_type in ('live_endpoint', 'verified_browser_snapshot')),
+  last_captured_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.vinted_category_sync_status add column if not exists last_source_type text;
+alter table public.vinted_category_sync_status drop constraint if exists vinted_category_sync_status_last_source_type_check;
+alter table public.vinted_category_sync_status add constraint vinted_category_sync_status_last_source_type_check
+  check (last_source_type is null or last_source_type in ('live_endpoint', 'verified_browser_snapshot'));
+alter table public.vinted_category_sync_status add column if not exists last_captured_at timestamptz;
+
+alter table public.vinted_category_sync_status enable row level security;
+revoke all on public.vinted_category_sync_status from anon, authenticated;
+
+-- Milestone 7 follow-up (AI category-selection cost tracking) — one row
+-- per bounded category-selection AI call actually made (never when
+-- deterministic filtering already produced one unambiguous candidate —
+-- see lib/listing-studio/vinted-category-selection.ts). Append-only; lets
+-- the owner see how often the extra call is needed and its running cost.
+create table if not exists public.vinted_category_selection_ai_calls (
+  id uuid primary key default gen_random_uuid(),
+  draft_id uuid not null
+    references public.listing_drafts (id)
+    on delete cascade,
+  owner_id uuid not null,
+  model text,
+  input_tokens integer,
+  output_tokens integer,
+  prompt_version text not null,
+  schema_version text not null,
+  candidate_count integer not null
+    check (candidate_count >= 0),
+  estimated_cost_usd numeric(10, 6),
+  status text not null
+    check (status in ('success', 'failed')),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists vinted_category_selection_ai_calls_draft_idx
+  on public.vinted_category_selection_ai_calls (draft_id, created_at desc);
+
+alter table public.vinted_category_selection_ai_calls enable row level security;
+revoke all on public.vinted_category_selection_ai_calls from anon, authenticated;
+
+-- Follow-up correction (2026-08-05): this table now also logs the new
+-- audience-reassessment AI calls (text-only, automatic; photo-based, the
+-- explicit "Reassess audience" action) alongside the original
+-- category-selection calls — one shared cost-tracking table rather than
+-- three near-identical ones. call_type distinguishes which kind of call
+-- produced a row; candidate_count only ever applies to category_selection
+-- rows, so it's relaxed to nullable here.
+alter table public.vinted_category_selection_ai_calls add column if not exists call_type text not null default 'category_selection';
+alter table public.vinted_category_selection_ai_calls drop constraint if exists vinted_category_selection_ai_calls_call_type_check;
+alter table public.vinted_category_selection_ai_calls add constraint vinted_category_selection_ai_calls_call_type_check
+  check (call_type in ('category_selection', 'audience_reassessment_text', 'audience_reassessment_photo'));
+alter table public.vinted_category_selection_ai_calls alter column candidate_count drop not null;
+
+-- A listing's chosen Vinted publishing category — never free text, always
+-- a real numeric id from vinted_categories above. The FK uses ON DELETE
+-- SET NULL purely as a defensive fallback for a deletion that should never
+-- actually happen in normal operation (categories are only ever
+-- deactivated, never deleted) — never a mechanism this app relies on. A
+-- category later becoming inactive does NOT clear these columns: the
+-- draft still remembers what was picked; Listings Review is what decides
+-- an inactive/unknown/non-selectable category means "Needs Review" again
+-- (see lib/listing-studio/listing-review.ts).
+alter table public.listing_drafts add column if not exists vinted_category_id bigint
+  references public.vinted_categories (id) on delete set null;
+alter table public.listing_drafts add column if not exists vinted_category_path text;
+alter table public.listing_drafts add column if not exists vinted_category_source text
+  check (vinted_category_source is null or vinted_category_source in ('ai', 'manual'));
+
+-- Follow-up correction (2026-08-04): a real bug traced Vinted category
+-- assignment silently failing whenever sourceSize.gender (a size-scale
+-- signal, very often null for footwear) was used as the sole audience
+-- source — see lib/listing-studio/listing-generation-schemas.ts's own
+-- comment on vintedAudience. vinted_audience is now the persisted,
+-- independently-AI-determined (or manually chosen) source of truth for
+-- which Vinted marketplace audience this listing belongs under.
+-- vinted_category_status records WHY automatic category selection landed
+-- where it did (or didn't) — never a raw database/Anthropic error, always
+-- one of a fixed, safe set the UI translates into an actionable message
+-- (see lib/listing-studio/vinted-category-assignment.ts).
+alter table public.listing_drafts add column if not exists vinted_audience text;
+alter table public.listing_drafts drop constraint if exists listing_drafts_vinted_audience_check;
+alter table public.listing_drafts add constraint listing_drafts_vinted_audience_check
+  check (vinted_audience is null or vinted_audience in ('mens', 'womens', 'boys', 'girls', 'unisex', 'unknown'));
+
+-- Mirrors vinted_category_source's own sticky-once-manual pattern exactly
+-- (and uk_size_source before it): once the owner manually picks an
+-- audience via Edit Fields, a later "Generate Listings" regenerate must
+-- never silently overwrite that correction with a fresh (possibly still
+-- wrong) AI guess.
+alter table public.listing_drafts add column if not exists vinted_audience_source text;
+alter table public.listing_drafts drop constraint if exists listing_drafts_vinted_audience_source_check;
+alter table public.listing_drafts add constraint listing_drafts_vinted_audience_source_check
+  check (vinted_audience_source is null or vinted_audience_source in ('ai', 'manual'));
+
+-- Follow-up correction (2026-08-05): the short factual evidence
+-- statements (e.g. "Model identified as the men's version") that
+-- justified the current vinted_audience value — persisted for debugging/
+-- audit always, but only ever SURFACED in the UI when the audience still
+-- needs manual review (see lib/listing-studio/listing-review.ts). Cleared
+-- whenever the owner manually sets an audience via Edit Fields — a manual
+-- pick has no AI evidence behind it, and stale AI evidence next to a
+-- manually-overridden value would be misleading.
+alter table public.listing_drafts add column if not exists vinted_audience_evidence jsonb;
+
+alter table public.listing_drafts add column if not exists vinted_category_status text;
+alter table public.listing_drafts drop constraint if exists listing_drafts_vinted_category_status_check;
+alter table public.listing_drafts add constraint listing_drafts_vinted_category_status_check
+  check (
+    vinted_category_status is null
+    or vinted_category_status in (
+      'audience_missing', 'item_family_uncertain', 'no_candidates', 'too_many_candidates',
+      'ai_selection_failed', 'ai_selection_invalid', 'category_assigned'
+    )
+  );
 
 
 create table if not exists public.listing_draft_images (
@@ -243,6 +544,11 @@ create table if not exists public.listing_analysis_runs (
     on delete cascade,
   owner_id uuid not null,
 
+  -- Kept as the COMPLETE, current stage list (not just what existed when
+  -- this table was first created) — see the single widening ALTER block
+  -- below for why: on a brand-new install this inline check is never
+  -- superseded by anything narrower, so it must already be correct on its
+  -- own rather than relying on later ALTERs to fill in missing values.
   stage text not null
     check (
       stage in (
@@ -251,7 +557,9 @@ create table if not exists public.listing_analysis_runs (
         'visual_identification',
         'consistency_check',
         'generation',
-        'product_grouping'
+        'product_grouping',
+        'category_selection',
+        'audience_reassessment'
       )
     ),
 
@@ -295,14 +603,33 @@ on public.listing_analysis_runs
 from anon,
 authenticated;
 
--- Milestone 3 (automatic AI product grouping): widens the `stage` check
--- constraint on an already-deployed database, since `create table if not
--- exists` above only affects a brand-new install — an existing table's
--- constraint must be explicitly replaced to accept the new
--- 'product_grouping' value. Safe to re-run: drops the constraint only if
--- it currently exists, under whatever name Postgres auto-assigned it
--- ("<table>_<column>_check" is Postgres's own default naming for an inline
--- column check), then recreates it with the widened list.
+-- Widens the `stage` check constraint on an already-deployed database,
+-- since `create table if not exists` above only affects a brand-new
+-- install — an existing table's constraint must be explicitly replaced to
+-- accept a new stage value. Stages were added over several milestones:
+-- 'product_grouping' (Milestone 3, automatic AI product grouping),
+-- 'category_selection' (Milestone 7, Vinted category catalogue sync — see
+-- lib/listing-studio/vinted-category-selection-ai.ts, a bounded text-only
+-- call made after 'generation' that picks a Vinted category id from a
+-- small candidate list), and 'audience_reassessment' (follow-up
+-- correction 2026-08-05 — see
+-- lib/listing-studio/vinted-audience-reassessment-ai.ts, which
+-- re-determines vintedAudience alone for an already-generated draft,
+-- either from stored text or by re-examining stored photos via the
+-- explicit "Reassess audience" action).
+--
+-- Deliberately kept as exactly ONE drop+add, listing every stage this
+-- table has EVER accepted (not just the stage introduced by the most
+-- recent change): this whole file is a single flat script that gets
+-- rerun in full against an already-populated database, never applied as
+-- one-shot numbered migrations. A `check` constraint validates every
+-- existing row the instant it's added — so a version of this block that
+-- lists only "what's new" (omitting a stage older rows already use, e.g.
+-- an early version of this block omitted 'category_selection') fails the
+-- ADD CONSTRAINT outright on any database that already has rows using
+-- that older stage. Keeping a single block with the full cumulative list
+-- is the only form that is safe to rerun regardless of history or row
+-- data. Never split this back into sequential narrower blocks.
 alter table public.listing_analysis_runs drop constraint if exists listing_analysis_runs_stage_check;
 alter table public.listing_analysis_runs add constraint listing_analysis_runs_stage_check
   check (
@@ -312,7 +639,9 @@ alter table public.listing_analysis_runs add constraint listing_analysis_runs_st
       'visual_identification',
       'consistency_check',
       'generation',
-      'product_grouping'
+      'product_grouping',
+      'category_selection',
+      'audience_reassessment'
     )
   );
 
@@ -867,6 +1196,216 @@ begin
 end;
 $$;
 
+-- Milestone 7 (Vinted category catalogue sync) — applies one fetched,
+-- flattened, already-Zod-validated catalogue snapshot atomically. A
+-- concurrent refresh for the same market fails fast
+-- (pg_try_advisory_xact_lock — never queues/blocks, since two interleaved
+-- refreshes could otherwise corrupt each other's created/updated/
+-- deactivated counts), an implausible catalogue shrinkage is refused
+-- outright unless explicitly forced, and every category from the new
+-- snapshot is upserted while any category missing from it is marked
+-- inactive rather than deleted — all inside one transaction, so a failure
+-- partway through never leaves a half-applied catalogue and the previous
+-- snapshot remains exactly as it was. p_categories is a JSON array of
+-- flattened category objects (see lib/listing-studio/vinted-catalogue.ts's
+-- FlattenedVintedCategory shape); this function re-validates ids and
+-- duplicates defensively even though the caller already validated them,
+-- exactly like every other RPC in this file re-verifies ownership/
+-- membership regardless of what the client already checked. Safe to
+-- retry: re-applying the identical snapshot again produces
+-- created_count=0, updated_count=0, unchanged_count=total.
+-- Follow-up correction (2026-08-03): widens this function's signature with
+-- two new trailing (defaulted) params, p_source_type/p_captured_at — see
+-- vinted_categories.source_type's own comment. Postgres identifies a
+-- function by name+argument-TYPES, so `create or replace` on a widened
+-- parameter list creates a second overload rather than replacing an
+-- already-installed 6-arg version; the explicit drop below removes that
+-- old signature first so re-running this file always leaves exactly one
+-- version installed, regardless of which one (if any) was run before.
+drop function if exists public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean);
+
+create or replace function public.vinted_categories_apply_refresh(
+  p_source_market text,
+  p_source_endpoint text,
+  p_categories jsonb,
+  p_fingerprint text,
+  p_duration_ms integer default null,
+  p_force boolean default false,
+  p_source_type text default 'live_endpoint',
+  p_captured_at timestamptz default null
+)
+returns table(
+  fetched_count integer, active_count integer, created_count integer, updated_count integer,
+  unchanged_count integer, deactivated_count integer, leaf_count integer, selectable_count integer,
+  fingerprint text, refreshed_at timestamptz
+)
+language plpgsql
+as $$
+declare
+  v_lock_key bigint;
+  v_new_count integer;
+  v_current_active_count integer;
+  v_created integer;
+  v_updated integer;
+  v_deactivated integer;
+  v_active_count integer;
+  v_leaf_count integer;
+  v_selectable_count integer;
+  v_now timestamptz := now();
+begin
+  if p_source_market is null or trim(p_source_market) = '' then
+    raise exception 'INVALID_SOURCE_MARKET' using errcode = 'P0001';
+  end if;
+
+  if p_categories is null or jsonb_typeof(p_categories) <> 'array' then
+    raise exception 'INVALID_CATEGORIES_PAYLOAD' using errcode = 'P0002';
+  end if;
+
+  if p_source_type not in ('live_endpoint', 'verified_browser_snapshot') then
+    raise exception 'INVALID_SOURCE_TYPE' using errcode = 'P0008';
+  end if;
+
+  v_new_count := jsonb_array_length(p_categories);
+  if v_new_count = 0 then
+    raise exception 'EMPTY_CATALOGUE_REJECTED' using errcode = 'P0003';
+  end if;
+
+  v_lock_key := ('x' || substr(md5('vinted_categories_refresh:' || p_source_market), 1, 15))::bit(60)::bigint;
+  if not pg_try_advisory_xact_lock(v_lock_key) then
+    raise exception 'REFRESH_ALREADY_IN_PROGRESS' using errcode = 'P0004';
+  end if;
+
+  create temporary table tmp_vinted_categories on commit drop as
+  select
+    (elem ->> 'id')::bigint as id,
+    elem ->> 'code' as code,
+    elem ->> 'label' as label,
+    elem ->> 'full_path' as full_path,
+    nullif(elem ->> 'parent_id', '')::bigint as parent_id,
+    (elem ->> 'root_id')::bigint as root_id,
+    (elem ->> 'depth')::integer as depth,
+    (elem ->> 'sort_order')::integer as sort_order,
+    (elem ->> 'is_leaf')::boolean as is_leaf,
+    (elem ->> 'is_selectable')::boolean as is_selectable,
+    elem ->> 'audience' as audience,
+    elem ->> 'item_family' as item_family,
+    elem ->> 'vinted_url' as vinted_url,
+    (elem ->> 'color_field_visibility')::boolean as color_field_visibility,
+    (elem ->> 'size_field_visibility')::boolean as size_field_visibility,
+    (elem ->> 'measurements_field_visibility')::boolean as measurements_field_visibility,
+    (elem ->> 'brand_field_visibility')::boolean as brand_field_visibility,
+    elem -> 'raw_json' as raw_json
+  from jsonb_array_elements(p_categories) as elem;
+
+  if exists (select 1 from tmp_vinted_categories where id is null or id <= 0) then
+    raise exception 'INVALID_CATEGORY_ID' using errcode = 'P0005';
+  end if;
+
+  if exists (select 1 from (select id from tmp_vinted_categories group by id having count(*) > 1) dup) then
+    raise exception 'DUPLICATE_CATEGORY_ID_IN_PAYLOAD' using errcode = 'P0006';
+  end if;
+
+  select count(*) into v_current_active_count
+  from public.vinted_categories
+  where source_market = p_source_market and is_active;
+
+  -- Suspicious-shrinkage guard: refuse to activate a refresh that would
+  -- lose more than half of an already-substantial catalogue, unless
+  -- explicitly forced (p_force) — see this function's own top comment.
+  if not p_force and v_current_active_count > 20 and v_new_count < ceil(v_current_active_count * 0.5) then
+    raise exception 'SUSPICIOUS_CATALOGUE_SHRINKAGE' using errcode = 'P0007',
+      detail = format('new fetched count %s vs current active count %s for market %s', v_new_count, v_current_active_count, p_source_market);
+  end if;
+
+  select count(*) into v_created
+  from tmp_vinted_categories t
+  where not exists (select 1 from public.vinted_categories v where v.id = t.id);
+
+  select count(*) into v_updated
+  from tmp_vinted_categories t
+  join public.vinted_categories v on v.id = t.id
+  where v.label is distinct from t.label
+     or v.full_path is distinct from t.full_path
+     or v.parent_id is distinct from t.parent_id
+     or v.root_id is distinct from t.root_id
+     or v.depth is distinct from t.depth
+     or v.sort_order is distinct from t.sort_order
+     or v.is_leaf is distinct from t.is_leaf
+     or v.is_selectable is distinct from t.is_selectable
+     or v.is_active is distinct from true
+     or v.audience is distinct from t.audience
+     or v.item_family is distinct from t.item_family
+     or v.vinted_url is distinct from t.vinted_url;
+
+  insert into public.vinted_categories (
+    id, code, label, full_path, parent_id, root_id, depth, sort_order,
+    is_leaf, is_selectable, is_active, audience, item_family, vinted_url,
+    color_field_visibility, size_field_visibility, measurements_field_visibility, brand_field_visibility,
+    raw_json, source_endpoint, source_market, source_fingerprint, source_type, captured_at, imported_at,
+    first_seen_at, last_seen_at, last_updated_at
+  )
+  select
+    t.id, t.code, t.label, t.full_path, t.parent_id, t.root_id, t.depth, t.sort_order,
+    t.is_leaf, t.is_selectable, true, t.audience, t.item_family, t.vinted_url,
+    t.color_field_visibility, t.size_field_visibility, t.measurements_field_visibility, t.brand_field_visibility,
+    t.raw_json, p_source_endpoint, p_source_market, p_fingerprint, p_source_type, p_captured_at, v_now,
+    v_now, v_now, v_now
+  from tmp_vinted_categories t
+  on conflict (id) do update set
+    code = excluded.code, label = excluded.label, full_path = excluded.full_path,
+    parent_id = excluded.parent_id, root_id = excluded.root_id, depth = excluded.depth, sort_order = excluded.sort_order,
+    is_leaf = excluded.is_leaf, is_selectable = excluded.is_selectable, is_active = true,
+    audience = excluded.audience, item_family = excluded.item_family, vinted_url = excluded.vinted_url,
+    color_field_visibility = excluded.color_field_visibility, size_field_visibility = excluded.size_field_visibility,
+    measurements_field_visibility = excluded.measurements_field_visibility, brand_field_visibility = excluded.brand_field_visibility,
+    raw_json = excluded.raw_json, source_endpoint = excluded.source_endpoint, source_market = excluded.source_market,
+    source_fingerprint = excluded.source_fingerprint, source_type = excluded.source_type,
+    captured_at = excluded.captured_at, imported_at = excluded.imported_at,
+    last_seen_at = v_now, last_updated_at = v_now;
+
+  -- Never deleted — a category missing from this refresh is marked
+  -- inactive so any draft that already chose it keeps a joinable,
+  -- readable reference (see this table's own top comment).
+  with deactivated as (
+    update public.vinted_categories v
+    set is_active = false, last_updated_at = v_now
+    where v.source_market = p_source_market
+      and v.is_active = true
+      and not exists (select 1 from tmp_vinted_categories t where t.id = v.id)
+    returning 1
+  )
+  select count(*) into v_deactivated from deactivated;
+
+  select count(*) into v_active_count from public.vinted_categories where source_market = p_source_market and is_active;
+  select count(*) into v_leaf_count from public.vinted_categories where source_market = p_source_market and is_active and is_leaf;
+  select count(*) into v_selectable_count from public.vinted_categories where source_market = p_source_market and is_active and is_selectable;
+
+  insert into public.vinted_category_sync_status (
+    source_market, source_endpoint, last_attempted_at, last_succeeded_at, last_status, last_error,
+    fetched_count, active_count, fingerprint, duration_ms, last_source_type, last_captured_at, updated_at
+  )
+  values (p_source_market, p_source_endpoint, v_now, v_now, 'success', null, v_new_count, v_active_count, p_fingerprint, p_duration_ms, p_source_type, p_captured_at, v_now)
+  on conflict (source_market) do update set
+    source_endpoint = excluded.source_endpoint, last_attempted_at = excluded.last_attempted_at,
+    last_succeeded_at = excluded.last_succeeded_at, last_status = excluded.last_status, last_error = null,
+    fetched_count = excluded.fetched_count, active_count = excluded.active_count,
+    fingerprint = excluded.fingerprint, duration_ms = excluded.duration_ms,
+    last_source_type = excluded.last_source_type, last_captured_at = excluded.last_captured_at, updated_at = v_now;
+
+  fetched_count := v_new_count;
+  active_count := v_active_count;
+  created_count := v_created;
+  updated_count := v_updated;
+  unchanged_count := v_new_count - v_created - v_updated;
+  deactivated_count := v_deactivated;
+  leaf_count := v_leaf_count;
+  selectable_count := v_selectable_count;
+  fingerprint := p_fingerprint;
+  refreshed_at := v_now;
+  return next;
+end;
+$$;
+
 -- Matches the existing function-access pattern (supabase-purchase-import-v2.sql):
 -- the application only ever calls these via the service-role key, which is
 -- unaffected by these revokes. anon/authenticated are explicitly denied
@@ -878,6 +1417,7 @@ revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from
 revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from public;
 revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from public;
 revoke all on function public.listing_studio_clear_workspace(uuid) from public;
+revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from public;
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
     revoke all on function public.listing_studio_move_images(uuid, uuid[], uuid) from anon;
@@ -887,6 +1427,7 @@ do $$ begin
     revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from anon;
     revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from anon;
     revoke all on function public.listing_studio_clear_workspace(uuid) from anon;
+    revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from anon;
   end if;
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
     revoke all on function public.listing_studio_move_images(uuid, uuid[], uuid) from authenticated;
@@ -896,5 +1437,6 @@ do $$ begin
     revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from authenticated;
     revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from authenticated;
     revoke all on function public.listing_studio_clear_workspace(uuid) from authenticated;
+    revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from authenticated;
   end if;
 end $$;

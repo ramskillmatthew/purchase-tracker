@@ -23,8 +23,15 @@ type WorkspaceDraft = {
   // Milestone 4 (AI listing generation) — see ProductGroupCard.tsx's
   // GeneratedListingSummary for why generated_title/generated_description
   // are distinct from `title` above.
-  brand: string | null; model: string | null; product_type: string | null; colour: string | null;
+  // Milestone 6 (Vinted-aware colours/materials): colours/material replace
+  // the old free-text colour column.
+  brand: string | null; model: string | null; product_type: string | null; colours: string[] | null; material: string | null;
   uk_size: string | null; sku: string | null; generated_title: string | null; generated_description: string | null;
+  // Milestone 7 (Vinted category catalogue sync).
+  vinted_category_id: number | null; vinted_category_path: string | null; vinted_category_source: "ai" | "manual" | null;
+  vinted_category_status: string | null;
+  // Follow-up correction (2026-08-04).
+  vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
 };
 type WorkspaceImage = {
   id: string; draft_id: string; original_filename: string; mime_type: string; file_size: number;
@@ -38,8 +45,10 @@ type WorkspaceData = { drafts: WorkspaceDraft[]; images: WorkspaceImage[] };
 // appended draft object right after creation, before the next
 // loadWorkspace() call replaces it with the server's own copy.
 const BLANK_LISTING_FIELDS = {
-  brand: null, model: null, product_type: null, colour: null,
+  brand: null, model: null, product_type: null, colours: null, material: null,
   uk_size: null, sku: null, generated_title: null, generated_description: null,
+  vinted_category_id: null, vinted_category_path: null, vinted_category_source: null, vinted_category_status: null,
+  vinted_audience: null,
 } as const;
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -877,15 +886,19 @@ export default function GroupingWorkspace() {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           brand: fields.brand || null, model: fields.model || null, productType: fields.productType || null,
-          colour: fields.colour || null, ukSize: fields.ukSize || null, sku: fields.sku || null,
+          colours: fields.colours, material: fields.material || null, ukSize: fields.ukSize || null, sku: fields.sku || null,
+          vintedAudience: fields.vintedAudience, vintedCategoryId: fields.vintedCategoryId,
         }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) { setEditFieldsError(body.error || "Could not save these fields."); return; }
       setDrafts(current => current.map(draft => draft.id === draftId ? {
         ...draft,
-        brand: body.brand, model: body.model, product_type: body.productType, colour: body.colour,
+        brand: body.brand, model: body.model, product_type: body.productType, colours: body.colours, material: body.material,
         uk_size: body.ukSize, sku: body.sku, generated_title: body.generatedTitle, generated_description: body.generatedDescription,
+        vinted_audience: body.vintedAudience,
+        vinted_category_id: body.vintedCategoryId, vinted_category_path: body.vintedCategoryPath, vinted_category_source: body.vintedCategorySource,
+        vinted_category_status: body.vintedCategoryStatus,
       } : draft));
       setEditFieldsGroupId(null);
     } catch {
@@ -955,7 +968,7 @@ export default function GroupingWorkspace() {
     const map = new Map<string, GeneratedListingSummary | null>();
     for (const draft of drafts) {
       map.set(draft.id, draft.generated_title && draft.generated_description ? {
-        brand: draft.brand, model: draft.model, productType: draft.product_type, colour: draft.colour,
+        brand: draft.brand, model: draft.model, productType: draft.product_type, colours: draft.colours ?? [], material: draft.material,
         ukSize: draft.uk_size, sku: draft.sku, generatedTitle: draft.generated_title, generatedDescription: draft.generated_description,
       } : null);
     }
@@ -1176,7 +1189,9 @@ export default function GroupingWorkspace() {
       groupTitle={editFieldsTarget.title || "this group"}
       fields={{
         brand: editFieldsTarget.brand ?? "", model: editFieldsTarget.model ?? "", productType: editFieldsTarget.product_type ?? "",
-        colour: editFieldsTarget.colour ?? "", ukSize: editFieldsTarget.uk_size ?? "", sku: editFieldsTarget.sku ?? "",
+        colours: editFieldsTarget.colours ?? [], material: editFieldsTarget.material ?? "", ukSize: editFieldsTarget.uk_size ?? "", sku: editFieldsTarget.sku ?? "",
+        vintedAudience: editFieldsTarget.vinted_audience ?? "unknown",
+        vintedCategoryId: editFieldsTarget.vinted_category_id, vintedCategoryPath: editFieldsTarget.vinted_category_path,
       }}
       loading={savingListingFields}
       error={editFieldsError}
