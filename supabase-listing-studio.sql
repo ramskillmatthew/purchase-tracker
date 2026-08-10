@@ -463,6 +463,23 @@ alter table public.listing_drafts add constraint listing_drafts_vinted_category_
     )
   );
 
+-- Milestone 7 (revised) — Vinted Draft Export. Three separate, independent
+-- nullable timestamps/ids — deliberately NOT a single status enum column
+-- — mirroring review_marked_ready_at's own "nullable timestamp = did this
+-- happen, and when" convention exactly. These three states are genuinely
+-- independent facts about a listing, not a linear progression a single
+-- enum could represent: a listing can be re-exported any number of times
+-- (vinted_exported_at/vinted_export_id simply get overwritten with the
+-- latest export's own values every time — re-export is always allowed,
+-- never blocked), while vinted_draft_created_at is reserved entirely for a
+-- SEPARATE, future milestone that actually confirms a Vinted draft exists
+-- — nothing in this export feature ever sets it. Exporting a ZIP package
+-- is not the same claim as "a Vinted draft was created", and these columns
+-- keep that distinction real in the data, not just in UI wording.
+alter table public.listing_drafts add column if not exists vinted_exported_at timestamptz;
+alter table public.listing_drafts add column if not exists vinted_export_id text;
+alter table public.listing_drafts add column if not exists vinted_draft_created_at timestamptz;
+
 
 create table if not exists public.listing_draft_images (
   id uuid primary key default gen_random_uuid(),
@@ -1440,3 +1457,107 @@ do $$ begin
     revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from authenticated;
   end if;
 end $$;
+
+-- Milestone 7 (Chrome extension draft queue) — a completely separate,
+-- clean implementation from the (never-committed-to-this-repo) old
+-- extension work; see the app-side lib/routes for the full flow. This app
+-- never talks to Vinted itself and the extension never talks to Supabase
+-- directly — every extension request goes through this app's own API
+-- routes (using the SAME service-role access every other route already
+-- uses), so no new direct-database exposure is introduced at all.
+--
+-- Two tables: one batch (the pairing/claim/expiry envelope) and its
+-- ordered items (one per selected listing, up to 5). The pairing SECRET
+-- itself is never stored — only a keyed HMAC-SHA256 hash of it
+-- (pairing_code_hash), matching this app's existing "never store a raw
+-- credential, hash or sign with a server-only secret" convention (see
+-- lib/yahoo/tokens.ts's EMAIL_ID_SECRET-keyed JWT signing, which the
+-- restricted batch token issued after a successful claim also reuses).
+create table if not exists public.vinted_extension_batches (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null,
+
+  -- HMAC-SHA256(pairing code, EXTENSION_BATCH_SECRET), hex — never the
+  -- plaintext code. Looked up by exact match on claim; the code itself
+  -- carries enough entropy (see lib/listing-studio/extension-pairing-code.ts)
+  -- that this is a safe single lookup, not a per-row compare loop.
+  pairing_code_hash text not null,
+
+  status text not null default 'pending_claim'
+    check (status in ('pending_claim', 'claimed', 'in_progress', 'completed', 'expired', 'cancelled')),
+
+  listing_count integer not null
+    check (listing_count between 1 and 5),
+
+  created_at timestamptz not null default now(),
+  claimed_at timestamptz,
+  expires_at timestamptz not null,
+  completed_at timestamptz,
+
+  -- Self-reported by the claiming extension (chrome.runtime.id / its own
+  -- manifest version) — informational only for support/diagnosis, never
+  -- trusted as an authorization check.
+  extension_id text,
+  extension_version text
+);
+
+-- One lookup per claim attempt, by hash — never a table scan.
+create unique index if not exists vinted_extension_batches_pairing_code_hash_idx
+  on public.vinted_extension_batches (pairing_code_hash);
+create index if not exists vinted_extension_batches_owner_idx
+  on public.vinted_extension_batches (owner_id, created_at desc);
+
+alter table public.vinted_extension_batches enable row level security;
+revoke all on public.vinted_extension_batches from anon, authenticated;
+
+create table if not exists public.vinted_extension_batch_items (
+  id uuid primary key default gen_random_uuid(),
+  batch_id uuid not null
+    references public.vinted_extension_batches (id)
+    on delete cascade,
+  draft_id uuid not null
+    references public.listing_drafts (id)
+    on delete cascade,
+
+  -- 0-indexed processing order within this batch — always the same order
+  -- the owner selected/the app validated in, never re-sorted by the
+  -- extension itself.
+  queue_position integer not null,
+
+  status text not null default 'queued'
+    check (status in ('queued', 'preparing', 'filling', 'saving', 'completed', 'failed', 'paused', 'cancelled')),
+
+  -- Bumped on every real attempt (a fresh Save Draft try) — the extension
+  -- checks this alongside status before retrying, so a page reload/service-
+  -- worker restart can never silently re-save an item that's already
+  -- mid-flight or already completed (duplicate-draft protection).
+  attempt_count integer not null default 0,
+
+  error_code text,
+  error_message text,
+
+  -- Only ever set once Vinted itself has confirmed a draft exists (a real
+  -- id/reference read back from Vinted's own result) — never guessed,
+  -- never set merely because a save action was clicked.
+  vinted_draft_id text,
+
+  started_at timestamptz,
+  completed_at timestamptz,
+
+  unique (batch_id, draft_id),
+  unique (batch_id, queue_position)
+);
+
+create index if not exists vinted_extension_batch_items_batch_idx
+  on public.vinted_extension_batch_items (batch_id, queue_position);
+
+alter table public.vinted_extension_batch_items enable row level security;
+revoke all on public.vinted_extension_batch_items from anon, authenticated;
+
+-- Milestone 7 (Chrome extension draft queue) follow-up: vinted_draft_created_at
+-- (added by the ZIP-export migration above, alongside vinted_exported_at/
+-- vinted_export_id) is set for the FIRST time by this feature, and only
+-- ever from the extension's own result-reporting route, and only once
+-- Vinted has authoritatively confirmed the draft — never during export
+-- (export never sets it — see that section's own comment) and never
+-- merely because a batch item's status reached 'saving'.

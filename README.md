@@ -54,8 +54,10 @@ Copy `.env.example` to `.env.local` and fill values locally:
 | `ANTHROPIC_API_KEY` | Anthropic key, server-only |
 | `ANTHROPIC_MODEL` | Configurable Anthropic model ID |
 | `EMAIL_ID_SECRET` | Random secret of at least 32 characters used for short-lived opaque message IDs |
+| `EXTENSION_BATCH_SECRET` | Random secret of at least 32 characters — hashes pairing codes and signs the Chrome extension's restricted batch tokens (see `vinted-draft-queue-extension/README.md`) |
+| `EXTENSION_ORIGIN` | `chrome-extension://<extension id>` — the one origin allowed to call `/api/extension/*`. Fixed at `chrome-extension://ocohhcppeflfggaicbpgmjbmekgbkjcl` by the extension's own pinned manifest key |
 
-Generate `EMAIL_ID_SECRET` with a cryptographically secure password generator. Do not reuse another credential.
+Generate `EMAIL_ID_SECRET`/`EXTENSION_BATCH_SECRET` with a cryptographically secure password generator. Do not reuse another credential.
 
 ## Local development and tests
 
@@ -85,3 +87,7 @@ Run the Supabase migration manually before using connection tests, search, or sy
 5. Explicitly confirm. Database uniqueness constraints prevent repeated candidate, order-reference, or conservative fingerprint imports.
 
 Large historical ranges may need narrower date windows because each serverless request intentionally processes a bounded page. General Yahoo search is temporary and does not create Vinted candidates or purchases.
+
+## Chrome extension (Vinted Draft Queue)
+
+From Listings Review, up to 5 Ready listings can be sent to a companion Chrome extension (`vinted-draft-queue-extension/`), which fills Vinted's own Create Listing form and saves each item as a Vinted draft — it never publishes. See that folder's own `README.md` for installation, architecture, and the required `EXTENSION_BATCH_SECRET`/`EXTENSION_ORIGIN` setup. Run `npm run validate:extension` after any change to the extension's files.

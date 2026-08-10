@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Vinted Draft Queue</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="header">
+    <h1>Vinted Draft Queue</h1>
+    <p class="safety-label" role="note">Drafts only — never publishes</p>
+  </header>
+
+  <section id="settings" class="section">
+    <label class="field-label" for="app-base-url">App URL</label>
+    <input id="app-base-url" class="text-input" type="text" placeholder="http://localhost:3000" />
+    <button id="save-settings" class="button-secondary" type="button">Save</button>
+  </section>
+
+  <section id="pairing" class="section">
+    <h2>1. Pair with the app</h2>
+    <p id="pairing-status" class="muted">Not paired yet.</p>
+    <label class="field-label" for="pairing-code">Pairing code from Listings Review</label>
+    <input id="pairing-code" class="text-input" type="text" autocomplete="off" maxlength="8" placeholder="ABCD1234" />
+    <button id="claim-button" class="button-primary" type="button">Claim batch</button>
+    <p id="pairing-error" class="error" role="alert" hidden></p>
+  </section>
+
+  <section id="account" class="section" hidden>
+    <h2>2. Confirm Vinted account</h2>
+    <div id="account-pending" hidden>
+      <p>Detected account: <strong id="account-name">—</strong></p>
+      <p class="muted">Make sure this is the account you want to save drafts to.</p>
+      <button id="confirm-account" class="button-primary" type="button">Confirm this account</button>
+    </div>
+    <div id="account-confirmed-box" hidden>
+      <p class="muted">Confirmed account: <strong id="account-confirmed-name">—</strong></p>
+    </div>
+    <div id="account-error-box" role="alert" hidden>
+      <p class="error" id="account-error-message"></p>
+      <button id="retry-account-detection" class="button-secondary" type="button">Retry detection</button>
+    </div>
+  </section>
+
+  <section id="account-change-banner" class="banner" role="alert" hidden>
+    <p><strong>Vinted account changed.</strong></p>
+    <p>Was: <span id="account-old"></span> — now: <span id="account-new"></span></p>
+    <p>Processing is paused before the next listing. Confirm to continue with the new account.</p>
+    <button id="confirm-account-change" class="button-primary" type="button">Confirm and resume</button>
+  </section>
+
+  <section id="vinted-tab-lost-banner" class="banner" role="alert" hidden>
+    <p><strong>Vinted tab lost.</strong></p>
+    <p id="vinted-tab-lost-message"></p>
+    <p class="muted">Reopen the Create Listing page, then use Resume below.</p>
+  </section>
+
+  <section id="batch" class="section" hidden>
+    <h2>3. Batch</h2>
+    <p>Batch <code id="batch-id"></code></p>
+    <p id="progress-summary" class="progress-summary"></p>
+    <div class="controls">
+      <button id="start-button" class="button-primary" type="button">Start batch</button>
+      <button id="pause-button" class="button-secondary" type="button" hidden>Pause</button>
+      <button id="resume-button" class="button-secondary" type="button" hidden>Resume</button>
+      <button id="cancel-button" class="button-danger" type="button">Cancel remaining</button>
+      <button id="clear-button" class="button-secondary" type="button">Clear completed batch</button>
+    </div>
+    <ol id="queue-list" class="queue-list"></ol>
+  </section>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

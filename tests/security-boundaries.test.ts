@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest"; import { readFileSync } from "node:fs"; import { globSync } from "node:fs";
 const read=(path:string)=>readFileSync(path,"utf8");
 describe("server security boundaries",()=>{
-  it("protects every API route with owner authorization, except the cron route which has no user session",()=>{const routes=globSync("app/api/**/route.ts").filter(route=>!route.replace(/\\/g,"/").endsWith("app/api/cron/yahoo-index/route.ts"));expect(routes.length).toBeGreaterThan(10);for(const route of routes)expect(read(route),route).toContain("requireOwner");});
+  it("protects every API route with owner authorization, except the cron route (no user session) and the Milestone 7 /api/extension/* routes (the Chrome extension has no Supabase session — see the dedicated test below for their own auth model)",()=>{const routes=globSync("app/api/**/route.ts").filter(route=>{const normalised=route.replace(/\\/g,"/");return normalised!=="app/api/cron/yahoo-index/route.ts"&&!normalised.startsWith("app/api/extension/");});expect(routes.length).toBeGreaterThan(10);for(const route of routes)expect(read(route),route).toContain("requireOwner");});
   it("authorizes the cron sync route with a bearer secret instead of a user session",()=>{const source=read("app/api/cron/yahoo-index/route.ts");expect(source).toContain("CRON_SECRET");expect(source).toContain("Bearer ${secret}");expect(source).not.toContain("requireOwner");});
+  it("Milestone 7 (Chrome extension draft queue): every /api/extension/* route uses the batch-scoped bearer token (or, for claim alone, a rate-limited single-use pairing code) instead of requireOwner — none of them accept an owner session at all, and none imports requireOwner",()=>{
+    const routes=globSync("app/api/extension/**/route.ts");
+    expect(routes.length).toBeGreaterThanOrEqual(4);
+    for(const route of routes){
+      const source=read(route);
+      expect(source,route).not.toContain("requireOwner");
+      const isClaimRoute=route.replace(/\\/g,"/").endsWith("app/api/extension/claim/route.ts");
+      if(isClaimRoute) expect(source,route).toContain("enforceRateLimit");
+      else expect(source,route).toContain("verifyBatchToken");
+    }
+  });
   it("opens Yahoo mail read-only and always releases locks/connections",()=>{const source=read("lib/yahoo/client.ts");expect(source).toContain("readOnly: true");expect(source).toContain("finally");expect(source).not.toMatch(/\.messageDelete|\.messageMove|\.messageFlagsAdd|\.append\(/);});
   it("counts and deduplicates matching email identifiers before any per-message verification",()=>{const source=read("lib/yahoo/client.ts");const counter=source.slice(source.indexOf("export async function countYahoo"),source.indexOf("export type YahooMetadata"));expect(counter).toContain("countQueries(criteria)");expect(counter).toContain("new Set<number>()");});
   it("verifies a typed count against real sanitized subject+body content, not subject alone, and skips body fetches entirely for an untyped count",()=>{const source=read("lib/yahoo/client.ts");const counter=source.slice(source.indexOf("export async function countYahoo"),source.indexOf("export type YahooMetadata"));expect(counter).toContain("matchesLifecycleEvidence(expected, content)");expect(counter).toContain('source: { maxLength: 80_000 }');expect(counter).toMatch(/if \(expected === "other"\) count \+= matched\.size;/);});

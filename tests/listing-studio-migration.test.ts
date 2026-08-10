@@ -13,9 +13,13 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
 
   it("every table uses owner_id uuid, matching the app's single-owner convention (not user_id)", () => {
     // 4 core tables + vinted_category_selection_ai_calls (Milestone 7
-    // follow-up, AI cost tracking — also owner_id-scoped).
+    // follow-up, AI cost tracking — also owner_id-scoped) +
+    // vinted_extension_batches (Milestone 7, Chrome extension draft
+    // queue — also owner_id-scoped; vinted_extension_batch_items is
+    // deliberately NOT owner_id-scoped itself, since ownership is already
+    // established via its batch_id -> vinted_extension_batches -> owner_id chain).
     const ownerIdCount = migration.match(/owner_id uuid not null/g) ?? [];
-    expect(ownerIdCount.length).toBe(5);
+    expect(ownerIdCount.length).toBe(6);
   });
 
   it("every table enables RLS with no policies, matching every RLS-enabled table in this repo, and revokes anon/authenticated access as defence in depth", () => {
@@ -26,11 +30,56 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     expect(migration).not.toContain("create policy");
   });
 
+  describe("Milestone 7 (Chrome extension draft queue) — vinted_extension_batches / vinted_extension_batch_items", () => {
+    it("creates both tables idempotently", () => {
+      expect(migration).toContain("create table if not exists public.vinted_extension_batches");
+      expect(migration).toContain("create table if not exists public.vinted_extension_batch_items");
+    });
+
+    it("enables RLS with no new policies and revokes anon/authenticated, matching this file's newer (single-line) convention (see vinted_categories)", () => {
+      for (const table of ["vinted_extension_batches", "vinted_extension_batch_items"]) {
+        expect(migration).toContain(`alter table public.${table} enable row level security;`);
+        expect(migration).toContain(`revoke all on public.${table} from anon, authenticated;`);
+      }
+    });
+
+    it("never stores the plaintext pairing secret — only pairing_code_hash", () => {
+      const tableSource = migration.slice(migration.indexOf("create table if not exists public.vinted_extension_batches"), migration.indexOf("create unique index if not exists vinted_extension_batches_pairing_code_hash_idx"));
+      expect(tableSource).toContain("pairing_code_hash text not null");
+      // No column literally named/typed to hold the raw code — only its hash.
+      expect(tableSource).not.toMatch(/\bpairing_code\s+text/);
+    });
+
+    it("batch status and item status are both constrained to a fixed set", () => {
+      expect(migration).toMatch(/status in \('pending_claim', 'claimed', 'in_progress', 'completed', 'expired', 'cancelled'\)/);
+      expect(migration).toMatch(/status in \('queued', 'preparing', 'filling', 'saving', 'completed', 'failed', 'paused', 'cancelled'\)/);
+    });
+
+    it("listing_count is bounded to at most 5", () => {
+      expect(migration).toMatch(/listing_count integer not null\s*\n\s*check \(listing_count between 1 and 5\)/);
+    });
+
+    it("batch_items has a unique constraint per (batch_id, draft_id) and per (batch_id, queue_position) — never a duplicate item or position within one batch", () => {
+      const tableSource = migration.slice(migration.indexOf("create table if not exists public.vinted_extension_batch_items"), migration.indexOf("create index if not exists vinted_extension_batch_items_batch_idx"));
+      expect(tableSource).toContain("unique (batch_id, draft_id)");
+      expect(tableSource).toContain("unique (batch_id, queue_position)");
+    });
+
+    it("REGRESSION: vinted_draft_created_at (preserved from the ZIP-export migration) is never set by this section — only a future result-reporting route may set it, after Vinted itself confirms a draft exists", () => {
+      const section = migration.slice(migration.indexOf("Milestone 7 (Chrome extension draft queue) — a completely separate"));
+      expect(section).not.toMatch(/vinted_draft_created_at\s*=/);
+    });
+  });
+
   it("listing_draft_images, listing_analysis_runs, and listing_status_history all cascade-delete when their draft is deleted", () => {
     // 3 core tables + vinted_category_selection_ai_calls (Milestone 7
-    // follow-up — also cascade-deletes with its draft).
+    // follow-up — also cascade-deletes with its draft) +
+    // vinted_extension_batch_items (Milestone 7, Chrome extension draft
+    // queue — also cascade-deletes with its draft; vinted_extension_batches
+    // itself references listing_drafts nowhere, only owner_id, so it's not
+    // counted here).
     const cascadeCount = migration.match(/references public\.listing_drafts \(id\)\s*\n\s*on delete cascade/g) ?? [];
-    expect(cascadeCount.length).toBe(4);
+    expect(cascadeCount.length).toBe(5);
   });
 
   it("the status check constraint on listing_drafts matches lib/listing-studio/types.ts's listingDraftStatuses exactly", () => {

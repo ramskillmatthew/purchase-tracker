@@ -14,6 +14,22 @@ import {
 } from "@/lib/listing-studio/listing-review";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 import type { SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
+import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-export-schema";
+import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
+
+type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
+
+type ExtensionBatchItemStatusRow = {
+  itemId: string; draftId: string; queuePosition: number; status: string; attemptCount: number;
+  errorCode: string | null; errorMessage: string | null; vintedDraftId: string | null;
+  startedAt: string | null; completedAt: string | null; generatedTitle: string | null; sku: string | null;
+};
+type ExtensionBatchStatus = {
+  batchId: string; status: string; listingCount: number;
+  createdAt: string; claimedAt: string | null; expiresAt: string; completedAt: string | null;
+  extensionId: string | null; extensionVersion: string | null;
+  items: ExtensionBatchItemStatusRow[];
+};
 
 type ReviewDraftRow = {
   id: string; created_at: string; updated_at: string;
@@ -99,6 +115,34 @@ export default function ListingsReviewWorkspace() {
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
   const [assigningCategoryId, setAssigningCategoryId] = useState<string | null>(null);
   const [reassessingAudienceId, setReassessingAudienceId] = useState<string | null>(null);
+
+  // Milestone 7 (revised) — Vinted Draft Export. Exporting produces a ZIP
+  // package for manual/assistant-driven transfer into Vinted; it never
+  // talks to Vinted itself. exportStep gives the user a truthful sense of
+  // progress across the ONE request/response round trip this makes (the
+  // server itself does validate -> download/convert photos -> build the
+  // ZIP in that order, but there is no server-sent granular progress
+  // channel, so these labels track this client's own request lifecycle
+  // rather than claiming false precision about server-side sub-steps).
+  const [exportRunning, setExportRunning] = useState(false);
+  const [exportStep, setExportStep] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exportRejected, setExportRejected] = useState<RejectedExportListing[]>([]);
+
+  // Milestone 7 (Chrome extension draft queue) — "Send to Chrome
+  // extension" creates a short-lived, single-use pairing batch server-side
+  // (app/api/listing-studio/extension-batches/route.ts) and then polls its
+  // status (a separate, owner-authenticated endpoint — never the bearer-
+  // token one the extension itself uses) so this panel shows live
+  // progress without the app ever talking to Vinted or the extension
+  // directly. activeBatchId is the only thing that needs to survive a
+  // re-render; everything else is re-derived from the latest poll.
+  const [sendToExtensionRunning, setSendToExtensionRunning] = useState(false);
+  const [sendToExtensionError, setSendToExtensionError] = useState("");
+  const [sendToExtensionRejected, setSendToExtensionRejected] = useState<RejectedExportListing[]>([]);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [batchStatus, setBatchStatus] = useState<ExtensionBatchStatus | null>(null);
 
   const loadListings = useCallback(async () => {
     try {
@@ -372,6 +416,141 @@ export default function ListingsReviewWorkspace() {
     setBulkActionRunning(false);
   }
 
+  // Milestone 7 (revised) — "Save to Vinted drafts" is now "Export": builds
+  // a ZIP of one or more selected Ready listings (photos + structured
+  // data) for a human, or another assistant driving a real logged-in
+  // browser, to manually transfer into Vinted and save as a Vinted draft
+  // themselves. This never publishes, lists, or uploads anything, and
+  // never talks to Vinted at all — see app/api/listing-studio/listings-review/export/route.ts's
+  // own top comment. The current selection is deliberately NEVER cleared
+  // on failure (only on a genuine successful download) so the user can
+  // fix/deselect the reported listing(s) and retry without re-picking
+  // everything else.
+  async function handleExport() {
+    const ids = [...bulkSelectedIds];
+    if (!ids.length || exportRunning) return;
+    if (ids.length > MAX_EXPORT_LISTINGS_PER_BATCH) {
+      setExportError(`Select at most ${MAX_EXPORT_LISTINGS_PER_BATCH} listings to export at once (${ids.length} selected).`);
+      setExportRejected([]);
+      return;
+    }
+    setExportRunning(true);
+    setExportError("");
+    setExportRejected([]);
+    setExportStep("Validating listings…");
+    try {
+      setExportStep("Preparing photos and creating package…");
+      const response = await fetch("/api/listing-studio/listings-review/export", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setExportError(body.error || "Could not export these listings.");
+        setExportRejected(Array.isArray(body.rejected) ? body.rejected : []);
+        return;
+      }
+
+      setExportStep("Downloading…");
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") ?? "";
+      const fileName = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "vinted-drafts.zip";
+
+      // Standard client-side "trigger a file save" pattern — an anchor
+      // with a blob object URL, clicked programmatically then discarded.
+      // The server response IS the ZIP bytes already fully generated; this
+      // only hands them to the browser's own download mechanism.
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+
+      setBulkActionMessage(`Exported ${ids.length} listing${ids.length === 1 ? "" : "s"} to ${fileName}.`);
+      setBulkSelectedIds(new Set());
+    } catch {
+      setExportError("Network error — could not export these listings. Your selection has been kept.");
+    } finally {
+      setExportRunning(false);
+      setExportStep("");
+    }
+  }
+
+  // Milestone 7 (Chrome extension draft queue) — "Send to Chrome
+  // extension". This only ever CREATES the batch and shows the pairing
+  // code; nothing about form-filling or Vinted itself happens here — that
+  // is entirely the extension's own job, running in the user's normal
+  // Chrome profile, once they enter the code. Never clears the current
+  // selection on failure, same reasoning as handleExport above.
+  async function handleSendToExtension() {
+    const ids = [...bulkSelectedIds];
+    if (!ids.length || sendToExtensionRunning) return;
+    if (ids.length > MAX_EXTENSION_BATCH_LISTINGS) {
+      setSendToExtensionError(`Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings to send to the extension at once (${ids.length} selected).`);
+      setSendToExtensionRejected([]);
+      return;
+    }
+    setSendToExtensionRunning(true);
+    setSendToExtensionError("");
+    setSendToExtensionRejected([]);
+    try {
+      const response = await fetch("/api/listing-studio/extension-batches", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setSendToExtensionError(body.error || "Could not send these listings to the extension.");
+        setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : []);
+        return;
+      }
+      setPairingCode(body.pairingCode);
+      setActiveBatchId(body.batchId);
+      setBatchStatus(null);
+    } catch {
+      setSendToExtensionError("Network error — could not send these listings to the extension. Your selection has been kept.");
+    } finally {
+      setSendToExtensionRunning(false);
+    }
+  }
+
+  async function handleCancelExtensionBatch() {
+    if (!activeBatchId) return;
+    await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`, { method: "DELETE" }).catch(() => {});
+  }
+
+  function handleClearExtensionBatch() {
+    setPairingCode(null);
+    setActiveBatchId(null);
+    setBatchStatus(null);
+    setBulkSelectedIds(new Set());
+  }
+
+  // Bounded polling (a lightweight progress mechanism, not a persistent
+  // connection) — matches this app's existing architecture, which has no
+  // server-push channel anywhere. Stops itself once the batch reaches a
+  // terminal status, and is fully torn down on unmount.
+  useEffect(() => {
+    if (!activeBatchId) return;
+    let cancelled = false;
+    async function poll() {
+      try {
+        const response = await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`);
+        if (!response.ok || cancelled) return;
+        const body = await response.json() as ExtensionBatchStatus;
+        if (!cancelled) setBatchStatus(body);
+      } catch { /* transient — the next tick tries again */ }
+    }
+    poll();
+    const interval = setInterval(() => {
+      if (batchStatus && ["completed", "cancelled", "expired"].includes(batchStatus.status)) return;
+      poll();
+    }, 4000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-subscribes only when the batch id itself changes; batchStatus is read, not a dependency, so the interval isn't torn down/recreated on every poll tick.
+  }, [activeBatchId]);
+
   async function commitDelete(ids: string[]) {
     setBulkActionRunning(true);
     setBulkActionError("");
@@ -455,14 +634,68 @@ export default function ListingsReviewWorkspace() {
     {loadError && <div className="home-error">{loadError}</div>}
     {bulkActionError && <div className="home-error" role="alert">{bulkActionError}</div>}
     {bulkActionMessage && <div className="listings-review-bulk-message" role="status">{bulkActionMessage}</div>}
+    {exportError && <div className="home-error" role="alert">
+      {exportError}
+      {exportRejected.length > 0 && <ul className="listings-review-export-rejected">
+        {exportRejected.map(item => <li key={item.draftId}>{item.sku ?? item.draftId}: {item.reasons.join(", ")}</li>)}
+      </ul>}
+    </div>}
+    {sendToExtensionError && <div className="home-error" role="alert">
+      {sendToExtensionError}
+      {sendToExtensionRejected.length > 0 && <ul className="listings-review-export-rejected">
+        {sendToExtensionRejected.map(item => <li key={item.draftId}>{item.sku ?? item.draftId}: {item.reasons.join(", ")}</li>)}
+      </ul>}
+    </div>}
 
     {bulkCount > 0 && <div className="listings-review-bulk-bar" role="toolbar" aria-label="Bulk actions">
       <span className="listings-review-bulk-count">{bulkCount} selected</span>
       <button type="button" className="button-secondary" disabled={bulkActionRunning} onClick={handleBulkAssignCategories}>{bulkActionRunning ? "Assigning categories…" : "Assign missing categories"}</button>
       <button type="button" className="button-secondary" disabled={bulkActionRunning} onClick={handleBulkMarkReady}>Mark ready</button>
       <button type="button" className="button-danger" disabled={bulkActionRunning} onClick={() => setBulkDeleteConfirmOpen(true)}>Delete</button>
-      <button type="button" className="button-secondary" disabled title="Coming in a future milestone">Export</button>
-      <button type="button" className="button-secondary" disabled title="Coming in a future milestone">List automatically</button>
+      <button
+        type="button"
+        className="button-secondary"
+        disabled={exportRunning || bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH}
+        title={bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH ? `Select at most ${MAX_EXPORT_LISTINGS_PER_BATCH} listings to export at once.` : "Download a ZIP package for manual transfer into Vinted — never publishes anything"}
+        onClick={handleExport}
+      >
+        {exportRunning ? (exportStep || "Exporting…") : "Export"}
+      </button>
+      <button
+        type="button"
+        className="button-secondary"
+        disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS || Boolean(activeBatchId)}
+        title={bulkCount > MAX_EXTENSION_BATCH_LISTINGS ? `Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings for the extension at once.` : "Fills Vinted's Create Listing form via the Chrome extension and saves each item as a draft — never publishes anything"}
+        onClick={handleSendToExtension}
+      >
+        {sendToExtensionRunning ? "Preparing batch…" : "Send to Chrome extension"}
+      </button>
+    </div>}
+
+    {(pairingCode || activeBatchId) && <div className="listings-review-extension-panel" role="status">
+      <p className="listings-review-extension-safety-label">Drafts only — never publishes</p>
+      {pairingCode && !batchStatus?.claimedAt && <>
+        <p>Pairing code: <code className="listings-review-pairing-code">{pairingCode}</code></p>
+        <p className="muted">Open the Vinted Draft Queue extension&apos;s side panel and enter this code. It expires soon and can only be used once.</p>
+      </>}
+      {batchStatus && <>
+        <p>Batch {batchStatus.batchId.slice(0, 8)}… — status: <strong>{batchStatus.status}</strong>
+          {batchStatus.claimedAt && <span> — claimed by the extension</span>}
+        </p>
+        <ol className="listings-review-extension-queue">
+          {batchStatus.items.map(item => <li key={item.itemId}>
+            {item.queuePosition + 1}. {item.generatedTitle || item.sku || item.draftId} — <strong>{item.status}</strong>
+            {item.vintedDraftId && <span> — Vinted draft {item.vintedDraftId}</span>}
+            {item.errorMessage && <span className="listings-review-extension-item-error"> — {item.errorMessage}</span>}
+          </li>)}
+        </ol>
+      </>}
+      <div className="controls">
+        {batchStatus && !["completed", "cancelled", "expired"].includes(batchStatus.status)
+          && <button type="button" className="button-danger" onClick={handleCancelExtensionBatch}>Cancel batch</button>}
+        {(!batchStatus || ["completed", "cancelled", "expired"].includes(batchStatus.status))
+          && <button type="button" className="button-secondary" onClick={handleClearExtensionBatch}>Clear</button>}
+      </div>
     </div>}
 
     {!loading && !hasAnyData && !loadError && <p className="listing-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}

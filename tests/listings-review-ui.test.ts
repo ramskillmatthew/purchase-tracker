@@ -108,9 +108,12 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
       expect(source).toContain('method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "delete_photos" }),');
     });
 
-    it("Export and List automatically exist only as disabled placeholders — no handler, no endpoint, just a 'coming' tooltip", () => {
-      expect(source).toContain('<button type="button" className="button-secondary" disabled title="Coming in a future milestone">Export</button>');
-      expect(source).toContain('<button type="button" className="button-secondary" disabled title="Coming in a future milestone">List automatically</button>');
+    it("Milestone 7 (revised): Export is no longer a disabled placeholder — it has a real handler; 'List automatically' has been replaced by 'Send to Chrome extension' (also a real handler, not a placeholder)", () => {
+      expect(source).not.toContain('<button type="button" className="button-secondary" disabled title="Coming in a future milestone">Export</button>');
+      expect(source).toContain("onClick={handleExport}");
+      expect(source).not.toContain("List automatically");
+      expect(source).toContain("Send to Chrome extension");
+      expect(source).toContain("onClick={handleSendToExtension}");
     });
 
     it("a successful bulk delete clears the deleted ids from both the bulk selection and, if it was open, the detail panel selection", () => {
@@ -452,5 +455,177 @@ describe("Milestone 6 (purchase-price lookup and manual Vinted selling price) �
       expect(source).not.toContain("listing_analysis_runs");
       expect(source).not.toContain("vinted_category_selection_ai_calls");
     }
+  });
+});
+
+describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("the Export button is enabled (no longer the disabled 'Coming in a future milestone' placeholder) and calls handleExport", () => {
+    expect(workspaceSource).not.toMatch(/Export<\/button>[\s\S]{0,5}disabled title="Coming in a future milestone"/);
+    expect(workspaceSource).toContain("onClick={handleExport}");
+  });
+
+  it("'List automatically' has been replaced by the Chrome extension flow (see the dedicated 'Send to Chrome extension' describe block below) — no disabled placeholder remains", () => {
+    expect(workspaceSource).not.toContain("List automatically");
+  });
+
+  it("the Export button is disabled while a request is in flight — prevents duplicate clicks", () => {
+    expect(workspaceSource).toMatch(/disabled=\{exportRunning \|\| bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH\}/);
+  });
+
+  it("shows step-by-step progress labels while exporting", () => {
+    expect(workspaceSource).toContain("Validating listings…");
+    expect(workspaceSource).toContain("Preparing photos and creating package…");
+    expect(workspaceSource).toContain("Downloading…");
+  });
+
+  it("REGRESSION: a failed export never clears the current bulk selection — only a genuine success does", () => {
+    const exportFn = workspaceSource.slice(workspaceSource.indexOf("async function handleExport"), workspaceSource.indexOf("async function handleSendToExtension"));
+    const catchBlock = exportFn.slice(exportFn.indexOf("} catch"));
+    expect(catchBlock).not.toContain("setBulkSelectedIds(new Set())");
+    // The one place bulkSelectedIds IS cleared is the success path, after the download.
+    const successPath = exportFn.slice(exportFn.indexOf("setBulkActionMessage"), exportFn.indexOf("} catch"));
+    expect(successPath).toContain("setBulkSelectedIds(new Set())");
+  });
+
+  it("REGRESSION: a rejected export reports the specific rejected listings and their reasons, never just a generic message", () => {
+    expect(workspaceSource).toContain("setExportRejected(Array.isArray(body.rejected) ? body.rejected : [])");
+    expect(workspaceSource).toContain("{exportRejected.map(item =>");
+  });
+
+  it("enforces the batch maximum client-side too, with a clear message, before ever calling the server", () => {
+    expect(workspaceSource).toContain("if (ids.length > MAX_EXPORT_LISTINGS_PER_BATCH)");
+    expect(workspaceSource).toMatch(/Select at most \$\{MAX_EXPORT_LISTINGS_PER_BATCH\} listings/);
+  });
+
+  it("success wording says 'Exported', never 'Published' or 'Listed'", () => {
+    expect(workspaceSource).toMatch(/Exported \$\{ids\.length\}/);
+    expect(workspaceSource).not.toMatch(/published|listed live|now live/i);
+  });
+
+  it("REGRESSION: never sends one request per listing — exactly one POST to the export route with every selected draftId in one body", () => {
+    expect(workspaceSource).toContain('fetch("/api/listing-studio/listings-review/export"');
+    expect(workspaceSource).toContain("body: JSON.stringify({ draftIds: ids })");
+  });
+
+  it("triggers the browser's own download via a blob object URL, never navigating away from the page", () => {
+    expect(workspaceSource).toContain("URL.createObjectURL(blob)");
+    expect(workspaceSource).toContain("URL.revokeObjectURL(objectUrl)");
+    expect(workspaceSource).toContain("link.download = fileName");
+  });
+
+  it("this feature never talks to Vinted, never publishes, and allows any number of listings up to the batch max (never restricted to exactly one)", () => {
+    expect(workspaceSource).not.toMatch(/vinted\.co\.uk|vinted\.com/i);
+    // Single-selection is NOT required for export — only the upper batch bound is enforced.
+    expect(workspaceSource).not.toMatch(/exactly one listing/i);
+  });
+});
+
+describe("app/api/listing-studio/listings-review/export/route.ts — Milestone 7 (revised): safety-by-construction", () => {
+  const routeSource = read("app/api/listing-studio/listings-review/export/route.ts");
+
+  it("requires the owner and never trusts a client-supplied Ready status", () => {
+    expect(routeSource).toContain("await requireOwner()");
+    expect(routeSource).toContain("buildListingWarnings(readinessFields)");
+  });
+
+  it("REGRESSION: there is no publish/list/upload-live function, route, or button anywhere in this feature — this milestone must not contain publishing functionality at all", () => {
+    for (const source of [routeSource, read("components/listings-review/ListingsReviewWorkspace.tsx"), read("lib/listing-studio/vinted-export-schema.ts"), read("lib/listing-studio/vinted-export-photos.ts")]) {
+      expect(source.toLowerCase()).not.toMatch(/publishlisting|createvinteddraft|listitemonvinted|uploadtovinted/);
+    }
+  });
+
+  it("never sets vinted_draft_created_at — only a future, separate milestone may ever do that", () => {
+    expect(routeSource).not.toContain("vinted_draft_created_at:");
+  });
+
+  it("sets vinted_exported_at/vinted_export_id only AFTER the ZIP buffer was already built", () => {
+    const buildIndex = routeSource.indexOf("buildZipBuffer(zipEntries)");
+    const trackingIndex = routeSource.indexOf("vinted_exported_at: createdAt");
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(trackingIndex).toBeGreaterThan(buildIndex);
+  });
+
+  it("uses the app's existing HEIC conversion approach (heic-convert), never a new/different one", () => {
+    const photosSource = read("lib/listing-studio/vinted-export-photos.ts");
+    expect(photosSource).toContain("heic-convert");
+  });
+
+  it("never exposes the Supabase service-role key to the response — no key/secret string is ever included in the returned bytes' construction path", () => {
+    expect(routeSource).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
+    expect(routeSource).not.toContain("SUPABASE_SECRET_KEY");
+  });
+});
+
+describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extension' UI wiring", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("the button exists, calls handleSendToExtension, and is disabled when nothing is selected (only rendered inside the bulkCount > 0 toolbar)", () => {
+    expect(workspaceSource).toContain("Send to Chrome extension");
+    expect(workspaceSource).toContain("onClick={handleSendToExtension}");
+    expect(workspaceSource).toContain("{bulkCount > 0 && <div className=\"listings-review-bulk-bar\"");
+  });
+
+  it("enforces the 5-listing maximum (MAX_EXTENSION_BATCH_LISTINGS) both in the disabled condition and inside the handler itself", () => {
+    expect(workspaceSource).toContain("import { MAX_EXTENSION_BATCH_LISTINGS } from \"@/lib/listing-studio/extension-batch-schema\"");
+    expect(workspaceSource).toMatch(/disabled=\{sendToExtensionRunning \|\| bulkCount > MAX_EXTENSION_BATCH_LISTINGS \|\| Boolean\(activeBatchId\)\}/);
+    expect(workspaceSource).toContain("if (ids.length > MAX_EXTENSION_BATCH_LISTINGS)");
+  });
+
+  it("disables the button while a batch is already active (activeBatchId set) — prevents creating a second batch from the same selection", () => {
+    expect(workspaceSource).toMatch(/Boolean\(activeBatchId\)/);
+  });
+
+  it("shows the pairing code and its expiry once a batch is created", () => {
+    expect(workspaceSource).toContain("Pairing code:");
+    expect(workspaceSource).toContain("listings-review-pairing-code");
+    expect(workspaceSource).toContain("setPairingCode(body.pairingCode)");
+  });
+
+  it("shows whether the extension has claimed the batch (claimedAt) distinctly from the pre-claim pairing-code view", () => {
+    expect(workspaceSource).toContain("!batchStatus?.claimedAt");
+    expect(workspaceSource).toContain("claimed by the extension");
+  });
+
+  it("displays live per-item progress (status) and the resulting Vinted draft id once completed", () => {
+    expect(workspaceSource).toContain("batchStatus.items.map(item =>");
+    expect(workspaceSource).toContain("Vinted draft {item.vintedDraftId}");
+    expect(workspaceSource).toContain("item.errorMessage");
+  });
+
+  it("polls the owner-authenticated batch-status endpoint (never the extension's bearer-token one) on a bounded interval, and stops polling once the batch is terminal", () => {
+    expect(workspaceSource).toContain("fetch(`/api/listing-studio/extension-batches/${activeBatchId}`)");
+    expect(workspaceSource).toContain("setInterval(");
+    expect(workspaceSource).toMatch(/\["completed", "cancelled", "expired"\]\.includes\(batchStatus\.status\)/);
+    expect(workspaceSource).toContain("clearInterval(interval)");
+  });
+
+  it("a rejected batch-creation request never clears the current selection, and shows the specific rejected listings", () => {
+    const fn = workspaceSource.slice(workspaceSource.indexOf("async function handleSendToExtension"), workspaceSource.indexOf("async function handleCancelExtensionBatch"));
+    expect(fn).not.toContain("setBulkSelectedIds(new Set())");
+    expect(workspaceSource).toContain("setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : [])");
+  });
+
+  it("makes it clear nothing will be published — the safety label is always shown alongside the batch panel", () => {
+    expect(workspaceSource).toContain("Drafts only — never publishes");
+    expect(workspaceSource).toContain("listings-review-extension-safety-label");
+  });
+
+  it("never sends one request per listing — exactly one POST with every selected draftId in one body", () => {
+    expect(workspaceSource).toContain('fetch("/api/listing-studio/extension-batches"');
+    expect(workspaceSource).toContain("body: JSON.stringify({ draftIds: ids })");
+  });
+
+  it("allows cancelling the batch via the owner-authenticated cancel route, and clearing a finished batch resets local state", () => {
+    expect(workspaceSource).toContain("method: \"DELETE\"");
+    expect(workspaceSource).toContain("function handleClearExtensionBatch()");
+    expect(workspaceSource).toContain("setActiveBatchId(null)");
+  });
+
+  it("REGRESSION: the ZIP export feature (a separate, already-existing action) is untouched — both actions coexist in the same bulk toolbar", () => {
+    expect(workspaceSource).toContain("Export");
+    expect(workspaceSource).toContain("onClick={handleExport}");
+    expect(workspaceSource).toContain("Send to Chrome extension");
   });
 });

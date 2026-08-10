@@ -1227,6 +1227,14 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .listings-review-quick-filter { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 11px; font-weight: 650; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
 .listings-review-quick-filter-active { color: var(--primary-strong); border-color: color-mix(in srgb, var(--primary) 40%, var(--line)); background: var(--primary-soft); }
 
+.listings-review-export-rejected { margin: 6px 0 0; padding-left: 18px; font-size: 10px; }
+
+.listings-review-extension-panel { padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 11px; margin-bottom: 10px; }
+.listings-review-extension-safety-label { display: inline-block; margin: 0 0 6px; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--success, #1a7f37) 16%, transparent); color: var(--success, #1a7f37); font-weight: 700; font-size: 10px; letter-spacing: 0.02em; }
+.listings-review-pairing-code { font-size: 15px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 6px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); }
+.listings-review-extension-queue { margin: 6px 0; padding-left: 18px; }
+.listings-review-extension-item-error { color: var(--danger); }
+
 .listings-review-bulk-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 10px; background: var(--primary-soft); }
 .listings-review-bulk-count { margin-right: auto; color: var(--text); font-size: 12px; font-weight: 700; }
 .listings-review-bulk-message { padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-2); font-size: 11px; }
