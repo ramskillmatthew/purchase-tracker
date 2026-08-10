@@ -178,13 +178,105 @@ function safeUrlParts(rawUrl) {
     return { protocol: "unknown", hostname: "unknown", pathname: "unknown" };
   }
 }
-function describeNetworkFailure(rawUrl, position, error) {
+function safeUrlString(rawUrl) {
   const { protocol, hostname, pathname } = safeUrlParts(rawUrl);
-  return `NETWORK: could not download photo ${position} from ${protocol}://${hostname}${pathname} (${error?.name || "Error"}: ${String(error?.message || error)}).`;
+  return `${protocol}://${hostname}${pathname}`;
 }
-function describeHttpFailure(rawUrl, position, response) {
-  const { protocol, hostname, pathname } = safeUrlParts(rawUrl);
-  return `HTTP_${response.status}: photo ${position} request to ${protocol}://${hostname}${pathname} failed (${response.status} ${response.statusText}).`;
+
+// Follow-up correction (live production PHOTO_HOST_NOT_PERMITTED follow-up
+// bug — "TypeError: Failed to fetch") — every stage a photo download can
+// fail at, named explicitly. The live investigation needed to distinguish
+// "the service worker never even got the message" (see photo-transfer.js's
+// own TIMEOUT/NETWORK-no-response messages — those happen on the CONTENT
+// SCRIPT side, before/without ever reaching here) from "the service worker
+// DID receive REQUEST_PHOTO and attempted the download, but the download
+// itself failed" (every stage below) — every reason this function ever
+// returns implies the LATTER, since reaching any of these lines is itself
+// proof the message was received and is being answered.
+const PHOTO_FETCH_STAGE = Object.freeze({
+  URL_RESOLUTION: "URL_RESOLUTION",
+  HOST_PERMISSION: "HOST_PERMISSION",
+  FETCH: "FETCH",
+  REDIRECT: "REDIRECT",
+  HTTP_STATUS: "HTTP_STATUS",
+  READ_BODY: "READ_BODY",
+  MIME_VALIDATION: "MIME_VALIDATION",
+  SIZE_VALIDATION: "SIZE_VALIDATION",
+});
+
+/**
+ * Reads a BOUNDED, safe excerpt of a failed response's own JSON error body
+ * (e.g. `{"error":"Missing batch token."}`) — never the raw body verbatim,
+ * never anything beyond a short, single-line string, and never attempted at
+ * all for a successful (2xx) response, so real image bytes are never routed
+ * through text/JSON parsing. A response whose body can't be read or isn't
+ * `{"error": string}`-shaped safely degrades to null rather than throwing.
+ */
+async function safeResponseErrorMessage(response) {
+  try {
+    const text = await response.text();
+    if (!text) return null;
+    const bounded = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+    try {
+      const parsed = JSON.parse(bounded);
+      if (parsed && typeof parsed.error === "string") return parsed.error.slice(0, 300);
+    } catch { /* not JSON — fall through to the bounded raw text below */ }
+    return bounded.replace(/\s+/g, " ").trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Builds the ONE structured diagnostic reason string every photo-download
+ * failure below returns — request stage, HTTP status (when a response
+ * exists), whether a redirect occurred, the final response URL (sanitised
+ * — see safeUrlString), and a safe server-provided error message, all in
+ * one place so a real failure is self-diagnosing from the persisted
+ * errorMessage alone. Mirrors shared/form-steps.js's own
+ * buildFieldTimeoutReason key=value convention (a deliberately separate,
+ * local implementation — this file has never imported shared/form-steps.js
+ * and does not start now, per this project's own "no cross-file coupling
+ * beyond what's needed" convention). NEVER includes a bearer token, a
+ * signed URL, a query string, or any byte of image content — only ever the
+ * sanitised protocol/hostname/pathname (see safeUrlParts) and short,
+ * bounded text.
+ */
+function buildPhotoFailureReason({ prefix, stage, position, requestUrl, status, redirected, finalUrl, serverError, cause }) {
+  const parts = [
+    `stage=${stage}`,
+    `position=${position}`,
+    `url=${JSON.stringify(safeUrlString(requestUrl))}`,
+    `status=${status ?? "none"}`,
+    `redirected=${redirected ?? false}`,
+    `final_url=${JSON.stringify(finalUrl ? safeUrlString(finalUrl) : "none")}`,
+    serverError ? `server_error=${JSON.stringify(serverError)}` : null,
+    cause ? `reason=${JSON.stringify(cause)}` : null,
+  ].filter(Boolean);
+  return `${prefix}: ${parts.join(" ")}`;
+}
+
+function describeNetworkFailure(rawUrl, position, error) {
+  return buildPhotoFailureReason({
+    prefix: "NETWORK", stage: PHOTO_FETCH_STAGE.FETCH, position, requestUrl: rawUrl,
+    status: null, redirected: false, finalUrl: null,
+    cause: `${error?.name || "Error"}: ${String(error?.message || error)}`,
+  });
+}
+async function describeHttpFailure(rawUrl, position, response) {
+  const serverError = await safeResponseErrorMessage(response);
+  return buildPhotoFailureReason({
+    prefix: `HTTP_${response.status}`, stage: PHOTO_FETCH_STAGE.HTTP_STATUS, position, requestUrl: rawUrl,
+    status: response.status, redirected: response.redirected, finalUrl: response.url || null,
+    serverError, cause: response.statusText || null,
+  });
+}
+function describeRedirectRejected(rawUrl, position, response) {
+  return buildPhotoFailureReason({
+    prefix: "REDIRECT_REJECTED", stage: PHOTO_FETCH_STAGE.REDIRECT, position, requestUrl: rawUrl,
+    status: response.status, redirected: response.redirected, finalUrl: response.url || null,
+    cause: "the response was redirected away from the requested photo route — a redirected response is never treated as valid photo data, regardless of its final status",
+  });
 }
 
 // Follow-up correction (photo origin-mismatch bug) — the ONLY shape a
@@ -306,7 +398,11 @@ async function downloadPhotoForContentScript(itemId, position) {
   } catch (error) {
     clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
-      const reason = `PHOTO_FETCH_TIMEOUT: photo ${position} did not respond within ${FETCH_TIMEOUT_MS / 1000}s — the app may be unreachable or the connection stalled.`;
+      const reason = buildPhotoFailureReason({
+        prefix: "PHOTO_FETCH_TIMEOUT", stage: PHOTO_FETCH_STAGE.FETCH, position, requestUrl: photoUrl,
+        status: null, redirected: false, finalUrl: null,
+        cause: `did not respond within ${FETCH_TIMEOUT_MS / 1000}s — the app may be unreachable or the connection stalled`,
+      });
       console.warn("Vinted Draft Queue: photo download fetch timed out —", reason);
       return { ok: false, reason };
     }
@@ -315,9 +411,20 @@ async function downloadPhotoForContentScript(itemId, position) {
   }
   clearTimeout(timeoutId);
   logStage("stage 5: fetch returned headers/status", position, response.status);
+
+  // Required behaviour (live production follow-up bug) — a redirected
+  // response is NEVER treated as valid photo data, regardless of its final
+  // status. Checked BEFORE the ok/status check below: a redirect that
+  // happens to land on a 200 page (e.g. a login page serving HTML with a
+  // 200 status) must still be rejected, never silently accepted as if it
+  // were the requested photo's bytes.
+  if (response.redirected) {
+    console.warn("Vinted Draft Queue: photo download was redirected —", safeUrlString(response.url || photoUrl));
+    return { ok: false, reason: describeRedirectRejected(photoUrl, position, response) };
+  }
   if (!response.ok) {
     console.warn("Vinted Draft Queue: photo download HTTP failure —", response.status, response.statusText);
-    return { ok: false, reason: describeHttpFailure(photoUrl, position, response) };
+    return { ok: false, reason: await describeHttpFailure(photoUrl, position, response) };
   }
 
   let buffer;

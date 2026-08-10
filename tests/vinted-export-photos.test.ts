@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 vi.mock("server-only", () => ({}));
 
@@ -100,3 +101,32 @@ describe("prepareExportPhotos — server-side download + HEIC conversion for exp
 // vitest normally isolates modules per file, but this avoids ever leaking
 // a mocked fetch into another test file if isolation config ever changes.
 afterAll(() => { global.fetch = originalFetch; });
+
+// ============================================================================
+// Live production follow-up bug — the extension's photo route
+// (app/api/extension/batch/photos/[itemId]/[position]/route.ts) calls
+// prepareSinglePhoto, which imports heic-convert here. heic-convert ->
+// heic-decode -> libheif-js dynamically requires a .wasm binary that
+// Vercel's own Node file tracer cannot see through static analysis (webpack
+// itself already flags this at build time: "Critical dependency: require
+// function is used in a way in which dependencies cannot be statically
+// extracted"). Confirmed directly against this repo's own build output —
+// `.next/server/app/api/extension/batch/photos/[itemId]/[position]/route.js.nft.json`
+// listed 60 traced files with ZERO of them being the wasm asset before this
+// fix — a file missing from that trace is never uploaded with the deployed
+// serverless function, so requiring it crashes the function at MODULE LOAD
+// time (before any HTTP response can be sent), which is exactly what made
+// the extension's cross-origin fetch() see a raw "TypeError: Failed to
+// fetch" instead of any clean error response. This test proves the config
+// fix (next.config.ts's outputFileTracingIncludes) is actually in place —
+// it reads next.config.ts as plain text (never imports it — Next config
+// files aren't meant to be imported by a test runner) so it stays accurate
+// even if the file is edited later.
+describe("next.config.ts — outputFileTracingIncludes covers heic-convert's dynamically-required wasm asset for the extension photo route (live production follow-up bug)", () => {
+  it("includes the libheif-js wasm binary for the extension's photo route, so Vercel's file tracer ships it with the deployed function", () => {
+    const source = readFileSync("next.config.ts", "utf8");
+    expect(source).toContain("outputFileTracingIncludes");
+    expect(source).toContain("/api/extension/batch/photos/[itemId]/[position]");
+    expect(source).toMatch(/libheif-js\/libheif-wasm\/\*\.wasm/);
+  });
+});

@@ -1296,9 +1296,185 @@ describe("service worker — photo download (photo-download CORS-bug fix): downl
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("REGRESSION: content script never directly fetches the private photo URL — no fetch(...) call (or even a mention of one) exists in content-script.js at all", () => {
+  it("REGRESSION: content script never directly fetches the private photo URL — no fetch(...) call (or even a mention of one) exists in content-script.js at all — this holds regardless of whether the configured App URL is localhost or the production origin, since content-script.js has no fetch() call for ANY origin to begin with", () => {
     const source = readFileSync("vinted-draft-queue-extension/content-script.js", "utf8");
     expect(source).not.toMatch(/fetch\(/);
+  });
+
+  // ============================================================================
+  // Live production follow-up bug — PHOTO_HOST_NOT_PERMITTED was already
+  // fixed (the production origin is now in manifest.json's host_permissions
+  // — see the tests above), but the extension still failed with "NETWORK:
+  // ... (TypeError: Failed to fetch)" once a REAL photo download was
+  // attempted against https://purchase-tracker-one.vercel.app. Root cause
+  // (traced via this repo's own build output, not Vercel's dashboard, which
+  // this environment has no credentials for): heic-convert -> heic-decode
+  // -> libheif-js dynamically requires a .wasm binary that Vercel's own
+  // file tracer could not see (confirmed directly: route.js.nft.json for
+  // this exact route listed 60 traced files and NONE of them were the wasm
+  // asset) — a missing traced file is never uploaded with the deployed
+  // serverless function, so requiring it crashes the function at MODULE
+  // LOAD time, before any HTTP response can be constructed, which is
+  // exactly what makes a cross-origin fetch() see a raw connection failure
+  // instead of a clean JSON error. Fixed via next.config.ts's
+  // outputFileTracingIncludes (see that file's own comment). These tests
+  // prove the SERVICE WORKER's own request/response handling end to end
+  // against the real production origin; they cannot prove the Vercel-side
+  // bundling fix itself (that's proven by inspecting the build's own
+  // .nft.json — see the diagnosis report), only that the extension
+  // correctly downloads a photo once given a normal, well-formed response.
+  // ============================================================================
+  describe("production-origin photo download (live production follow-up bug)", () => {
+    const PRODUCTION_ORIGIN = "https://purchase-tracker-one.vercel.app";
+
+    it("REGRESSION: successfully downloads a photo through the service worker when the configured App URL is the real production origin — proves the fix end to end, not merely against the test fixture's fake app host", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      const photoBytes = new Uint8Array([10, 20, 30]);
+      const fetchMock = vi.fn(async (url: string) => {
+        expect(url).toBe(`${PRODUCTION_ORIGIN}${item.photos[0].path}`);
+        return new Response(photoBytes, { status: 200, headers: { "Content-Type": "image/jpeg" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(true);
+      expect(Buffer.from(result.base64, "base64")).toEqual(Buffer.from(photoBytes));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("REGRESSION: the Authorization bearer header actually reaches the production photo route — asserted directly against the fetch() call's own init.headers, not merely assumed", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      let capturedAuth: string | undefined;
+      vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+        capturedAuth = (init?.headers as Record<string, string>)?.Authorization;
+        return new Response(new Uint8Array([1]), { status: 200, headers: { "Content-Type": "image/jpeg" } });
+      }));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(true);
+      expect(capturedAuth).toBe("Bearer test-token");
+    });
+
+    it("REGRESSION: a redirected response is REJECTED and reported, never treated as valid photo data — even when the redirect's final status happens to be 200 (e.g. a login page)", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        // Response's own `redirected`/`url` are read-only per the real Fetch
+        // API and can't be set via the constructor — Object.defineProperty
+        // mirrors exactly what a real followed-redirect Response looks like.
+        const response = new Response("<html>login</html>", { status: 200, headers: { "Content-Type": "text/html" } });
+        Object.defineProperty(response, "redirected", { value: true });
+        Object.defineProperty(response, "url", { value: `${PRODUCTION_ORIGIN}/login` });
+        return response;
+      }));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/REDIRECT_REJECTED/);
+      expect(result.reason).toContain("redirected=true");
+      expect(result.reason).toMatch(/final_url="https:\/\/purchase-tracker-one\.vercel\.app\/login"/);
+    });
+
+    it("REGRESSION: a redirected response is rejected even when the final status is an HTTP error — the redirect check runs BEFORE the ok/status check", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        const response = new Response("Not Found", { status: 404, statusText: "Not Found" });
+        Object.defineProperty(response, "redirected", { value: true });
+        Object.defineProperty(response, "url", { value: `${PRODUCTION_ORIGIN}/some-other-place` });
+        return response;
+      }));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/REDIRECT_REJECTED/); // never HTTP_404 — the redirect itself is the reported failure
+    });
+
+    it("a normal, non-redirected response is unaffected — redirected=false is reported but never treated as a failure on its own", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/jpeg" } })));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(true);
+    });
+
+    it("REGRESSION: the new structured diagnostic reason includes stage, HTTP status, redirected, and final_url for an HTTP failure — every field the diagnosis requires, not just a generic message", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Missing batch token." }), { status: 401, statusText: "Unauthorized", headers: { "Content-Type": "application/json" } })));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/^HTTP_401:/);
+      expect(result.reason).toContain("stage=HTTP_STATUS");
+      expect(result.reason).toContain("status=401");
+      expect(result.reason).toContain("redirected=false");
+      expect(result.reason).toContain('server_error="Missing batch token."'); // the route's own safe JSON error body, surfaced
+    });
+
+    it("REGRESSION: the safe server-error extraction never breaks (and never throws) on a non-JSON error body — degrades to a bounded raw-text excerpt instead", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>Internal Server Error</html>", { status: 500, statusText: "Internal Server Error", headers: { "Content-Type": "text/html" } })));
+
+      await loadWorker(chromeMock);
+      const result: any = await requestPhoto(messageListeners, item.itemId, 0);
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/^HTTP_500:/);
+      expect(result.reason).toContain("server_error=");
+    });
+
+    it("REGRESSION: the bearer token never appears in console.warn output either — not just the returned reason (see the existing 'safe error reporting' test above for the returned-reason side of this guarantee)", async () => {
+      const { state, rawPayload } = seededPhotoState();
+      const item = rawPayload.items[0] as any;
+      const { chromeMock, messageListeners, storageData } = createChromeMock({ initialState: state, sendMessageHandler: () => ({ response: {} }) });
+      (storageData.settings as any).appBaseUrl = PRODUCTION_ORIGIN;
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("Forbidden", { status: 403, statusText: "Forbidden" })));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await loadWorker(chromeMock);
+      await requestPhoto(messageListeners, item.itemId, 0);
+
+      const allWarnOutput = warnSpy.mock.calls.map(call => call.join(" ")).join("\n");
+      expect(allWarnOutput).not.toContain("test-token");
+      expect(allWarnOutput).not.toMatch(/Bearer\s+\S/);
+    });
+
+    it("REGRESSION: fixing this diagnostics/redirect-handling bug touches nothing Upload/publish-adjacent — no forbidden-action selector or wording was introduced anywhere in service-worker.js", () => {
+      const source = readFileSync("vinted-draft-queue-extension/service-worker.js", "utf8");
+      expect(source).not.toMatch(/upload-form-save-button/); // the verified forbidden publish control's own testid
+      expect(source).not.toMatch(/\bpublish\b/i);
+    });
   });
 
   it("no photo bytes are ever written to chrome.storage.local — REQUEST_PHOTO's response bypasses storage entirely", async () => {
