@@ -14,6 +14,12 @@ import {
 } from "../vinted-draft-queue-extension/shared/vinted-fields.js";
 
 const EXTENSION_DIR = "vinted-draft-queue-extension";
+// The exact, deployed production origin — mirrors scripts/validate-extension.mjs's
+// own ALLOWED_PRODUCTION_ORIGIN constant (kept as a separate literal here
+// deliberately, so this test independently proves the manifest matches the
+// real deployed app, never merely that it matches whatever the validator
+// script itself currently says).
+const PRODUCTION_ORIGIN = "https://purchase-tracker-one.vercel.app/*";
 function read(path: string) { return readFileSync(`${EXTENSION_DIR}/${path}`, "utf8"); }
 function allExtensionJsFiles(): string[] {
   const files: string[] = [];
@@ -122,8 +128,39 @@ describe("Publishing safety — structural: no publish/upload/list-live function
       expect(manifest.permissions ?? []).not.toContain(forbidden);
     }
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin.includes("YOUR-PRODUCTION-APP-DOMAIN")).toBe(true);
+      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === PRODUCTION_ORIGIN).toBe(true);
     }
+  });
+
+  // Follow-up correction (live production error — PHOTO_HOST_NOT_PERMITTED)
+  // — the manifest's host_permissions must include the EXACT deployed
+  // production origin (never a placeholder, never a broader/lookalike
+  // origin) so photo downloads from the real app work live, while still
+  // never silently widening what this extension can reach.
+  it("host_permissions includes the exact deployed production origin, https://purchase-tracker-one.vercel.app/*, with localhost and Vinted permissions preserved alongside it", () => {
+    const manifest = JSON.parse(read("manifest.json"));
+    expect(manifest.host_permissions).toContain(PRODUCTION_ORIGIN);
+    expect(manifest.host_permissions).toContain("http://localhost:3000/*");
+    expect(manifest.host_permissions).toContain("http://localhost:3001/*");
+    expect(manifest.host_permissions).toContain("http://localhost:3002/*");
+    expect(manifest.host_permissions).toContain("https://www.vinted.co.uk/*");
+    // Exactly the one production origin — never a broader wildcard, never a subpath-only grant standing in for it.
+    expect(manifest.host_permissions.filter((o: string) => o.includes("purchase-tracker-one"))).toEqual([PRODUCTION_ORIGIN]);
+  });
+
+  it("REGRESSION: an unrelated/lookalike host is never permitted — the production-origin allowlist check is an exact match, not a substring/prefix check", () => {
+    const unrelatedOrigins = [
+      "https://purchase-tracker-one.vercel.app.evil.com/*", // lookalike suffix attack
+      "https://evil-purchase-tracker-one.vercel.app/*", // lookalike prefix
+      "https://purchase-tracker-two.vercel.app/*", // a different, unrelated deployment
+      "https://vercel.app/*", // the bare platform domain
+    ];
+    for (const origin of unrelatedOrigins) {
+      const isAllowed = origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === PRODUCTION_ORIGIN;
+      expect(isAllowed).toBe(false);
+    }
+    const manifest = JSON.parse(read("manifest.json"));
+    for (const unrelated of unrelatedOrigins) expect(manifest.host_permissions).not.toContain(unrelated);
   });
 
   it("the side panel permanently displays the required safety label", () => {

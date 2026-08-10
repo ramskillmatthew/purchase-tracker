@@ -60,8 +60,12 @@ for (const permission of manifest.permissions ?? []) {
 }
 ok(`permissions: [${(manifest.permissions ?? []).join(", ")}]`);
 
+// The exact, deployed production origin (https://purchase-tracker-one.vercel.app)
+// this extension is permitted to talk to — an EXACT match, never a substring/prefix
+// check, so a lookalike or broader origin can never silently pass this gate.
+const ALLOWED_PRODUCTION_ORIGIN = "https://purchase-tracker-one.vercel.app/*";
 for (const origin of manifest.host_permissions ?? []) {
-  const isAllowed = origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin.includes("YOUR-PRODUCTION-APP-DOMAIN");
+  const isAllowed = origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === ALLOWED_PRODUCTION_ORIGIN;
   if (!isAllowed) fail(`host_permissions contains an unexpected origin: "${origin}"`);
 }
 ok(`host_permissions: [${(manifest.host_permissions ?? []).join(", ")}]`);

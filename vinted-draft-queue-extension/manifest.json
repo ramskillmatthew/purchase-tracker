@@ -10,7 +10,7 @@
     "http://localhost:3000/*",
     "http://localhost:3001/*",
     "http://localhost:3002/*",
-    "https://YOUR-PRODUCTION-APP-DOMAIN.example/*",
+    "https://purchase-tracker-one.vercel.app/*",
     "https://www.vinted.co.uk/*"
   ],
   "background": {

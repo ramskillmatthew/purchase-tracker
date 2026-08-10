@@ -1032,12 +1032,20 @@ describe("service worker — photo download (photo-download CORS-bug fix): downl
     expect(manifest.host_permissions).toEqual(
       expect.arrayContaining(["http://localhost:3000/*", "http://localhost:3001/*", "http://localhost:3002/*"]),
     );
-    // Narrowly scoped: every entry is either localhost, the documented
-    // production placeholder, or vinted.co.uk — never "<all_urls>" or a
-    // bare "*://*/*" wildcard.
+    // Narrowly scoped: every entry is either localhost, the exact deployed
+    // production origin, or vinted.co.uk — never "<all_urls>" or a bare
+    // "*://*/*" wildcard.
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin.includes("YOUR-PRODUCTION-APP-DOMAIN")).toBe(true);
+      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === "https://purchase-tracker-one.vercel.app/*").toBe(true);
     }
+  });
+
+  // Follow-up correction (live production error — PHOTO_HOST_NOT_PERMITTED):
+  // the deployed production origin must actually be present, not merely
+  // "would be allowed if present" — this is what fixes the live error.
+  it("REGRESSION: manifest.json's host_permissions includes the exact deployed production origin (https://purchase-tracker-one.vercel.app/*) — fixes the live PHOTO_HOST_NOT_PERMITTED error", () => {
+    const manifest = JSON.parse(readFileSync("vinted-draft-queue-extension/manifest.json", "utf8"));
+    expect(manifest.host_permissions).toContain("https://purchase-tracker-one.vercel.app/*");
   });
 
   it("REGRESSION: photo order and correct bearer authentication are unaffected by the path-based resolution fix — both photos of a multi-photo item resolve to the correct URL, in order, each with the batch's own bearer token", async () => {
