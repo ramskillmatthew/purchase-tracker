@@ -15,6 +15,7 @@ type ItemRow = {
   id: string; draft_id: string; queue_position: number; status: string; attempt_count: number;
   error_code: string | null; error_message: string | null; vinted_draft_id: string | null;
   started_at: string | null; completed_at: string | null;
+  current_step: string | null; step_detail: string | null;
 };
 type DraftTitleRow = { id: string; generated_title: string | null; sku: string | null };
 
@@ -40,11 +41,25 @@ export async function GET(_request: Request, { params }: { params: Promise<{ bat
     const batch = batches[0];
     if (!batch) return NextResponse.json({ error: "Batch not found." }, { status: 404 });
 
+    // current_step/step_detail only exist once the migration in
+    // supabase-listing-studio.sql has been run — until then, fall back to
+    // the same query without those two columns (reported as null) rather
+    // than failing this whole poll with a confusing schema-cache error.
     const items = await supabaseRequestAll<ItemRow>(
       `vinted_extension_batch_items?batch_id=eq.${batchId}`
-      + `&select=id,draft_id,queue_position,status,attempt_count,error_code,error_message,vinted_draft_id,started_at,completed_at`
+      + `&select=id,draft_id,queue_position,status,attempt_count,error_code,error_message,vinted_draft_id,started_at,completed_at,current_step,step_detail`
       + `&order=queue_position.asc`,
-    );
+    ).catch(async error => {
+      if (error instanceof Error && "status" in error && (error as Error & { status: number }).status === 400 && /column .* does not exist|schema cache/i.test(error.message)) {
+        const fallback = await supabaseRequestAll<Omit<ItemRow, "current_step" | "step_detail">>(
+          `vinted_extension_batch_items?batch_id=eq.${batchId}`
+          + `&select=id,draft_id,queue_position,status,attempt_count,error_code,error_message,vinted_draft_id,started_at,completed_at`
+          + `&order=queue_position.asc`,
+        );
+        return fallback.map(item => ({ ...item, current_step: null, step_detail: null }));
+      }
+      throw error;
+    });
     const draftIds = items.map(i => i.draft_id);
     const draftTitles = draftIds.length ? await supabaseRequestAll<DraftTitleRow>(
       `listing_drafts?id=in.(${draftIds.join(",")})&owner_id=eq.${user.id}&select=id,generated_title,sku`,
@@ -59,6 +74,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ bat
         itemId: item.id, draftId: item.draft_id, queuePosition: item.queue_position, status: item.status,
         attemptCount: item.attempt_count, errorCode: item.error_code, errorMessage: item.error_message,
         vintedDraftId: item.vinted_draft_id, startedAt: item.started_at, completedAt: item.completed_at,
+        currentStep: item.current_step, detail: item.step_detail,
         generatedTitle: titlesByDraftId.get(item.draft_id)?.generated_title ?? null,
         sku: titlesByDraftId.get(item.draft_id)?.sku ?? null,
       })),

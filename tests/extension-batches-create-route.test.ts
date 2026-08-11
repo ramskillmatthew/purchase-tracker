@@ -13,7 +13,7 @@ vi.mock("@/lib/auth/server", async importOriginal => {
 });
 vi.mock("@/lib/supabase", () => ({ supabaseRequestAll, supabaseRequest }));
 
-import { POST as createBatchRoute } from "@/app/api/listing-studio/extension-batches/route";
+import { POST as createBatchRoute, GET as getActiveBatchRoute } from "@/app/api/listing-studio/extension-batches/route";
 import { AuthError } from "@/lib/auth/server";
 
 const DRAFT_ID = "11111111-1111-4111-8111-111111111111";
@@ -152,6 +152,56 @@ describe("POST /api/listing-studio/extension-batches", () => {
   it("catches everything through safeApiError", async () => {
     supabaseRequestAll.mockRejectedValueOnce(new Error("db exploded"));
     const response = await createBatchRoute(requestWith([DRAFT_ID]));
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(JSON.stringify(body)).not.toContain("db exploded");
+  });
+});
+
+describe("GET /api/listing-studio/extension-batches — Listings Review redesign: resume tracking after a reload", () => {
+  const BATCH_ID = "22222222-2222-4222-8222-222222222222";
+
+  beforeEach(() => {
+    requireOwner.mockClear();
+    supabaseRequestAll.mockReset();
+  });
+
+  it("requires authentication", async () => {
+    requireOwner.mockRejectedValueOnce(new AuthError("Authentication required."));
+    const response = await getActiveBatchRoute();
+    expect(response.status).toBe(401);
+  });
+
+  it("returns the owner's most recent non-terminal, non-expired batch id", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      expect(path).toContain("owner_id=eq.owner-1");
+      expect(path).toContain("status=in.(pending_claim,claimed,in_progress)");
+      return [{ id: BATCH_ID, status: "claimed", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() }];
+    });
+    const response = await getActiveBatchRoute();
+    const body = await response.json();
+    expect(body.activeBatchId).toBe(BATCH_ID);
+  });
+
+  it("returns null when the owner has no in-flight batch", async () => {
+    supabaseRequestAll.mockImplementation(async () => []);
+    const response = await getActiveBatchRoute();
+    const body = await response.json();
+    expect(body.activeBatchId).toBeNull();
+  });
+
+  it("REGRESSION: never resurrects a batch whose real expires_at has already passed, even if its status column hasn't been flipped to 'expired' yet", async () => {
+    supabaseRequestAll.mockImplementation(async () => [
+      { id: BATCH_ID, status: "pending_claim", expires_at: new Date(Date.now() - 60 * 1000).toISOString() },
+    ]);
+    const response = await getActiveBatchRoute();
+    const body = await response.json();
+    expect(body.activeBatchId).toBeNull();
+  });
+
+  it("catches everything through safeApiError", async () => {
+    supabaseRequestAll.mockRejectedValueOnce(new Error("db exploded"));
+    const response = await getActiveBatchRoute();
     expect(response.status).toBe(500);
     const body = await response.json();
     expect(JSON.stringify(body)).not.toContain("db exploded");

@@ -11,7 +11,9 @@
     "http://localhost:3001/*",
     "http://localhost:3002/*",
     "https://purchase-tracker-one.vercel.app/*",
-    "https://www.vinted.co.uk/*"
+    "https://www.vinted.co.uk/*",
+    "http://localhost:3006/*",
+    "http://localhost:3005/*"
   ],
   "background": {
     "service_worker": "service-worker.js",

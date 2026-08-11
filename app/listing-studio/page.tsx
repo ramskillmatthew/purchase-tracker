@@ -3,7 +3,6 @@
 import { Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import GroupingWorkspace from "@/components/listing-studio/GroupingWorkspace";
-import WorkflowSteps from "@/components/listing-studio/WorkflowSteps";
 
 // Wrapped in Suspense because it reads useSearchParams (?view=create|saved),
 // matching the existing pattern in app/purchases/page.tsx.
@@ -28,7 +27,6 @@ function ListingStudioPageInner() {
         <button type="button" className={view === "saved" ? "period-active" : ""} onClick={() => changeView("saved")}>Saved drafts</button>
       </div>
     </header>
-    <WorkflowSteps />
 
     {view === "create" ? <GroupingWorkspace /> : <SavedDraftsPlaceholder />}
   </section>;

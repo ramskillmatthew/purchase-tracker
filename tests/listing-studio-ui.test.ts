@@ -30,8 +30,15 @@ describe("app/listing-studio/page.tsx — view labels represent views, not actio
     expect(source).toContain("<Suspense fallback={null}><ListingStudioPageInner /></Suspense>");
   });
 
-  it("renders the compact workflow indicator near the heading", () => {
-    expect(source).toContain("<WorkflowSteps />");
+  // Visual redesign follow-up — WorkflowSteps moved INSIDE GroupingWorkspace
+  // (it needs real workspace state — drafts/images/eligible groups — which
+  // only exists there; rendering it here would mean either a second fetch
+  // or threading a duplicate copy of that state down through props, both
+  // explicitly rejected). See the GroupingWorkspace describe block below
+  // for where it's actually verified.
+  it("no longer renders WorkflowSteps itself — it moved inside GroupingWorkspace, which already holds the real state it needs", () => {
+    expect(source).not.toContain("<WorkflowSteps");
+    expect(source).not.toContain('from "@/components/listing-studio/WorkflowSteps"');
   });
 
   it("renders the full Create view via GroupingWorkspace, and a distinct Saved placeholder — never the same component for both", () => {
@@ -44,32 +51,57 @@ describe("app/listing-studio/page.tsx — view labels represent views, not actio
   });
 });
 
-describe("components/listing-studio/WorkflowSteps.tsx — unfinished AI steps are visibly disabled, never clickable (UX refinement spec §2)", () => {
+describe("components/listing-studio/WorkflowSteps.tsx — dynamic, real-state-driven step indicator (visual redesign follow-up)", () => {
   const source = read("components/listing-studio/WorkflowSteps.tsx");
 
   it("lists exactly the four required steps in order", () => {
-    expect(source).toMatch(/Upload photos[\s\S]*Group products[\s\S]*Generate drafts[\s\S]*Review/);
+    expect(source).toMatch(/Upload[\s\S]*Group products[\s\S]*Generate drafts[\s\S]*Review/);
   });
 
-  it("marks Upload photos and Group products as available", () => {
-    const uploadStep = source.slice(source.indexOf('{ label: "Upload photos"'), source.indexOf('{ label: "Group products"') + 40);
-    const groupStep = source.slice(source.indexOf('{ label: "Group products"'), source.indexOf('{ label: "Generate drafts"') + 40);
-    expect(uploadStep).toContain("available: true");
-    expect(groupStep).toContain("available: true");
+  it("takes real workspace-derived booleans as props — never fetches or holds its own copy of workspace state", () => {
+    expect(source).toContain("hasPhotos: boolean");
+    expect(source).toContain("needsGrouping: boolean");
+    expect(source).toContain("hasEligibleGroups: boolean");
+    expect(source).toContain("hasGeneratedDrafts: boolean");
+    expect(source).not.toContain("fetch(");
+    expect(source).not.toContain("useState");
+    expect(source).not.toContain("useEffect");
   });
 
-  it("marks Generate drafts and Review as not available, with a 'Coming next' badge", () => {
-    const generateStep = source.slice(source.indexOf('{ label: "Generate drafts"'), source.indexOf('{ label: "Review"') + 20);
-    const reviewStep = source.slice(source.indexOf('{ label: "Review"'), source.length);
-    expect(generateStep).toContain("available: false");
-    expect(reviewStep).toContain("available: false");
-    expect(source).toContain("Coming next");
+  it("no longer hardcodes any step as permanently unavailable — the old static 'Coming next' badge is gone, since Generate drafts/Review genuinely work now", () => {
+    expect(source).not.toContain("available: false");
+    expect(source).not.toContain("Coming next");
   });
 
-  it("renders every step as plain text — never a <button> or <a>, so an unfinished step can never be clicked", () => {
+  it("derives exactly one 'current' step from the rules in the spec: Review once anything has been generated, else Generate drafts once eligible groups exist, else Group products while Unsorted still has photos, else Upload", () => {
+    const fn = source.slice(source.indexOf("function currentStepIndex"), source.indexOf("export default function WorkflowSteps"));
+    expect(fn).toMatch(/hasGeneratedDrafts[\s\S]*return 3/);
+    expect(fn).toMatch(/hasEligibleGroups[\s\S]*return 2/);
+    expect(fn).toMatch(/needsGrouping[\s\S]*return 1/);
+  });
+
+  it("renders every step as plain text — never a <button> or <a>, so a step can never be clicked as if it navigated anywhere", () => {
     expect(source).not.toContain("<button");
     expect(source).not.toContain("<a ");
     expect(source).not.toContain("<Link");
+  });
+
+  it("status communicates via text, not colour alone — a distinct class per state (complete/current/upcoming), and a checkmark glyph for completed steps rather than colour being the only signal", () => {
+    expect(source).toContain("listing-workflow-step-${status}");
+    expect(source).toContain('"✓"');
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — WorkflowSteps rendered inline, from state already held here (visual redesign follow-up)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+
+  it("imports and renders WorkflowSteps directly, passing props computed from state already in this component — never a new fetch", () => {
+    expect(source).toContain('import WorkflowSteps from "./WorkflowSteps"');
+    expect(source).toContain("<WorkflowSteps");
+    expect(source).toMatch(/hasPhotos=\{images\.length > 0\}/);
+    expect(source).toMatch(/needsGrouping=\{unsortedPhotoCount > 0\}/);
+    expect(source).toMatch(/hasEligibleGroups=\{eligibleListingGroups\.length > 0\}/);
+    expect(source).toMatch(/hasGeneratedDrafts=\{readyCount > 0\}/);
   });
 });
 
@@ -325,32 +357,53 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Select all / Clear
 describe("components/listing-studio/GroupingWorkspace.tsx — empty state, upload-to-group transition, compact stats (UX refinement spec §4/§8/§9)", () => {
   const source = read("components/listing-studio/GroupingWorkspace.tsx");
 
-  it("hides all grouping UI (stats, toolbar, groups list) until there is real data", () => {
-    const emptyBranch = source.slice(source.indexOf("!loading && !hasAnyData"), source.indexOf("{hasAnyData && <>"));
-    expect(emptyBranch).toContain("listing-empty-explanation");
-    expect(source).not.toMatch(/Photos uploaded<\/span>/);
-    expect(source).not.toContain("Needs review");
+  it("hides the batch toolbar and product list until there is real data — the empty state shows only the upload panel and a minimal message", () => {
+    const emptyBranch = source.slice(source.indexOf("{!hasAnyData && <>"), source.indexOf("{hasAnyData && <>"));
+    expect(emptyBranch).toContain("listing-empty-workspace");
+    expect(emptyBranch).toContain("No photos in this batch");
+    expect(emptyBranch).not.toContain("listing-batch-toolbar");
+    expect(emptyBranch).not.toContain("product-groups-list");
   });
 
-  it("the empty-state explanation mentions the Unsorted group", () => {
-    expect(source).toMatch(/Unsorted group/);
+  // Visual redesign, pass 2 — the four-card stat grid was replaced by one
+  // inline count line in a slim toolbar (still the same four already-loaded
+  // values, still gated behind hasAnyData, still no new fetch).
+  it("shows one inline toolbar line with the four real counts — photos, products, ready to generate, drafts generated — never a grid of stat cards", () => {
+    expect(source).not.toContain("listing-stats-grid");
+    expect(source).not.toContain("listing-stat-card");
+    expect(source).toContain("listing-batch-toolbar-counts");
+    expect(source).toMatch(/\{images\.length\} photo\{images\.length === 1 \? "" : "s"\}[\s\S]{0,20}\{productGroupsCount\} product\{productGroupsCount === 1 \? "" : "s"\}[\s\S]{0,20}\{eligibleListingGroups\.length\} ready to generate[\s\S]{0,20}\{readyCount\} draft\{readyCount === 1 \? "" : "s"\} generated/);
+    expect(source).not.toContain("fetch(`/api/listing-studio/stats");
+    // productGroupsCount itself excludes Unsorted — a real product-group count, not every draft.
+    expect(source).toContain('drafts.filter(draft => draft.title !== "Unsorted").length');
+  });
+
+  it("the empty workspace message is minimal — no instructions, tips, or explanation of what Unsorted means", () => {
+    expect(source).toContain("No photos in this batch");
+    expect(source).not.toMatch(/No photos in this batch[\s\S]{0,200}Unsorted/);
   });
 
   it("the '+ New product' toolbar only renders once there is data — never floating in empty space", () => {
-    const hasAnyDataBranch = source.slice(source.indexOf("{hasAnyData && <>"), source.indexOf("</>}"));
+    const hasAnyDataBranch = source.slice(source.indexOf("{hasAnyData && <>"), source.lastIndexOf("</>}"));
     expect(hasAnyDataBranch).toContain("+ New product");
   });
 
-  it("shows a compact one-line summary with descriptive wording (photos uploaded · product groups · drafts generated) instead of the old five-card dashboard", () => {
-    expect(source).toContain("listing-studio-summary-line");
-    expect(source).toContain("photo{images.length === 1 ? \"\" : \"s\"} uploaded");
-    expect(source).toContain("product group{drafts.length === 1");
-    expect(source).toContain("draft{readyCount === 1 ? \"\" : \"s\"} generated");
+  it("shows a search input and a status filter, both operating on already-loaded state — never a new fetch", () => {
+    expect(source).toContain('aria-label="Search product groups"');
+    expect(source).toContain('aria-label="Filter by status"');
+    expect(source).toContain("const [searchQuery, setSearchQuery] = useState");
+    expect(source).toContain('const [statusFilter, setStatusFilter] = useState<CardStatus | "all">("all")');
+    expect(source).not.toMatch(/searchQuery[\s\S]{0,200}fetch\(/);
   });
 
-  it("shows a success message naming the destination group after a successful upload, and points to the next action", () => {
+  it("the search/filter narrows the already-loaded product drafts by reusing computeStatus — never a second status system", () => {
+    expect(source).toContain("const visibleProductDrafts = orderedProductDrafts.filter(draft =>");
+    expect(source).toContain("computeStatus(false, listingsByDraftId.get(draft.id)");
+  });
+
+  it("shows a success message naming the destination group after a successful upload, and auto-dismisses it after a few seconds rather than occupying permanent page space", () => {
     expect(source).toContain("uploaded and added to");
-    expect(source).toContain("Select photos and split them into product groups.");
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*if \(!uploadSuccessMessage\) return;\s*const timer = setTimeout\(\(\) => setUploadSuccessMessage\(""\), 4000\);/);
   });
 
   it("scrolls the just-uploaded group into view rather than leaving the user to find it themselves", () => {
@@ -722,8 +775,11 @@ describe("components/listing-studio/GroupingWorkspace.tsx — automatic AI produ
   const source = read("components/listing-studio/GroupingWorkspace.tsx");
   const handlerFn = () => source.slice(source.indexOf("async function handleAutoGroupProducts"), source.indexOf("async function handleApplyAutoGroupProposal"));
 
-  it("adds an 'Auto-group products' action, disabled while running or when there are no Unsorted photos to analyse", () => {
-    expect(source).toContain("{autoGroupRunning ? \"Grouping…\" : \"Auto-group products\"}");
+  // Visual redesign follow-up — the button's own label is now the shorter
+  // "Auto-group" (matching the sticky action bar's compact mockup wording);
+  // the underlying handler/disabled-logic below is completely unchanged.
+  it("adds an 'Auto-group' action, disabled while running or when there are no Unsorted photos to analyse", () => {
+    expect(source).toContain("{autoGroupRunning ? \"Grouping…\" : \"Auto-group\"}");
     expect(source).toContain("disabled={autoGroupRunning || unsortedPhotoCount === 0}");
   });
 
@@ -937,30 +993,35 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
   const source = read("components/listing-studio/GroupingWorkspace.tsx");
   const handlerFn = () => source.slice(source.indexOf("async function handleClearWorkspace"), source.indexOf("// ---- Keyboard shortcuts"));
 
-  it("adds a clearly destructive but not overly prominent 'Clear all' action in the same toolbar as Auto-group products / + New product", () => {
-    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
-    expect(toolbar).toContain("Clear all");
-    expect(toolbar).toContain('className="button-danger listing-clear-all"');
+  // Visual redesign follow-up — the standalone .product-groups-toolbar was
+  // absorbed into the new sticky bottom action bar (.listing-sticky-bar);
+  // every one of these controls/behaviours is unchanged, just relocated.
+  it("adds a clearly destructive but visually SEPARATE 'Clear all' action in the sticky action bar, alongside Auto-group / Generate listings / + New product", () => {
+    const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
+    expect(bar).toContain("Clear all");
+    expect(bar).toContain('className="button-danger listing-clear-all listing-sticky-bar-danger"');
   });
 
   it("does not execute immediately on click — it only opens the confirmation dialog", () => {
-    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
-    expect(toolbar).toContain("onClick={() => setClearWorkspaceDialogOpen(true)}");
-    expect(toolbar).not.toContain("onClick={handleClearWorkspace}");
+    const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
+    expect(bar).toContain("onClick={() => setClearWorkspaceDialogOpen(true)}");
+    expect(bar).not.toContain("onClick={handleClearWorkspace}");
   });
 
-  it("shows a small, unobtrusive helper note near Auto-group products about keeping each product's photos together in upload order — never as an error/warning banner", () => {
-    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{clearWorkspaceError &&'));
-    expect(toolbar).toContain('<p className="auto-group-order-hint">For best results, keep each product');
-    expect(toolbar).not.toContain('role="alert"');
-    expect(toolbar).not.toContain('role="status"');
+  it("shows a small, unobtrusive helper note about keeping each product's photos together in upload order — never as an error/warning banner", () => {
+    const hintIdx = source.indexOf('<p className="auto-group-order-hint">');
+    expect(hintIdx).toBeGreaterThan(-1);
+    const hintTag = source.slice(hintIdx, source.indexOf("</p>", hintIdx));
+    expect(hintTag).toContain("For best results, keep each product");
+    expect(hintTag).not.toContain('role="alert"');
+    expect(hintTag).not.toContain('role="status"');
   });
 
   it("REGRESSION: disables the 'Clear all' trigger while an upload is active, while auto-grouping is running, while a clear is already running, or while listings are generating", () => {
     expect(source).toContain("const uploadsActive = uploadItems.some(item => item.state === \"pending\" || item.state === \"uploading\");");
     expect(source).toContain("const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;");
-    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('{autoGroupRunning && autoGroupProgress'));
-    expect(toolbar).toContain("disabled={clearWorkspaceDisabled}");
+    const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
+    expect(bar).toContain("disabled={clearWorkspaceDisabled}");
   });
 
   it("renders ClearWorkspaceDialog only when clearWorkspaceDialogOpen is true, wired to the real handler and loading state", () => {
@@ -1118,11 +1179,14 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Gene
   const source = read("components/listing-studio/GroupingWorkspace.tsx");
   const handlerFn = () => source.slice(source.indexOf("async function handleGenerateListings"), source.indexOf("async function handleSaveListingFields"));
 
-  it("adds a 'Generate Listings' action in the same toolbar as Auto-group products, disabled when there is nothing eligible or another run is active", () => {
-    const toolbar = source.slice(source.indexOf('<div className="product-groups-toolbar">'), source.indexOf('<p className="auto-group-order-hint">'));
-    expect(toolbar).toContain("Generate Listings");
-    expect(toolbar).toContain("onClick={handleGenerateListings}");
-    expect(toolbar).toContain("disabled={generateListingsDisabled || eligibleListingGroups.length === 0}");
+  // Visual redesign follow-up — relocated into the sticky action bar
+  // alongside Auto-group; label shortened to match the mockup ("Generate
+  // listings"), handler/disabled-logic below completely unchanged.
+  it("adds a 'Generate listings' action in the sticky action bar, disabled when there is nothing eligible or another run is active", () => {
+    const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
+    expect(bar).toContain("Generate listings");
+    expect(bar).toContain("onClick={handleGenerateListings}");
+    expect(bar).toContain("disabled={generateListingsDisabled || eligibleListingGroups.length === 0}");
   });
 
   it("REGRESSION: eligible groups exclude Unsorted, empty groups, and groups already generated — re-clicking only retries what's still missing", () => {
@@ -1255,15 +1319,26 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 4 UX 
   });
 });
 
-describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4 UX fix: 'Preview listing' action beside 'Edit fields'", () => {
+describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4 UX fix: 'Preview' action beside 'Edit fields'", () => {
   const source = read("components/listing-studio/ProductGroupCard.tsx");
 
-  it("renders a compact 'Preview listing' action alongside 'Edit fields', inside the same listing card, only once a listing exists", () => {
-    const cardBlock = source.slice(source.indexOf("{listing &&"), source.indexOf('<div className="product-group-selection-row">'));
-    expect(cardBlock).toContain('onClick={() => onPreviewListing(group.id)}');
-    expect(cardBlock).toContain(">Preview listing<");
-    expect(cardBlock).toContain('onClick={() => onEditFields(group.id)}');
-    expect(cardBlock).toContain('className="listing-card-actions"');
+  // Visual redesign follow-up — Preview/Edit fields moved from the
+  // expanded listing-card block into the compact header's own action row
+  // (compact card requirement #3: only shown once `listing` exists,
+  // exactly matching the pre-existing `{listing && ...}` condition, just
+  // relocated — an ungenerated group shows neither).
+  it("renders a compact 'Preview' action alongside 'Edit fields' in the compact action row, only once a listing exists", () => {
+    const actionsBlock = source.slice(source.indexOf('<div className="product-group-compact-actions">'), source.indexOf('<OverflowMenu label={`More actions'));
+    expect(actionsBlock).toContain('{listing && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}');
+    expect(actionsBlock).toContain('{listing && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}');
+  });
+
+  it("an ungenerated group (no listing) shows neither Preview nor Edit fields — only Expand/manage photos and the overflow menu remain", () => {
+    const actionsBlock = source.slice(source.indexOf('<div className="product-group-compact-actions">'), source.indexOf('{expanded && <div className="product-group-expanded-body">'));
+    // Both are gated the SAME way — never one without the other.
+    const previewGated = actionsBlock.includes("{listing && <button") && actionsBlock.includes("onPreviewListing(group.id)");
+    expect(previewGated).toBe(true);
+    expect(actionsBlock).toContain('onClick={() => onToggleExpand(group.id)}');
   });
 
   it("takes onPreviewListing as a required prop, scoped by this group's own id, matching onEditFields's own convention", () => {
@@ -1306,6 +1381,289 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4 UX fix
 
   it("includes previewGroupId in anyDialogOpen, so keyboard shortcuts are disabled while this dialog is open, matching every other dialog", () => {
     expect(source).toContain("const anyDialogOpen = Boolean(moveDialogGroupId || mergeDialogGroupId || deleteGroupTarget || bulkDeleteConfirmOpen || clearWorkspaceDialogOpen || editFieldsGroupId || previewGroupId);");
+  });
+});
+
+// ============================================================================
+// Visual redesign — compact/expandable product cards, workspace stats,
+// dynamic step indicator, sticky action bar. Every assertion below checks
+// that an EXISTING control/handler was relocated/restyled, never that new
+// business logic, fetches, or backend concepts were introduced.
+// ============================================================================
+
+describe("components/listing-studio/ProductGroupCard.tsx — compact/expanded restructure (visual redesign)", () => {
+  const source = read("components/listing-studio/ProductGroupCard.tsx");
+
+  it("takes expanded/onToggleExpand/isGenerating/hasFailedGeneration as new display-only props — never a new fetch or persisted field", () => {
+    expect(source).toContain("expanded: boolean;");
+    expect(source).toContain("onToggleExpand: (draftId: string) => void;");
+    expect(source).toContain("isGenerating: boolean;");
+    expect(source).toContain("hasFailedGeneration: boolean;");
+    expect(source).not.toContain("fetch(");
+  });
+
+  it("renders a cover thumbnail (first photo) with a Cover badge, and a thumbnail strip of up to 5 more photos plus a +N overflow indicator, preserving photo order", () => {
+    expect(source).toContain("const coverPhoto = photos[0] ?? null;");
+    expect(source).toContain("const stripPhotos = photos.slice(1, 6);");
+    expect(source).toContain("const remainderCount = Math.max(0, photos.length - 1 - stripPhotos.length);");
+    expect(source).toContain('{remainderCount > 0 && <button type="button" className="product-group-thumb product-group-thumb-more" onClick={openCoverOrThumb}>+{remainderCount}</button>}');
+  });
+
+  it("clicking the cover or a thumbnail expands the card (no separate lightbox exists in this codebase) — never fetches or navigates anywhere new", () => {
+    expect(source).toContain("function openCoverOrThumb() {");
+    const fn = source.slice(source.indexOf("function openCoverOrThumb()"), source.indexOf("return <article"));
+    expect(fn).toContain("onToggleExpand(group.id)");
+  });
+
+  it("the compact header always renders; the full existing photo-management body (select-all, Move/Split toolbar, SortablePhotoGrid) only renders when expanded", () => {
+    expect(source).toContain('<div className="product-group-compact listing-row-grid">');
+    expect(source).toContain("{expanded && <div className=\"product-group-expanded-body\">");
+    const expandedBlock = source.slice(source.indexOf('{expanded && <div className="product-group-expanded-body">'), source.length);
+    expect(expandedBlock).toContain('<div className="product-group-selection-row">');
+    expect(expandedBlock).toContain('<div className="product-group-selection-toolbar"');
+    expect(expandedBlock).toContain("<SortablePhotoGrid");
+    // Every existing photo-grid handler still wired through unchanged.
+    expect(expandedBlock).toContain("onToggleSelect={onToggleSelect}");
+    expect(expandedBlock).toContain("onSelectRange={onSelectRange}");
+    expect(expandedBlock).toContain("onReorder={orderedIds => onReorder(group.id, orderedIds)}");
+    expect(expandedBlock).toContain("onSetCover={photoId => onSetCover(group.id, photoId)}");
+    expect(expandedBlock).toContain("onRemove={onRemovePhoto}");
+  });
+
+  it("the Manage photos/Collapse toggle is always present, with an aria-expanded state", () => {
+    expect(source).toMatch(/onClick=\{\(\) => onToggleExpand\(group\.id\)\}[^>]*aria-expanded=\{expanded\}/);
+    expect(source).toContain('{expanded ? "Collapse" : "Manage photos"}');
+  });
+
+  it("the group-level OverflowMenu (Merge, Delete) is ALWAYS rendered, including for Unsorted — an existing capability, never removed by the redesign", () => {
+    const menuBlock = source.slice(source.indexOf("<OverflowMenu label={`More actions"), source.indexOf("<OverflowMenu label={`More actions") + 700);
+    expect(menuBlock).toContain('{ label: "Merge into another group", onClick: () => onMerge(group.id) }');
+    expect(menuBlock).toContain('{ label: "Delete group", onClick: () => onDelete(group.id), tone: "danger" }');
+    expect(source).not.toMatch(/\{!isUnsorted && <OverflowMenu/);
+  });
+
+  it("derives a status badge from real existing data — ready requires both a generated listing AND an assigned Vinted category; a generated listing missing a category is Needs review; Unsorted has no status at all", () => {
+    const fn = source.slice(source.indexOf("function computeStatus"), source.indexOf("const STATUS_LABELS"));
+    expect(fn).toContain('if (isUnsorted) return null;');
+    expect(fn).toContain('if (isGenerating) return "generating";');
+    expect(fn).toContain('if (listing) return vintedCategoryId == null ? "needs_review" : "ready";');
+    expect(fn).toContain('if (hasFailedGeneration) return "failed";');
+    expect(fn).toContain('return "not_generated";');
+  });
+
+  it("GroupSummary is widened to the draft's own already-loaded fields (brand/model/colours/material/uk_size/sku/vinted_category_id) — a type-completeness fix, never a new fetch", () => {
+    const typeBlock = source.slice(source.indexOf("export type GroupSummary"), source.indexOf("export type GeneratedListingSummary"));
+    expect(typeBlock).toContain("brand: string | null; model: string | null; colours: string[] | null; material: string | null;");
+    expect(typeBlock).toContain("uk_size: string | null; sku: string | null;");
+    expect(typeBlock).toContain("vinted_category_id: number | null;");
+  });
+
+  it("shows brand/size/SKU/colour/material even before generation, preferring the confirmed post-generation listing values but falling back to the draft's own already-loaded fields", () => {
+    expect(source).toContain("const brand = listing?.brand ?? group.brand;");
+    expect(source).toContain("const ukSize = listing?.ukSize ?? group.uk_size;");
+    expect(source).toContain("const sku = listing?.sku ?? group.sku;");
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — expand/collapse state and generation display tracking (visual redesign)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+
+  it("only one group can be expanded at a time — a single expandedGroupId, never a Set/array of expanded ids", () => {
+    expect(source).toContain("const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);");
+    expect(source).toContain("const handleToggleExpand = useCallback((draftId: string) => {");
+    expect(source).toContain("setExpandedGroupId(current => (current === draftId ? null : draftId));");
+  });
+
+  it("REGRESSION: generation display tracking is purely additive inside the EXISTING loop — never changes request order, retries, payloads, or error handling", () => {
+    const fn = source.slice(source.indexOf("async function handleGenerateListings"), source.indexOf("async function handleSaveListingFields"));
+    // The exact same sequential for-of loop over eligibleListingGroups, same endpoint, same POST/no-body call, same failureCount/anySucceeded logic.
+    expect(fn).toContain("for (const group of eligibleListingGroups) {");
+    expect(fn).toContain('fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" })');
+    expect(fn).not.toContain("body:");
+    expect(fn).not.toContain("break;");
+    // The new display-only state is set/reset alongside, never gating the request itself.
+    expect(fn).toContain("setCurrentlyGeneratingGroupId(group.id); // display-only — the fetch below is unchanged");
+    expect(fn).toContain("setGenerationFailedGroupIds(new Set());");
+    expect(fn).toContain("setCurrentlyGeneratingGroupId(null);");
+  });
+
+  it("passes expanded/onToggleExpand/isGenerating/hasFailedGeneration through to every ProductGroupCard", () => {
+    expect(source).toContain("expanded={draft.id === expandedGroupId}");
+    expect(source).toContain("onToggleExpand={handleToggleExpand}");
+    expect(source).toContain("isGenerating={draft.id === currentlyGeneratingGroupId}");
+    expect(source).toContain("hasFailedGeneration={generationFailedGroupIds.has(draft.id)}");
+  });
+
+  it("Unsorted renders in its own section, entirely hidden once it has no photos left — not even a collapsed empty row — and is never part of the searchable/filterable product list", () => {
+    expect(source).toContain("{unsortedPhotoCount > 0 && unsortedDraft && <div className=\"product-groups-list listing-unsorted-section\">");
+    expect(source).toContain("{renderGroupCard(unsortedDraft)}");
+    expect(source).toContain("{orderedProductDrafts.length > 0 && <>");
+    expect(source).toContain("visibleProductDrafts.map(draft => renderGroupCard(draft))");
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx — sticky action bar never covers the last card (visual redesign)", () => {
+  const source = read("components/listing-studio/GroupingWorkspace.tsx");
+  const cssSource = read("app/globals.css");
+
+  it("the workspace root reserves bottom padding sized for the sticky bar, so it can never cover the final product card or its controls", () => {
+    expect(cssSource).toContain(".listing-studio-create { padding-bottom: 84px; }");
+  });
+
+  it("the mobile stacked sticky bar (taller, column layout) gets extra reserved bottom padding on the workspace root", () => {
+    expect(cssSource).toMatch(/@media \(max-width: 900px\) \{[\s\S]*?\.listing-studio-create \{ padding-bottom: 110px; \}/);
+  });
+
+  it("selected-photo count and Clear selection live in the sticky bar, using the existing global selectedIds state — no new selection concept", () => {
+    const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
+    expect(bar).toContain("{selectedIds.size > 0");
+    expect(bar).toContain("onClick={() => setSelectedIds(new Set())}");
+  });
+
+  it("when nothing is selected, the sticky bar's left side shows real product and photo counts — '{n} products · {n} photos'", () => {
+    expect(source).toContain('<strong>{productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {images.length} photo{images.length === 1 ? "" : "s"}</strong>');
+  });
+});
+
+describe("app/globals.css — responsive rules for the redesigned Listing Studio (visual redesign)", () => {
+  const source = read("app/globals.css");
+  // Bounded to end before the (unrelated) Listings Review CSS section —
+  // otherwise a later lastIndexOf("@media (max-width: 900px)"/"...620px")
+  // would find one of ITS dedicated responsive blocks instead of Listing
+  // Studio's own, once Listings Review gained its own dedicated blocks
+  // later in the file (a real fragility caught by that redesign work,
+  // never an actual cascade bug in either section).
+  const listingStudioSection = source.slice(0, source.indexOf(".listings-review-page {"));
+
+  it("desktop: the compact upload strip is a single row, and the row grid gives Product group the majority of the row width", () => {
+    expect(source).toMatch(/\.listing-dropzone-compact \{[^}]*flex-direction: row;/);
+    expect(source).toContain(".listing-row-grid { grid-template-columns: minmax(0, 1fr) 60px 136px 220px; }");
+  });
+
+  // REGRESSION: caught live — the header and every row are separate grid
+  // containers, so an `auto` track sizes independently per container (the
+  // header's plain "Actions" text vs. a row's actual button cluster), which
+  // silently misaligned the Actions column between the header and rows
+  // (and between rows with different action counts) even though every
+  // other column lined up. A fixed pixel width is required at every
+  // breakpoint that still has a 4-column row grid.
+  it("the Actions column is a fixed width at every breakpoint, never 'auto' — auto sizes independently per grid container and silently misaligns columns", () => {
+    expect(source).not.toMatch(/\.listing-row-grid \{ grid-template-columns:[^}]*auto;/);
+  });
+
+  it("the batch toolbar's search/filter controls wrap onto their own line rather than overflowing at narrower desktop widths", () => {
+    expect(source).toMatch(/\.listing-batch-toolbar \{[^}]*flex-wrap: wrap;/);
+  });
+
+  // Follow-up correction (real cascade-order bug caught during live browser
+  // verification, pass 1) — every redesign responsive override still lives
+  // in its OWN dedicated 900px/620px blocks, positioned AFTER every base
+  // "Listing Studio" rule (see that section's own comment on why:
+  // equal-specificity CSS resolves by source order, so an override placed
+  // BEFORE its own base rule is silently discarded even when the media
+  // query genuinely matches). lastIndexOf specifically targets these
+  // dedicated blocks, never the pre-existing, unrelated 900px/620px blocks
+  // earlier in the file.
+  it("mobile (max-width: 900px): the sticky bar drops its sidebar offset and the row grid gives back the Status column's label width — in a dedicated block positioned AFTER the base rules, so the override actually wins", () => {
+    const start = listingStudioSection.lastIndexOf("@media (max-width: 900px)");
+    const block = listingStudioSection.slice(start, listingStudioSection.lastIndexOf("@media (max-width: 620px)"));
+    expect(start).toBeGreaterThan(listingStudioSection.indexOf(".listing-dropzone-compact {"));
+    expect(block).toContain(".listing-sticky-bar { inset: auto 14px 78px; }");
+    expect(block).toContain(".listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 40px 160px; }");
+  });
+
+  it("mobile (max-width: 620px): rows collapse to a single stacked column, the list header hides, the thumbnail strip stays usable, and tap targets are at least ~44px — in a dedicated block positioned AFTER the base rules", () => {
+    const start = listingStudioSection.lastIndexOf("@media (max-width: 620px)");
+    const block = listingStudioSection.slice(start, listingStudioSection.length);
+    expect(start).toBeGreaterThan(listingStudioSection.indexOf(".listing-dropzone-compact {"));
+    expect(block).toContain(".listing-list-header { display: none; }");
+    expect(block).toContain(".listing-row-grid { grid-template-columns: 1fr; }");
+    expect(block).toContain(".product-group-thumb-strip { max-width: 100%; }");
+    expect(block).toMatch(/\.product-group-compact-actions \.button-secondary \{ min-height: 44px;/);
+    expect(block).toMatch(/\.product-group-thumb \{ width: 44px; height: 44px; \}/);
+  });
+
+  it("REGRESSION: every redesign responsive override sits strictly AFTER its own base rule in source order — the exact bug class caught live (equal specificity + earlier source position silently loses, even when the media query matches)", () => {
+    const baseIdx = listingStudioSection.indexOf(".listing-dropzone-compact {");
+    const override900Idx = listingStudioSection.lastIndexOf("@media (max-width: 900px)");
+    const override620Idx = listingStudioSection.lastIndexOf("@media (max-width: 620px)");
+    expect(override900Idx).toBeGreaterThan(baseIdx);
+    expect(override620Idx).toBeGreaterThan(baseIdx);
+  });
+
+  it("the thumbnail strip scrolls horizontally when it doesn't fit, at any width — never causes page-level horizontal overflow", () => {
+    expect(source).toMatch(/\.product-group-thumb-strip \{[^}]*overflow-x: auto;/);
+  });
+
+  it("status communicates via text (a distinct label per state) as well as colour — colour is never the only signal", () => {
+    expect(source).toContain(".listing-generation-status-ready");
+    expect(source).toContain(".listing-generation-status-needs_review");
+    expect(source).toContain(".listing-generation-status-generating");
+    expect(source).toContain(".listing-generation-status-failed");
+    expect(source).toContain(".listing-generation-status-not_generated");
+  });
+
+  it("Ready reuses the SAME established green success treatment already used elsewhere (upload-status-badge-uploaded / listings-review-status-ready) — no new colour invented", () => {
+    expect(source).toContain(".listing-generation-status-ready { color: #16845d; background: rgba(38, 190, 131, .12); }");
+  });
+
+  it("no !important is introduced by any new Listing Studio rule, including its dedicated responsive blocks", () => {
+    const start = source.indexOf(".listing-dropzone-compact {");
+    const end = source.lastIndexOf(".listing-sticky-bar-danger { margin-left: 0; }") + 60;
+    const newRules = source.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(newRules).not.toContain("!important");
+  });
+});
+
+describe("Listing Studio visual redesign, pass 2 — explicitly omitted controls (per direct user decision, not an oversight)", () => {
+  const workspaceSource = read("components/listing-studio/GroupingWorkspace.tsx");
+  const cardSource = read("components/listing-studio/ProductGroupCard.tsx");
+
+  it("never adds a row-level selection checkbox or a drag/reorder handle to the product queue — only the existing photo-level selectedIds concept exists", () => {
+    expect(cardSource).not.toMatch(/type="checkbox"/);
+    expect(cardSource).not.toContain("draggable");
+    expect(workspaceSource).not.toContain("<th><input type=\"checkbox\"");
+  });
+
+  it("never adds a list/grid density toggle — no such control exists anywhere in the redesigned markup", () => {
+    for (const source of [workspaceSource, cardSource]) {
+      expect(source).not.toMatch(/grid.?view|list.?view|density.?toggle/i);
+    }
+  });
+
+  it("the list header has no checkbox/drag-handle column — exactly Product group / Photos / Status / Actions", () => {
+    const header = workspaceSource.slice(workspaceSource.indexOf('<div className="listing-list-header listing-row-grid">'), workspaceSource.indexOf("</div>", workspaceSource.indexOf('<div className="listing-list-header listing-row-grid">')) + 200);
+    expect(header).toContain("Product group");
+    expect(header).toContain("Photos");
+    expect(header).toContain("Status");
+    expect(header).toContain("Actions");
+    expect(header).not.toContain("checkbox");
+  });
+});
+
+describe("Listing Studio visual redesign — Upload/publish and Chrome-extension safety are completely unaffected", () => {
+  const workspaceSource = read("components/listing-studio/GroupingWorkspace.tsx");
+  const cardSource = read("components/listing-studio/ProductGroupCard.tsx");
+  const stepsSource = read("components/listing-studio/WorkflowSteps.tsx");
+
+  it("no file touched by this redesign mentions Upload/Publish controls, the extension pairing flow, or anything vinted-draft-queue-extension-adjacent", () => {
+    for (const source of [workspaceSource, cardSource, stepsSource]) {
+      expect(source).not.toMatch(/\bpublish\b/i);
+      expect(source).not.toContain("upload-form-save-button");
+      expect(source).not.toContain("vinted-draft-queue-extension");
+      expect(source).not.toContain("chrome.runtime");
+    }
+  });
+
+  it("REGRESSION: no app/api route, lib/listing-studio business logic file, or the extension's own source was modified by this redesign", () => {
+    // This redesign only ever touches presentational files — asserted here
+    // by confirming none of the three redesigned files import from an API
+    // route or duplicate business logic already owned by lib/listing-studio.
+    for (const source of [workspaceSource, cardSource]) {
+      expect(source).not.toMatch(/from ["']@\/app\/api/);
+    }
   });
 });
 

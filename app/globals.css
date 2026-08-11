@@ -1028,13 +1028,20 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .search-suggestion .button.secondary{background:transparent;border:1px solid currentColor;color:inherit}
 @media(max-width:700px){.search-suggestion{align-items:stretch;flex-direction:column}.search-suggestion>div:last-child .button{flex:1}}
 
-/* Listing Studio (Milestone 2 + UX refinement) */
-.listing-workflow-steps { display: flex; margin: 6px 0 14px; padding: 0; align-items: center; flex-wrap: wrap; gap: 6px; list-style: none; }
-.listing-workflow-step { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 650; }
-.listing-workflow-step-index { display: inline-grid; width: 16px; height: 16px; place-items: center; border-radius: 50%; color: var(--text); background: var(--surface-3); font-size: 8px; font-weight: 800; }
+/* Listing Studio (Milestone 2 + UX refinement + visual redesign) */
+.listing-workflow-steps { display: flex; margin: 0 0 16px; padding: 0; align-items: center; flex-wrap: wrap; gap: 6px; list-style: none; }
+.listing-workflow-step { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.listing-workflow-step-index { display: inline-grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: var(--text); background: var(--surface-3); font-size: 9px; font-weight: 800; }
+/* A step already passed — a quiet checkmark, never as loud as the current step. */
+.listing-workflow-step-complete { color: var(--muted); }
+.listing-workflow-step-complete .listing-workflow-step-index { color: #16845d; background: rgba(38, 190, 131, .14); }
+/* The one step actually reflecting where the workspace is right now — the
+   restrained purple accent, filled circle, matching the mockup's single
+   highlighted step. */
+.listing-workflow-step-current { color: var(--text); font-weight: 720; }
+.listing-workflow-step-current .listing-workflow-step-index { color: white; background: var(--primary); }
 .listing-workflow-step-upcoming { color: var(--subtle); }
 .listing-workflow-step-upcoming .listing-workflow-step-index { color: var(--subtle); background: var(--surface-2); }
-.listing-workflow-step-badge { padding: 1px 6px; border-radius: 5px; color: var(--subtle); background: var(--surface-2); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .listing-workflow-step-arrow { color: var(--subtle); font-size: 10px; }
 
 /* Compact single-block panel — ~37% shorter than the previous version
@@ -1060,11 +1067,37 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .listing-dropzone-primary { min-width: 152px; }
 .listing-dropzone-formats { margin: 8px 0 0; color: var(--subtle); font-size: 8.5px; letter-spacing: .01em; }
 
-.listing-empty-explanation { max-width: 520px; margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+/* Visual redesign (pass 2) — once real workspace data exists, the upload
+   panel collapses into a slim single-row strip (no change to drag-drop or
+   file-input handling — see UploadDropzone.tsx's `compact` prop) so the
+   product queue can take priority instead of a tall permanent upload card. */
+.listing-dropzone-compact { min-height: 0; padding: 8px 14px; flex-direction: row; justify-content: flex-start; gap: 12px; margin-bottom: 12px; }
+.listing-dropzone-compact .listing-dropzone-title { font-size: 11.5px; }
+.listing-dropzone-compact .listing-dropzone-hint { display: none; }
+.listing-dropzone-compact .listing-dropzone-actions { width: auto; margin-top: 0; gap: 8px; }
+.listing-dropzone-compact .listing-dropzone-actions label { min-height: 34px; padding: 0 14px; }
+.listing-dropzone-compact .listing-dropzone-primary { min-width: 0; }
+.listing-dropzone-compact .listing-dropzone-formats { margin: 0 0 0 auto; }
 
-.listing-upload-success { margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 9px; background: var(--primary-soft); }
+/* Pass 2 — a subtle, single-line empty workspace area; no icon, no
+   instructions, nothing decorative. Only shown once (never a second one
+   below the upload panel). */
+.listing-empty-workspace { margin-top: 12px; padding: 22px; border: 1px dashed var(--line); border-radius: 12px; color: var(--subtle); font-size: 11px; text-align: center; }
+
+/* Pass 2 — one slim toolbar replacing the old four-card stat grid: an
+   inline count line plus real client-side search/filter controls. */
+.listing-batch-toolbar { display: flex; margin-bottom: 12px; padding: 10px 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.listing-batch-toolbar-counts { min-width: 0; color: var(--text); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.listing-batch-toolbar-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.listing-batch-search { min-width: 200px; }
+.listing-batch-search .input, .listing-batch-status-filter .input { min-height: 34px; padding: 0 10px; font-size: 10.5px; }
+.listing-batch-status-filter { min-width: 130px; }
+
+.listing-upload-success { margin-bottom: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 9px; background: var(--primary-soft); }
 .listing-upload-success strong { display: block; font-size: 11px; }
-.listing-upload-success span { color: var(--muted); font-size: 10px; }
+
+.listing-no-matches { margin: 0; padding: 22px; border: 1px solid var(--line); border-radius: 10px; color: var(--subtle); background: var(--surface); font-size: 11px; text-align: center; }
+.listing-unsorted-section { margin-bottom: 14px; }
 
 .listing-studio-summary-line { display: flex; margin: 12px 0; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 650; }
 
@@ -1101,7 +1134,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .product-group-title-display { min-width: 0; flex: 1; min-height: 30px; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; color: var(--text); background: transparent; font: inherit; font-size: 13px; font-weight: 700; text-align: left; cursor: text; }
 .product-group-title-display:hover, .product-group-title-display:focus-visible { border-color: var(--line-strong); background: var(--surface-2); }
 .product-group-unsorted-badge { padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-2); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.product-group-save-state { margin-left: auto; color: var(--muted); font-size: 9px; font-weight: 600; }
+.product-group-save-state { color: var(--muted); font-size: 9px; font-weight: 600; }
 .product-group-empty { margin: 8px 0; color: var(--muted); font-size: 11px; }
 .listing-card { margin: 0 0 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--line)); border-radius: 9px; background: var(--primary-soft); }
 .listing-card-title { margin: 0; color: var(--text); font-size: 12px; font-weight: 700; line-height: 1.4; }
@@ -1127,6 +1160,122 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .product-group-selection-toolbar { display: flex; margin-bottom: 8px; padding: 6px 9px; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 8px; background: var(--primary-soft); font-size: 10px; font-weight: 650; }
 .product-group-selection-toolbar button { min-height: 28px; padding: 0 10px; font-size: 9px; }
 
+/* Visual redesign — compact horizontal product card. .product-group-card
+   itself (padding/border/radius/shadow above) is reused unchanged as the
+   outer container for both the compact row and the expanded body. */
+/* Pass 2 — the compact row and the list header above it share this exact
+   grid-column template so every row's Photos/Status/Actions line up under
+   their header label by construction, not by eyeballing widths in two
+   places. Row min-height (with the card's own 10px vertical padding) lands
+   in the 110-125px target. */
+/* Actions column is a FIXED width, not auto — each row is its own grid
+   container, so an auto track sizes independently per row/header (e.g. the
+   header's plain "Actions" text vs. a row's actual button cluster), which
+   would silently misalign columns across rows. A fixed width is the only
+   way every row (and the header) lines up under the same column edges.
+   220px comfortably fits Preview + Edit fields + Manage photos + overflow
+   on one line; product-group-compact-actions still wraps within it if a
+   future action makes that combination too wide. */
+.listing-row-grid { grid-template-columns: minmax(0, 1fr) 60px 136px 220px; }
+.listing-list-header { display: grid; margin-bottom: 8px; padding: 0 12px; align-items: center; gap: 12px; color: var(--subtle); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.listing-list-header-actions { text-align: right; }
+
+.product-group-compact { display: grid; min-height: 96px; align-items: center; gap: 12px; }
+.product-group-card-expanded .product-group-compact { padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.product-group-col { min-width: 0; }
+.product-group-col-main { display: flex; align-items: center; gap: 12px; }
+.product-group-col-photos { color: var(--muted); font-variant-numeric: tabular-nums; }
+.product-group-col-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.product-group-col-actions { display: flex; justify-content: flex-end; }
+.product-group-cover { position: relative; display: grid; overflow: hidden; width: 72px; height: 72px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 9px; background: var(--surface-3); }
+.product-group-cover img { width: 100%; height: 100%; object-fit: cover; }
+.product-group-cover-empty { color: var(--subtle); font-size: 8px; text-align: center; }
+.product-group-thumb-strip { display: flex; max-width: 220px; overflow-x: auto; flex: 0 0 auto; align-items: center; gap: 4px; }
+.product-group-thumb { display: grid; overflow: hidden; width: 36px; height: 36px; padding: 0; place-items: center; border: 0; border-radius: 7px; background: var(--surface-3); }
+.product-group-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.product-group-thumb-more { color: var(--muted); font-size: 9px; font-weight: 700; }
+.product-group-summary { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.product-group-meta-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: var(--muted); font-size: 10.5px; font-weight: 600; }
+.product-group-meta-item { white-space: nowrap; }
+.product-group-meta-chip { padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); font-size: 9px; font-weight: 650; }
+.product-group-compact-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.product-group-compact-actions .button-secondary { min-height: 30px; padding: 0 10px; font-size: 9px; white-space: nowrap; }
+.product-group-expanded-body { margin-top: 12px; }
+
+.listing-generation-status { display: inline-flex; padding: 3px 8px; border-radius: 6px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.listing-generation-status-ready { color: #16845d; background: rgba(38, 190, 131, .12); }
+.listing-generation-status-needs_review { color: var(--danger); background: var(--danger-soft); }
+.listing-generation-status-generating { color: var(--primary); background: var(--primary-soft); }
+.listing-generation-status-failed { color: var(--danger); background: var(--danger-soft); }
+.listing-generation-status-not_generated { color: var(--muted); background: var(--surface-3); }
+
+/* Visual redesign — sticky bottom action bar, mirroring .bulk-save-bar's
+   own fixed-position/blur/shadow pattern (same sidebar-aware left inset)
+   rather than a new one-off. */
+.listing-sticky-bar { position: fixed; inset: auto clamp(24px, 3vw, 44px) 14px calc(232px + clamp(24px, 3vw, 44px)); z-index: 40; display: flex; min-height: 56px; padding: 8px 12px; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(16px); }
+.listing-sticky-bar-selection { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.listing-sticky-bar-selection strong { color: var(--text); font-weight: 700; white-space: nowrap; }
+.listing-sticky-bar-selection .button-secondary { min-height: 28px; padding: 0 9px; font-size: 9px; }
+.listing-sticky-bar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.listing-sticky-bar-actions .button, .listing-sticky-bar-actions .button-secondary, .listing-sticky-bar-actions .button-danger { min-height: 38px; padding: 0 13px; font-size: 10.5px; white-space: nowrap; }
+.listing-sticky-bar-danger { margin-left: 8px; }
+/* Reserves room below the product list so the fixed bar can never cover
+   the last card or its controls, on desktop or the stacked-mobile bar. */
+.listing-studio-create { padding-bottom: 84px; }
+
+/* Visual redesign — these two media blocks are DELIBERATELY placed here,
+   after every base rule above, rather than folded into the pre-existing
+   900px/620px blocks earlier in this file. Root cause of a real bug caught
+   during live browser verification: CSS cascade order — with equal
+   selector specificity, the LATER rule in the stylesheet wins regardless
+   of whether it's inside a media query, so an override placed BEFORE its
+   own base rule (as the pre-existing 900px/620px blocks are, relative to
+   this "Listing Studio" section) is silently discarded by the base rule
+   that follows it, even while the media query itself correctly matches.
+   Confirmed live: window.matchMedia("(max-width: 900px)").matches was
+   true, yet getComputedStyle still showed the two-column desktop grid.
+   Keeping every redesign override strictly after its own base declaration
+   avoids the whole class of bug without touching any pre-existing rule's
+   position. */
+@media (max-width: 900px) {
+  /* Sidebar is hidden below this width — the sticky bar no longer needs to
+     account for its 232px offset (mirrors .bulk-save-bar's own mobile
+     override in the pre-existing 900px block). */
+  .listing-sticky-bar { inset: auto 14px 78px; }
+  .listing-studio-create { padding-bottom: 110px; }
+  /* Status column loses its label text below the sidebar-collapse width —
+     the row grid can give that space back to the main column. */
+  .listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 40px 160px; }
+  .listing-list-header-photos, .listing-list-header-status, .product-group-col-photos { text-align: center; }
+}
+
+@media (max-width: 620px) {
+  /* Mobile: each row stacks into a single column (cover+thumbs stay on one
+     row since they're both compact/scrollable; summary, photo count,
+     status, and actions each become their own full-width row rather than
+     a cramped 4-column grid). Tap targets are bumped to ~44px minimum for
+     this redesign's own controls. The header row hides entirely — a
+     column header for stacked content would be more confusing than
+     helpful. */
+  .listing-list-header { display: none; }
+  .listing-row-grid { grid-template-columns: 1fr; }
+  .product-group-compact { row-gap: 8px; }
+  .product-group-col-main { flex-wrap: wrap; }
+  .product-group-thumb-strip { max-width: 100%; }
+  .product-group-col-status { flex-direction: row; align-items: center; }
+  .product-group-col-actions { justify-content: flex-start; }
+  .product-group-compact-actions { justify-content: flex-start; }
+  .product-group-compact-actions .button-secondary { min-height: 44px; padding: 0 12px; }
+  .product-group-cover { width: 88px; height: 88px; }
+  .product-group-thumb { width: 44px; height: 44px; }
+  .listing-batch-toolbar-controls { width: 100%; }
+  .listing-batch-search, .listing-batch-status-filter { flex: 1 1 auto; min-width: 0; }
+  .listing-sticky-bar { align-items: stretch; flex-direction: column; gap: 10px; }
+  .listing-sticky-bar-actions { flex-wrap: wrap; }
+  .listing-sticky-bar-actions .button, .listing-sticky-bar-actions .button-secondary, .listing-sticky-bar-actions .button-danger { flex: 1 1 auto; min-width: 0; }
+  .listing-sticky-bar-danger { margin-left: 0; }
+}
+
 .photo-grid { display: grid; margin: 0; padding: 0; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 7px; list-style: none; }
 .photo-tile { position: relative; display: flex; padding: 4px; flex-direction: column; gap: 3px; border: 1.5px solid var(--line); border-radius: 8px; background: var(--surface-2); transition: border-color 130ms ease; }
 /* Stronger, unmissable selected state: a solid ring (box-shadow, so no
@@ -1147,12 +1296,32 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .photo-tile-toolbar > button:disabled { opacity: .4; }
 .photo-grid-show-all { display: block; margin: 10px auto 0; min-height: 30px; font-size: 10px; }
 
+/* App-wide overlay layer system (documented, not ad hoc):
+     base content        — auto (0)
+     sticky controls      — 5-60  (table headers, bulk/sticky bars, sidebar/nav)
+     dropdowns/tooltips   — 70    (this menu, portal-rendered — see OverflowMenu.tsx)
+     dialogs              — 100   (.dialog-backdrop)
+     toasts               — 200+  (.task-toast)
+   Every value below is chosen deliberately against this list, not a
+   one-off guess — a dropdown must always beat sticky controls (so it's
+   never hidden behind a bulk-action bar) but must never beat a modal
+   dialog or a toast. */
 .overflow-menu { position: relative; flex: 0 0 auto; }
 .overflow-menu-trigger { min-height: 26px; min-width: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 13px; line-height: 1; }
 .overflow-menu-trigger:hover { color: var(--text); border-color: var(--line-strong); }
-.overflow-menu-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; display: flex; overflow: hidden; width: max-content; min-width: 170px; padding: 4px; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.overflow-menu-list { display: flex; overflow: hidden; width: max-content; min-width: 170px; padding: 4px; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-lg); }
+/* Portal-rendered (document.body) — see OverflowMenu.tsx's own comment on
+   why this must never render inside the table's overflow-x:auto wrapper
+   (that ancestor's overflow-y implicitly clips to match, per the CSS
+   Overflow spec, hiding any dropdown that would otherwise extend past the
+   row's own bounds). top/left/width are computed and set inline per
+   trigger position; this class only owns the layer and entrance motion. */
+.overflow-menu-list-portal { z-index: 70; animation: overflowMenuIn 100ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .overflow-menu-list-portal { animation: none; } }
+@keyframes overflowMenuIn { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
 .overflow-menu-item { padding: 7px 9px; border: 0; border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; text-align: left; }
 .overflow-menu-item:hover:not(:disabled) { background: var(--surface-2); }
+.overflow-menu-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; background: var(--surface-2); }
 .overflow-menu-item:disabled { color: var(--subtle); cursor: not-allowed; }
 .overflow-menu-item-danger { color: var(--danger); }
 
@@ -1217,73 +1386,343 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 }
 
 /* Milestone 5 — Listings Review workspace */
-.listings-review-page { max-width: 1560px; }
-.listings-review-layout { display: flex; flex-direction: column; gap: 12px; }
+/* ============================================================
+   Listings Review — "Operations console" visual-accuracy redesign.
+   Every colour/spacing/size value below is scoped to .listings-review-page
+   only (never leaks into any other page) via the --lr-* custom properties
+   defined here. Dark values are the exact approved-reference palette;
+   light values fall back to this app's own existing light tokens (the
+   reference images are dark-only, so light mode is a coherent fallback,
+   not a pixel-verified match) — see this rewrite's own completion report
+   for that explicit call-out.
+   ============================================================ */
+.listings-review-page {
+  max-width: 1600px;
+  --lr-page: var(--bg);
+  --lr-surface: var(--surface);
+  --lr-surface-raised: var(--surface-2);
+  --lr-border: var(--line);
+  --lr-border-subtle: var(--line);
+  --lr-text: var(--text);
+  --lr-muted: var(--muted);
+  --lr-violet: var(--primary);
+  --lr-violet-soft: var(--primary-soft);
+  --lr-green: #1a7f4b;
+  --lr-blue: #2f6fe0;
+  --lr-amber: #b9770e;
+  --lr-red: #dc3d52;
+  --lr-grey: var(--subtle);
+}
+.dark .listings-review-page {
+  --lr-page: #090d14;
+  --lr-surface: #111722;
+  --lr-surface-raised: #151c28;
+  --lr-border: #283142;
+  --lr-border-subtle: #202837;
+  --lr-text: #f4f7fb;
+  --lr-muted: #8f9aad;
+  --lr-violet: #7c6cf2;
+  --lr-violet-soft: rgba(124, 108, 242, .16);
+  --lr-green: #2fcb75;
+  --lr-blue: #3f8cff;
+  --lr-amber: #f4ac32;
+  --lr-red: #ff4d57;
+  --lr-grey: #7e8798;
+}
+.lr-layout { display: flex; flex-direction: column; gap: 16px; padding: 8px 0 32px; }
 
-.listings-review-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
-.listings-review-search { flex: 1 1 260px; min-width: 220px; }
-.listings-review-status-tabs { flex: 0 0 auto; }
-.listings-review-quick-filters { display: flex; flex-wrap: wrap; gap: 6px; }
-.listings-review-quick-filter { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 11px; font-weight: 650; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
-.listings-review-quick-filter-active { color: var(--primary-strong); border-color: color-mix(in srgb, var(--primary) 40%, var(--line)); background: var(--primary-soft); }
+/* Top row — heading left, safety badge right (reference image 2). */
+.lr-topline { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.lr-topline h1 { margin: 0; color: var(--lr-text); font-size: 30px; font-weight: 780; line-height: 1.15; }
+.lr-safety-badge { display: inline-flex; flex: 0 0 auto; padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--lr-green) 45%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--lr-green) 14%, transparent); color: var(--lr-green); font-size: 11px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
 
-.listings-review-export-rejected { margin: 6px 0 0; padding-left: 18px; font-size: 10px; }
+/* Four KPI cards — one row, equal height/spacing, a small coloured
+   circular icon badge on the left, real computed values only. */
+.lr-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.lr-kpi { display: flex; min-height: 64px; padding: 12px 16px; align-items: center; gap: 12px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); }
+/* REGRESSION (production-polish pass): this was previously `.lr-kpi span`,
+   a descendant selector whose specificity (class + element) beat
+   `.lr-kpi-icon` (a single class) and silently forced `display: block` on
+   the icon's own <span>, breaking its grid centring. The label now has
+   its own dedicated class instead, so no selector can ever again
+   accidentally match a DIFFERENT span inside this card. */
+.lr-kpi-label { display: block; margin-top: 1px; color: var(--lr-muted); font-size: 11px; font-weight: 600; }
+.lr-kpi strong { display: block; color: var(--lr-text); font-size: 22px; font-weight: 780; line-height: 1.1; font-variant-numeric: tabular-nums; }
+/* The one shared KPI-icon wrapper (see components/listings-review/KpiIcon.tsx)
+   — fixed size, cannot shrink, grid-centred, no inherited line-height. Tone
+   is a class on the icon itself (never a `.lr-kpi-<tone> .lr-kpi-icon`
+   descendant selector) so nothing else inside a card can ever collide with
+   it by selector specificity again. */
+.lr-kpi-icon { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border-radius: 999px; line-height: 0; }
+.lr-kpi-icon > svg { display: block; margin: 0; }
+.lr-kpi-icon-listings { background: color-mix(in srgb, var(--lr-violet) 18%, transparent); color: var(--lr-violet); }
+.lr-kpi-icon-ready { background: color-mix(in srgb, var(--lr-green) 18%, transparent); color: var(--lr-green); }
+.lr-kpi-icon-drafting { background: color-mix(in srgb, var(--lr-blue) 18%, transparent); color: var(--lr-blue); }
+.lr-kpi-icon-review { background: color-mix(in srgb, var(--lr-amber) 18%, transparent); color: var(--lr-amber); }
 
-.listings-review-extension-panel { padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 11px; margin-bottom: 10px; }
-.listings-review-extension-safety-label { display: inline-block; margin: 0 0 6px; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--success, #1a7f37) 16%, transparent); color: var(--success, #1a7f37); font-weight: 700; font-size: 10px; letter-spacing: 0.02em; }
-.listings-review-pairing-code { font-size: 15px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 6px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); }
-.listings-review-extension-queue { margin: 6px 0; padding-left: 18px; }
-.listings-review-extension-item-error { color: var(--danger); }
+/* Toolbar — one compact row: search / category / filters / tabs. Never
+   wraps onto a second row at normal desktop widths. */
+.lr-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); }
+.lr-search { flex: 1 1 320px; min-width: 200px; }
+.lr-search .input, .lr-category-filter .input { min-height: 34px; padding: 0 10px; border-color: var(--lr-border); background: var(--lr-surface); color: var(--lr-text); font-size: 11px; }
+.lr-category-filter { min-width: 150px; flex: 0 0 auto; }
+.lr-filters-control { position: relative; flex: 0 0 auto; }
+.lr-filters-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-color: var(--lr-border); background: var(--lr-surface); color: var(--lr-text); font-size: 11px; }
+.lr-filters-badge { display: inline-flex; margin-left: 2px; padding: 1px 6px; border-radius: 999px; background: var(--lr-violet); color: white; font-size: 9px; font-weight: 700; }
+.lr-filters-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; display: flex; width: max-content; max-width: 320px; padding: 8px; flex-wrap: wrap; gap: 6px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); box-shadow: var(--shadow-lg); }
+.lr-quick-filter { padding: 6px 10px; border: 1px solid var(--lr-border); border-radius: 999px; color: var(--lr-muted); background: var(--lr-surface-raised); font-size: 11px; font-weight: 650; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
+.lr-quick-filter-active { color: var(--lr-violet); border-color: color-mix(in srgb, var(--lr-violet) 40%, var(--lr-border)); background: var(--lr-violet-soft); }
+.lr-clear-filters { flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 11px; font-weight: 700; }
+.lr-clear-filters:hover { text-decoration: underline; }
 
-.listings-review-bulk-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 10px; background: var(--primary-soft); }
-.listings-review-bulk-count { margin-right: auto; color: var(--text); font-size: 12px; font-weight: 700; }
-.listings-review-bulk-message { padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-2); font-size: 11px; }
+/* Segmented status tabs — restrained violet active background. */
+.lr-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; margin-left: auto; }
+.lr-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid transparent; border-radius: 8px; color: var(--lr-muted); background: none; font-size: 11px; font-weight: 650; }
+.lr-tab:hover { background: var(--lr-surface); }
+.lr-tab-active { color: var(--lr-text); background: var(--lr-violet-soft); }
+.lr-tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tone); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 20%, transparent); }
+.lr-tab-count { color: var(--lr-muted); font-variant-numeric: tabular-nums; }
+.lr-tab-active .lr-tab-count { color: var(--lr-text); }
 
-.listings-review-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; align-items: start; gap: 14px; }
+.lr-export-rejected { margin: 6px 0 0; padding-left: 18px; font-size: 10px; }
 
-.listings-review-table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
-.listings-review-table { width: 100%; }
-.listings-review-table th:first-child, .listings-review-table td.listings-review-checkbox-cell { width: 34px; text-align: center; }
-.listings-review-table td, .listings-review-table th { padding: 9px 10px; }
-.listings-review-row { cursor: pointer; }
-.listings-review-row-active { background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
-.listings-review-title-cell { max-width: 320px; overflow: hidden; color: var(--text); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-.listings-review-cover-thumb { width: 40px; height: 40px; border-radius: 7px; object-fit: cover; }
-.listings-review-cover-thumb-empty { border: 1px dashed var(--line-strong); background: var(--surface-2); }
+/* Compact contextual pairing strip — one line, never a large card;
+   collapses to even less once the extension has claimed the batch. The
+   permanent safety badge now lives in .lr-topline, so this never repeats
+   it. */
+.lr-pairing-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 7px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface-raised); color: var(--lr-muted); font-size: 10.5px; }
+/* Proper monospace treatment (explicit font stack, not just relying on
+   the browser's own <code> default) plus a deliberate, code-chip-looking
+   background/border — never a plain highlighted-text appearance that
+   could be mistaken for a native browser text selection. */
+.lr-pairing-code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 4px; background: var(--lr-surface); border: 1px solid var(--lr-border); color: var(--lr-text); user-select: all; }
+.lr-pairing-copy { min-height: 22px; padding: 0 8px; border: 1px solid var(--lr-border); border-radius: 5px; color: var(--lr-muted); background: var(--lr-surface); font-size: 9.5px; font-weight: 700; }
+.lr-pairing-copy:hover { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-text) 25%, var(--lr-border)); }
+.lr-pairing-hint { flex: 1 1 auto; min-width: 160px; }
+.lr-pairing-expiry { color: var(--lr-muted); font-size: 9.5px; white-space: nowrap; }
+.lr-pairing-cancel { margin-left: auto; min-height: 26px; padding: 0 10px; font-size: 9.5px; }
+.lr-pairing-clear { margin-left: auto; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10px; font-weight: 700; }
+.lr-pairing-clear:hover { text-decoration: underline; }
 
-.listings-review-status-badge { display: inline-flex; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
-.listings-review-status-ready { color: #16845d; background: rgba(38, 190, 131, .12); }
-.listings-review-status-needs_review { color: var(--danger); background: var(--danger-soft); }
-.listings-review-status-edited { color: #b4740e; background: rgba(228, 155, 27, .14); }
+.lr-bulk-message { padding: 9px 14px; border: 1px solid var(--lr-border); border-radius: 8px; color: var(--lr-text); background: var(--lr-surface-raised); font-size: 11px; }
+.lr-empty-explanation { max-width: 520px; margin: 12px 0 0; color: var(--lr-muted); font-size: 11px; line-height: 1.6; }
 
-.listings-review-panel { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
-.listings-review-panel-empty { align-items: center; justify-content: center; min-height: 220px; color: var(--muted); font-size: 12px; text-align: center; }
-.listings-review-panel-image-button { padding: 0; border: 0; border-radius: 10px; overflow: hidden; cursor: pointer; }
-.listings-review-panel-image-button:disabled { cursor: default; }
-.listings-review-panel-image { display: block; width: 100%; height: 260px; object-fit: cover; }
-.listings-review-panel-image-empty { display: grid; place-items: center; color: var(--subtle); background: var(--surface-2); font-size: 11px; }
-.listings-review-warnings { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.listings-review-warning { padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--line)); border-radius: 7px; color: var(--danger); background: var(--danger-soft); font-size: 11px; font-weight: 650; }
-.listings-review-panel-title { margin: 0; color: var(--text); font-size: 14px; font-weight: 700; line-height: 1.4; }
-.listings-review-panel-description { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-.listings-review-panel-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 0; }
-.listings-review-panel-fields dt { color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
-.listings-review-panel-fields dd { margin: 2px 0 0; color: var(--text); font-size: 12px; font-weight: 600; }
-.listings-review-panel-audience-evidence { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
-.listings-review-panel-audience-evidence-label { margin: 0 0 4px; color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
-.listings-review-panel-audience-evidence ul { margin: 0; padding: 0 0 0 16px; }
-.listings-review-panel-audience-evidence li { color: var(--text); font-size: 11.5px; line-height: 1.6; }
-.listings-review-panel-purchase-section { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
-.listings-review-panel-purchase-line { margin: 0; color: var(--text); font-size: 12px; font-weight: 650; }
-.listings-review-panel-purchase-duplicates { margin: 0; padding: 0 0 0 16px; }
-.listings-review-panel-purchase-duplicates li { color: var(--muted); font-size: 11px; line-height: 1.6; }
-.listings-review-selling-price-row { display: flex; align-items: center; gap: 6px; }
-.listings-review-selling-price-prefix { color: var(--muted); font-size: 12px; font-weight: 650; }
-.listings-review-selling-price-row .input { max-width: 120px; }
-.listings-review-selling-price-status { margin: 0; font-size: 10.5px; font-weight: 650; }
-.listings-review-selling-price-saved { color: var(--success, #1a7f4b); }
-.listings-review-selling-price-error { color: var(--danger); }
-.listings-review-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* ~70/30 workspace/rail split (reference image 4's exact proportions). */
+.lr-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 30%); align-items: start; gap: 16px; }
+/* The table column is its own flex column so the bulk-action bar (its
+   last child) can sit sticky to THIS column's own bottom — never a
+   viewport-spanning position:fixed overlay, so it structurally cannot
+   overlap .lr-rail (the inspector/activity column) and never needs a
+   guessed padding-bottom reservation. This is the fix for the previous
+   "malformed control bleeding through the bar" defect: the old bar was
+   position:fixed across the whole viewport with only a static
+   padding-bottom guess reserving space, so it could float over whatever
+   content (the pairing strip, table rows) happened to scroll underneath
+   it. Confined to this column, that failure mode no longer exists. */
+.lr-table-column { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+.lr-rail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.lr-table-scroll { overflow-x: auto; border: 1px solid var(--lr-border); border-radius: 10px 10px 0 0; background: var(--lr-surface); }
+.lr-table-empty { display: flex; height: 76px; padding-left: 12px; flex-direction: column; justify-content: center; border-radius: 10px; }
+.lr-table-empty strong { color: var(--lr-text); font-size: 12px; }
+.lr-table-empty span { margin-top: 4px; color: var(--lr-muted); font-size: 10px; }
+/* Fixed layout with an explicit per-column width budget — this (not
+   overflow-x) is what keeps every column, including Workflow and the row
+   menu, visible without horizontal scroll at normal desktop widths. Only
+   Listing (column 3) is left unconstrained so it absorbs whatever space
+   remains, matching the reference's "selection | photo | listing(flexible)
+   | size | cost | price | profit | workflow | actions" structure — every
+   OTHER column is sized to its own genuine content need (never padded
+   "for balance"), so Listing gets the maximum possible share at any table
+   width. Cost/Price/Profit are each 84px — wide enough for a genuine
+   four-figure amount ("£1,234.56") in right-aligned tabular numerals
+   without truncating or ellipsising. Photo is 72px (52px thumbnail + 2×10px
+   cell padding, exactly — not 68px, which was 4px too narrow for its own
+   content). Actions is 44px (26px trigger + 2×9px breathing room — not
+   34px, which was 6px narrower than the trigger button itself, the exact
+   cause of the previous "row menu cut off at the right edge" defect). */
+.lr-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.lr-table th:nth-child(1), .lr-table td:nth-child(1) { width: 32px; text-align: center; }
+.lr-table th:nth-child(2), .lr-table td:nth-child(2) { width: 72px; }
+.lr-table th:nth-child(4), .lr-table td:nth-child(4) { width: 44px; }
+.lr-table th:nth-child(5), .lr-table td:nth-child(5),
+.lr-table th:nth-child(6), .lr-table td:nth-child(6),
+.lr-table th:nth-child(7), .lr-table td:nth-child(7) { width: 84px; text-align: right; }
+.lr-table th:nth-child(8), .lr-table td:nth-child(8) { width: 148px; }
+.lr-table th:nth-child(9), .lr-table td:nth-child(9) { width: 44px; text-align: center; }
+/* Dense rows (72-80px), matching the reference exactly. */
+.lr-table td, .lr-table th { overflow: hidden; padding: 10px 10px; border-bottom: 1px solid var(--lr-border-subtle); font-size: 12.5px; }
+.lr-table thead th { padding-top: 9px; padding-bottom: 9px; border-bottom: 1px solid var(--lr-border); color: var(--lr-muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-table tbody tr:last-child td { border-bottom: 0; }
+.lr-row { cursor: pointer; height: 76px; transition: background 100ms ease; }
+.lr-row:hover { background: var(--lr-surface-raised); }
+.lr-row-active, .lr-row-active:hover { background: var(--lr-violet-soft); }
+.lr-title-cell { display: flex; flex-direction: column; overflow: hidden; gap: 2px; }
+.lr-title-text { overflow: hidden; color: var(--lr-text); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.lr-title-sku { overflow: hidden; color: var(--lr-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.lr-cover-thumb { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; }
+.lr-cover-thumb-empty { border: 1px dashed var(--lr-border); background: var(--lr-surface-raised); }
+/* Right-aligned, tabular-nums (already inherited from .lr-table td's own
+   font-variant-numeric — repeated here for clarity), never ellipsised at
+   this width; an em dash is used consistently for a missing value. */
+.lr-money-cell { overflow: hidden; color: var(--lr-text); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.lr-profit-positive { color: var(--lr-green); font-weight: 700; }
+.lr-row-actions { text-align: center; }
+
+/* Workflow status — a BARE circular dot (never a square/pill/badge
+   backplate) plus adjacent text, with an optional truthful secondary line
+   underneath. The exact glow formula from the approved spec. */
+.lr-workflow-status { display: inline-flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lr-workflow-status-row { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.lr-workflow-dot { width: 8px; height: 8px; border-radius: 999px; flex: 0 0 8px; background: var(--tone); box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone) 14%, transparent), 0 0 8px color-mix(in srgb, var(--tone) 55%, transparent); }
+.lr-workflow-label { overflow: hidden; color: var(--lr-text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.lr-workflow-secondary { overflow: hidden; margin-left: 15px; color: var(--lr-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+@media (prefers-reduced-motion: no-preference) {
+  .lr-workflow-dot-pulse { animation: lrWorkflowPulse 1.8s ease-in-out infinite; }
+}
+@keyframes lrWorkflowPulse {
+  0%, 100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone) 14%, transparent), 0 0 8px color-mix(in srgb, var(--tone) 55%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--tone) 22%, transparent), 0 0 12px color-mix(in srgb, var(--tone) 70%, transparent); }
+}
+
+/* Mobile card list — hidden on desktop/tablet (see the dedicated
+   responsive block below); the table above is hidden below that same
+   breakpoint. Same data/handlers, a genuinely different (not merely
+   reflowed) layout so Workflow and the primary actions stay immediately
+   usable at phone widths. */
+.lr-card-list { display: none; margin: 0; padding: 0; list-style: none; flex-direction: column; gap: 8px; }
+.lr-card { position: relative; display: flex; padding: 10px; align-items: flex-start; gap: 10px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); cursor: pointer; }
+.lr-card-active { border-color: color-mix(in srgb, var(--lr-violet) 45%, var(--lr-border)); background: var(--lr-violet-soft); }
+.lr-card-checkbox { display: flex; align-items: center; min-height: 44px; }
+.lr-card-checkbox input { width: 18px; height: 18px; }
+.lr-card .lr-cover-thumb { width: 52px; height: 52px; }
+.lr-card-body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+.lr-card-money { display: flex; gap: 12px; color: var(--lr-text); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.lr-card-actions { display: flex; align-items: center; min-height: 44px; }
+
+/* Bulk-action bar — lives inside .lr-table-column (see that rule's own
+   comment); sticky to the BOTTOM of that column, not the viewport, so it
+   can never cover the inspector/activity column and never needs a guessed
+   layout reservation elsewhere on the page. */
+.lr-bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; min-height: 56px; padding: 10px 14px; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--lr-border); border-top: 0; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--lr-surface) 97%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(12px); }
+.lr-bulk-bar-selection { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--lr-muted); font-size: 11px; font-weight: 650; }
+.lr-bulk-bar-selection strong { color: var(--lr-text); font-weight: 700; white-space: nowrap; }
+.lr-bulk-bar-selection .button-secondary { min-height: 28px; padding: 0 9px; font-size: 10px; }
+.lr-bulk-bar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.lr-bulk-bar-actions .button { background: var(--lr-violet); border-color: var(--lr-violet); }
+.lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { min-height: 36px; padding: 0 14px; font-size: 11px; white-space: nowrap; }
+
+/* Selected-listing inspector (reference image 4) — compact by
+   construction: a medium 16:9 image (never a full-height hero), a small
+   thumbnail strip, one financial summary row, a 2-column metadata grid
+   trimmed to exactly Brand/Category/Condition/Colour(s), and two primary
+   actions plus a small overflow menu for everything else. */
+.lr-inspector { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); min-width: 0; max-width: 100%; overflow-x: hidden; }
+.lr-inspector-empty { align-items: center; justify-content: center; min-height: 160px; color: var(--lr-muted); font-size: 12px; text-align: center; }
+.lr-inspector-header { display: flex; align-items: center; justify-content: space-between; }
+.lr-inspector-header h2 { margin: 0; color: var(--lr-muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.lr-inspector-header-actions { display: flex; align-items: center; gap: 4px; }
+.lr-inspector-position { margin-right: 4px; color: var(--lr-muted); font-size: 10.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.lr-inspector-nav { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--lr-border); border-radius: 6px; color: var(--lr-muted); background: var(--lr-surface); font-size: 13px; line-height: 1; }
+.lr-inspector-nav:hover:not(:disabled) { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-text) 25%, var(--lr-border)); }
+.lr-inspector-nav:disabled { opacity: .4; }
+.lr-inspector-image-button { display: block; width: 100%; padding: 0; border: 0; border-radius: 8px; overflow: hidden; cursor: pointer; }
+.lr-inspector-image-button:disabled { cursor: default; }
+/* Medium landscape, ~16:9 — never a full-height hero. */
+.lr-inspector-image { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.lr-inspector-image-empty { display: grid; place-items: center; aspect-ratio: 16 / 9; color: var(--lr-muted); background: var(--lr-surface); font-size: 11px; }
+.lr-inspector-thumbs { display: flex; gap: 6px; }
+.lr-inspector-thumb { display: grid; overflow: hidden; width: 44px; height: 44px; padding: 0; place-items: center; border: 1.5px solid transparent; border-radius: 6px; background: var(--lr-surface); cursor: pointer; }
+.lr-inspector-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.lr-inspector-thumb-active { border-color: var(--lr-violet); }
+.lr-inspector-warnings { display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.lr-inspector-warning { padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); border-radius: 7px; color: var(--lr-red); background: color-mix(in srgb, var(--lr-red) 10%, transparent); font-size: 10.5px; font-weight: 650; }
+/* Capped at 2 lines — a long generated title must never grow to 3-4 lines
+   and push the rest of the compact card down. */
+.lr-inspector-title { overflow: hidden; display: -webkit-box; margin: 0; color: var(--lr-text); font-size: 14px; font-weight: 700; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.lr-inspector-sku { margin: 0; color: var(--lr-muted); font-size: 11px; }
+.lr-inspector-money { display: flex; gap: 16px; padding: 10px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.lr-inspector-money > span { display: flex; flex-direction: column; gap: 1px; }
+.lr-inspector-money-label { color: var(--lr-muted); font-size: 8.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-inspector-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 0; }
+/* min-width: 0 on every grid item — CSS grid items default to
+   min-width: auto (not 0), so without this a long unbreakable word in
+   ANY field could force its 1fr column wider than its fair share and
+   push the whole card into horizontal overflow. Defensive even though
+   Category (the field this actually bit) now has its own full-width row
+   below, never sharing this narrow 2-column grid at all. */
+.lr-inspector-fields > div { min-width: 0; }
+.lr-inspector-fields dt { color: var(--lr-muted); font-size: 8.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-inspector-fields dd { margin: 1px 0 0; overflow: hidden; color: var(--lr-text); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+/* REGRESSION (live-caught): Category previously shared this same narrow
+   1-of-2 grid column as Brand/Condition/Colour(s). A full Vinted path
+   ("Men > Shoes > Sports shoes > Running shoes") is routinely much
+   longer than those, and even with wrapping enabled, a single long word
+   could force the grid column itself wider than the card (grid items'
+   default min-width: auto lets content override the 1fr track), clipping
+   the card with horizontal overflow. Category now gets its own dedicated
+   full-width block below instead of sharing this grid — see
+   .lr-inspector-category. */
+.lr-inspector-category { margin: 10px 0 0; min-width: 0; max-width: 100%; }
+.lr-inspector-category dt { color: var(--lr-muted); font-size: 8.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-inspector-category dd { margin: 3px 0 0; min-width: 0; max-width: 100%; color: var(--lr-text); font-size: 11px; font-weight: 600; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; word-break: normal; }
+.lr-inspector-audience-evidence { padding: 8px 10px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface); }
+.lr-inspector-audience-evidence-label { margin: 0 0 4px; color: var(--lr-muted); font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.lr-inspector-audience-evidence ul { margin: 0; padding: 0 0 0 16px; }
+.lr-inspector-audience-evidence li { color: var(--lr-text); font-size: 11.5px; line-height: 1.6; }
+.lr-inspector-purchase { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface); }
+.lr-inspector-purchase-line { margin: 0; color: var(--lr-text); font-size: 10.5px; font-weight: 650; }
+.lr-inspector-purchase-duplicates { margin: 0; padding: 0 0 0 16px; }
+.lr-inspector-purchase-duplicates li { color: var(--lr-muted); font-size: 11px; line-height: 1.6; }
+.lr-selling-price-row { display: flex; align-items: center; gap: 6px; }
+.lr-selling-price-prefix { color: var(--lr-muted); font-size: 12px; font-weight: 650; }
+.lr-selling-price-row .input { max-width: 120px; border-color: var(--lr-border); background: var(--lr-surface); color: var(--lr-text); }
+.lr-selling-price-status { margin: 0; font-size: 10.5px; font-weight: 650; }
+.lr-selling-price-saved { color: var(--lr-green); }
+.lr-selling-price-error { color: var(--lr-red); }
+.lr-inspector-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lr-inspector-actions .button-secondary { min-height: 34px; padding: 0 14px; font-size: 11px; }
+.lr-inspector-actions .overflow-menu-trigger { min-height: 34px; }
+
+/* Live Activity panel — small right-rail module below the inspector
+   (reference image 4). Persistent session history, distinct from the
+   short-lived toasts below. */
+.lr-activity-panel { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); }
+.lr-activity-header { display: flex; align-items: center; justify-content: space-between; }
+.lr-activity-header h2 { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--lr-muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.lr-activity-live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lr-green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-green) 22%, transparent); animation: lrActivityLivePulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .lr-activity-live-dot { animation: none; } }
+@keyframes lrActivityLivePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* Compact and restrained — a small neutral icon and one line, never a
+   tutorial or explanatory paragraph. */
+.lr-activity-empty { display: flex; padding: 10px 0; align-items: center; gap: 8px; color: var(--lr-muted); }
+.lr-activity-empty svg { flex: 0 0 auto; }
+.lr-activity-empty p { margin: 0; font-size: 11px; }
+.lr-activity-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.lr-activity-row { display: flex; padding: 7px 0; align-items: flex-start; gap: 8px; border-top: 1px solid var(--lr-border-subtle); }
+.lr-activity-row:first-child { border-top: 0; }
+.lr-activity-time { flex: 0 0 auto; margin-top: 1px; color: var(--lr-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.lr-activity-dot { width: 7px; height: 7px; margin-top: 4px; border-radius: 50%; flex: 0 0 auto; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent); }
+.lr-activity-dot-sent { color: var(--lr-violet); }
+.lr-activity-dot-queue { color: var(--lr-grey); }
+.lr-activity-dot-progress { color: var(--lr-blue); }
+.lr-activity-dot-success { color: var(--lr-green); }
+.lr-activity-dot-failure { color: var(--lr-red); }
+.lr-activity-row-body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+.lr-activity-message { overflow: hidden; color: var(--lr-text); font-size: 11px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.lr-activity-detail { overflow: hidden; color: var(--lr-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.lr-activity-view-all { flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10.5px; font-weight: 700; }
+.lr-activity-view-all:hover { text-decoration: underline; }
+
+/* Polish pass — the bottom-right toast stack (.lr-toast-*) was removed
+   entirely from Listings Review: every event it ever showed (draft
+   started/in-progress detail, item drafted, draft failed, batch
+   completed) duplicated the row's own Workflow status/secondary line and
+   the Live Activity panel below. See ListingsReviewWorkspace.tsx's own
+   comment — Live Activity is now the one place detailed extension
+   progress is ever shown on this page. Nothing else in the app used
+   these classes (confirmed before removal), so nothing else is affected;
+   the unrelated .task-toast system (Tasks feature) is untouched. */
 
 .photo-carousel-modal { width: min(720px, 100%); }
 .photo-carousel-body { display: grid; place-items: center; min-height: 320px; padding: 12px; background: var(--surface-2); }
@@ -1303,7 +1742,45 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .preview-listing-vinted-meta dd { margin: 2px 0 0; color: var(--text); font-size: 11.5px; font-weight: 650; }
 .preview-listing-vinted-price-placeholder { color: var(--subtle); font-style: italic; }
 
-@media (max-width: 980px) {
-  .listings-review-split { grid-template-columns: 1fr; }
-  .listings-review-panel { position: static; }
+/* 1024-1439px — a slightly narrower inspector column, Cost/Price/Profit
+   still fully visible in the table (only their width tightens, never
+   truncating). */
+@media (max-width: 1439px) {
+  .lr-workspace { grid-template-columns: minmax(0, 1fr) minmax(260px, 27%); }
+  .lr-table th:nth-child(5), .lr-table td:nth-child(5),
+  .lr-table th:nth-child(6), .lr-table td:nth-child(6),
+  .lr-table th:nth-child(7), .lr-table td:nth-child(7) { width: 78px; }
+}
+
+/* Below 1024px — inspector/activity stack beneath the table; the table
+   itself may scroll horizontally within its own scroll container rather
+   than the whole page. */
+@media (max-width: 1023px) {
+  .lr-workspace { grid-template-columns: 1fr; }
+  .lr-inspector { position: static; }
+}
+
+/* Positioned after every base rule above (equal-specificity CSS resolves
+   by source order, so a mobile override placed before its own base rule
+   would silently lose). */
+@media (max-width: 900px) {
+  .lr-filters-popover { left: auto; right: 0; max-width: calc(100vw - 32px); }
+  .lr-kpis { grid-template-columns: repeat(2, 1fr); }
+  .lr-toolbar { flex-wrap: wrap; }
+  .lr-tabs { margin-left: 0; }
+}
+
+/* Mobile — compact cards replace the table entirely (never just a
+   reflowed/scrolled version of it), matching this codebase's established
+   "phone" breakpoint (620px, already used for Listing Studio's own mobile
+   stacking). Workflow and Send/selection stay immediately visible. */
+@media (max-width: 620px) {
+  .lr-table-scroll { display: none; }
+  .lr-card-list { display: flex; }
+  .lr-topline { flex-direction: column; align-items: flex-start; }
+  .lr-kpis { grid-template-columns: repeat(2, 1fr); }
+  .lr-kpi { padding: 10px 12px; }
+  .lr-bulk-bar { flex-direction: column; align-items: stretch; gap: 10px; }
+  .lr-bulk-bar-actions { flex-wrap: wrap; }
+  .lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { flex: 1 1 auto; min-width: 0; }
 }

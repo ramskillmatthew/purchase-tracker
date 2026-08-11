@@ -109,11 +109,18 @@ export function isTerminalItemStatus(status: ExtensionBatchItemStatus): boolean 
   return (TERMINAL_ITEM_STATUSES as string[]).includes(status);
 }
 
+// Listings Review redesign — currentStep/detail forward exactly what
+// form-steps.js's report(status, { currentStep, detail }) already computes
+// locally (step name / a short human-readable progress line), previously
+// dropped by the extension's own postResultToApp. Free text, same trust
+// level as errorCode/errorMessage below — never a token, URL, or secret.
 export const itemResultRequestSchema = z.object({
   status: z.enum(EXTENSION_BATCH_ITEM_STATUSES),
   errorCode: z.string().max(100).nullable().optional(),
   errorMessage: z.string().max(500).nullable().optional(),
   vintedDraftId: z.string().max(200).nullable().optional(),
+  currentStep: z.string().max(60).nullable().optional(),
+  detail: z.string().max(200).nullable().optional(),
 }).strict();
 export type ItemResultRequest = z.infer<typeof itemResultRequestSchema>;
 

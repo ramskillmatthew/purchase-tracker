@@ -11,9 +11,14 @@ const ACCEPT = "image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg
  * real <label>/<input type="file"> pairs, so the whole panel stays fully
  * keyboard-accessible without any custom click handling.
  */
-export default function UploadDropzone({ onFilesSelected, disabled }: {
+export default function UploadDropzone({ onFilesSelected, disabled, compact }: {
   onFilesSelected: (files: File[]) => void;
   disabled?: boolean;
+  // Visual redesign — purely a CSS variant (smaller padding, hint/format
+  // lines collapse to one row) once real workspace data already exists, so
+  // the full-size panel is only ever shown in the empty state. No change to
+  // drag-drop/file-input handling either way.
+  compact?: boolean;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -25,7 +30,7 @@ export default function UploadDropzone({ onFilesSelected, disabled }: {
   }
 
   return <div
-    className={`listing-dropzone${dragOver ? " listing-dropzone-active" : ""}`}
+    className={`listing-dropzone${compact ? " listing-dropzone-compact" : ""}${dragOver ? " listing-dropzone-active" : ""}`}
     onDragOver={event => { event.preventDefault(); if (!disabled) setDragOver(true); }}
     onDragLeave={() => setDragOver(false)}
     onDrop={event => {

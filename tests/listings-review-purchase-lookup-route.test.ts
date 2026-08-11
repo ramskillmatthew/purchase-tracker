@@ -2,15 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const { requireOwner, supabaseRequestAll } = vi.hoisted(() => ({
+const { requireOwner, supabaseRequestAll, supabaseRequest } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   supabaseRequestAll: vi.fn(async (_path: string) => [] as unknown[]),
+  // Listings Review redesign — the read-only rpc/listing_studio_latest_extension_status
+  // call goes through supabaseRequest (POST + .json()), matching every
+  // other RPC call site in this codebase, never supabaseRequestAll.
+  supabaseRequest: vi.fn(async (_path: string, _init?: RequestInit) => ({ json: async () => [] as unknown[] })),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
   return { ...actual, requireOwner };
 });
-vi.mock("@/lib/supabase", () => ({ supabaseRequestAll }));
+vi.mock("@/lib/supabase", () => ({ supabaseRequestAll, supabaseRequest }));
 
 import { GET as listingsReviewRoute } from "@/app/api/listing-studio/listings-review/route";
 import { AuthError } from "@/lib/auth/server";
@@ -50,6 +54,8 @@ beforeEach(() => {
     if (path.startsWith("vinted_categories?")) return [];
     return [];
   });
+  supabaseRequest.mockReset();
+  supabaseRequest.mockImplementation(async (_path: string) => ({ json: async () => [] as unknown[] }));
 });
 
 describe("GET /api/listing-studio/listings-review — Milestone 6: batched purchase-price lookup", () => {
@@ -241,10 +247,10 @@ describe("GET /api/listing-studio/listings-review — Business-rule follow-up co
     expect(body.drafts[0].vinted_audience).toBe("womens");
   });
 
-  it("REGRESSION: this is a read-time-only display correction — the route doesn't even import a write-capable Supabase function (only supabaseRequestAll, a read), so it structurally cannot write anything back to the database", async () => {
+  it("REGRESSION: this is a read-time-only display correction — the route calls supabaseRequest ONLY for the read-only extension-status RPC (see the dedicated 'is read-time-only' test below), never a table write, so it structurally cannot write anything back to the database", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
-    expect(routeSource).not.toContain("supabaseRequest,");
-    expect(routeSource).not.toContain("{ supabaseRequest }");
+    const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status"]);
   });
 
   it("REGRESSION: 'boys'/'girls' on a non-footwear product type is displayed completely unchanged", async () => {
@@ -314,9 +320,18 @@ describe("GET /api/listing-studio/listings-review — business-rule follow-up co
     expect(body.drafts[0].uk_size).toBe("3");
   });
 
-  it("is read-time-only — same structural guarantee as the audience correction above (this route never imports a write-capable Supabase function)", async () => {
+  it("is read-time-only — the one supabaseRequest call it makes is a read-only RPC (rpc/listing_studio_latest_extension_status, language sql stable), never a table write", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
-    expect(routeSource).not.toContain("supabaseRequest,");
-    expect(routeSource).not.toContain("{ supabaseRequest }");
+    const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status"]);
+  });
+
+  it("degrades gracefully when the extension-status RPC isn't available yet (e.g. before its SQL migration has been run) — the page still loads, every listing just falls back to no known workflow status, rather than the whole route failing", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => (path.startsWith("listing_drafts?") ? [draftRow()] : []));
+    supabaseRequest.mockRejectedValueOnce(new Error("PGRST202: function not found"));
+    const response = await listingsReviewRoute();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.drafts[0].extension_status).toBeNull();
   });
 });

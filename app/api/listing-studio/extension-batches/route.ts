@@ -41,6 +41,30 @@ type ImageRow = { id: string; draft_id: string; upload_state: string };
 type RejectedListing = { draftId: string; sku: string | null; reasons: string[] };
 
 /**
+ * Listings Review redesign — root-cause fix for status/counts appearing
+ * stale after a page reload (or simply reopening the tab): activeBatchId
+ * previously lived only in this component's own React state, so a batch
+ * created in an earlier page load was completely invisible to a fresh
+ * mount — no polling, no activity, no live workflow status, even while
+ * the extension was genuinely still processing it. This returns the
+ * owner's own most recent batch that is still genuinely in flight (not
+ * completed/cancelled/expired, and not past its real expiry — a
+ * 'pending_claim'/'claimed'/'in_progress' row whose expires_at has
+ * already passed is treated as gone, never resurrected), so the client
+ * can resume tracking it on mount. Read-only, owner-scoped, no photo I/O.
+ */
+export async function GET() {
+  try {
+    const user = await requireOwner();
+    const batches = await supabaseRequestAll<{ id: string; status: string; expires_at: string }>(
+      `vinted_extension_batches?owner_id=eq.${user.id}&status=in.(pending_claim,claimed,in_progress)&select=id,status,expires_at&order=created_at.desc`,
+    );
+    const active = batches.find(batch => new Date(batch.expires_at).getTime() > Date.now()) ?? null;
+    return NextResponse.json({ activeBatchId: active?.id ?? null });
+  } catch (error) { return safeApiError(error, "Could not check for an active batch."); }
+}
+
+/**
  * Milestone 7 (Chrome extension draft queue) — creates a short-lived,
  * single-use extension batch for up to MAX_EXTENSION_BATCH_LISTINGS Ready
  * listings, and returns a fresh pairing code (visible in plaintext exactly

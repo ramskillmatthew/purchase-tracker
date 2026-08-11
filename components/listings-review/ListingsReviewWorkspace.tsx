@@ -1,19 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import ListingsFilterBar from "./ListingsFilterBar";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ListingsFilterBar, { type TopTab } from "./ListingsFilterBar";
 import ListingsTable, { type ListingTableRow } from "./ListingsTable";
 import ListingDetailsPanel, { type ListingDetails } from "./ListingDetailsPanel";
+import DraftActivityPanel, { type ActivityEvent } from "./DraftActivityPanel";
 import PhotoCarouselDialog from "./PhotoCarouselDialog";
 import EditListingFieldsDialog, { type ListingFieldsDraft } from "@/components/listing-studio/EditListingFieldsDialog";
 import PreviewListingDialog from "@/components/listing-studio/PreviewListingDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import OverflowMenu from "@/components/listing-studio/OverflowMenu";
+import { KpiIcon } from "./KpiIcon";
 import {
   computeListingReviewStatus, buildListingWarnings, matchesListingSearch, matchesQuickFilter,
-  type ListingQuickFilter, type ListingReviewStatusFilter, type ReviewableListing,
+  type ListingQuickFilter, type ReviewableListing,
 } from "@/lib/listing-studio/listing-review";
+import { computeExtensionWorkflowStatus, WORKFLOW_STATUS_TAB_GROUPS, isBatchStatusTerminal, shouldApplyBatchPollResponse, type ExtensionWorkflowStatus } from "@/lib/listing-studio/extension-workflow-status";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
-import type { SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
+import { computeCostPence, computeProfitPence, type SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
 import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-export-schema";
 import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
 
@@ -22,13 +26,30 @@ type RejectedExportListing = { draftId: string; sku: string | null; reasons: str
 type ExtensionBatchItemStatusRow = {
   itemId: string; draftId: string; queuePosition: number; status: string; attemptCount: number;
   errorCode: string | null; errorMessage: string | null; vintedDraftId: string | null;
-  startedAt: string | null; completedAt: string | null; generatedTitle: string | null; sku: string | null;
+  startedAt: string | null; completedAt: string | null;
+  // Listings Review redesign — forwarded from the extension's own
+  // already-computed local step tracking (see lib/listing-studio/
+  // extension-batch-schema.ts's own comment on itemResultRequestSchema).
+  currentStep: string | null; detail: string | null;
+  generatedTitle: string | null; sku: string | null;
 };
 type ExtensionBatchStatus = {
   batchId: string; status: string; listingCount: number;
   createdAt: string; claimedAt: string | null; expiresAt: string; completedAt: string | null;
   extensionId: string | null; extensionVersion: string | null;
   items: ExtensionBatchItemStatusRow[];
+};
+
+// Listings Review redesign — one row, the most recent extension-batch-item
+// status for this draft across every batch ever sent (see
+// rpc/listing_studio_latest_extension_status). Mirrors
+// app/api/listing-studio/listings-review/route.ts's own LatestExtensionStatusRow
+// (not imported directly — this file already mirrors every other server
+// response shape locally, matching the rest of this component).
+type LatestExtensionStatusRow = {
+  draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
+  error_code: string | null; error_message: string | null; vinted_draft_id: string | null;
+  started_at: string | null; completed_at: string | null; current_step: string | null; step_detail: string | null;
 };
 
 type ReviewDraftRow = {
@@ -55,6 +76,9 @@ type ReviewDraftRow = {
   // one request per listing) — see app/api/listing-studio/listings-review/route.ts.
   confirmed_price_pence: number | null;
   purchase_match: SkuPurchaseMatch;
+  // Listings Review redesign — null when this draft has never been part of
+  // any (non-cancelled) extension batch item.
+  extension_status: LatestExtensionStatusRow | null;
 };
 type ReviewImageRow = { id: string; draft_id: string; sort_order: number };
 type ReviewData = { drafts: ReviewDraftRow[]; images: ReviewImageRow[] };
@@ -62,7 +86,17 @@ type ReviewData = { drafts: ReviewDraftRow[]; images: ReviewImageRow[] };
 // Every field the UI or its derived status/warnings/edited-detection logic
 // needs, computed once per listing when the underlying data actually
 // changes — never re-derived per render of any child component.
-type ListingRow = ListingDetails & ReviewableListing & { updatedAt: string; photoIds: string[] };
+type ListingRow = ListingDetails & ReviewableListing & {
+  updatedAt: string; photoIds: string[];
+  costPence: number | null; profitPence: number | null;
+  extensionStatusSnapshot: LatestExtensionStatusRow | null;
+  workflowStatus: ExtensionWorkflowStatus | null;
+  queuePosition: number | null;
+  currentStep: string | null;
+  detail: string | null;
+  vintedDraftId: string | null;
+  errorMessage: string | null;
+};
 
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
@@ -71,6 +105,15 @@ async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item
     while ((next = queue.shift())) await task(next);
   });
   await Promise.all(workers);
+}
+
+// Listings Review redesign — the real pairing-code expiry, shown in the
+// compact pairing strip. Never a vague "expires soon" once a real
+// timestamp is available.
+function formatRelativeMinutes(isoTimestamp: string): string {
+  const minutes = Math.round((new Date(isoTimestamp).getTime() - Date.now()) / 60000);
+  if (minutes <= 0) return "any moment now";
+  return `in ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 /**
@@ -94,10 +137,32 @@ export default function ListingsReviewWorkspace() {
   const [loadError, setLoadError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<ListingReviewStatusFilter>("all");
+  // Listings Review redesign — the 5 top tabs (All/Ready/Needs review/
+  // Drafts/Sent) replace the old 4-tab readiness-only switch. "Edited" and
+  // "Draft failed" are deliberately NOT top tabs (matching the reference
+  // image's exact 5 tabs) but stay reachable — never hidden — via the two
+  // booleans below, inside the Filters control.
+  const [topTab, setTopTab] = useState<TopTab>("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [showEditedOnly, setShowEditedOnly] = useState(false);
+  const [showFailedOnly, setShowFailedOnly] = useState(false);
+  // Visual-accuracy redesign — "Sent" (in flight: sent/in queue/draft in
+  // progress) is no longer its own top tab (the approved reference shows
+  // exactly 4 tabs), but stays fully reachable via Filters, same pattern
+  // as showEditedOnly/showFailedOnly below.
+  const [showSentOnly, setShowSentOnly] = useState(false);
   const [activeQuickFilters, setActiveQuickFilters] = useState<Set<ListingQuickFilter>>(new Set());
 
   const [selectedListingId, setSelectedListingId] = useState<string | null>(null);
+  // Production-polish pass — the inspector should never sit on a large dead
+  // "select a listing" area while real listings are available. Distinct
+  // from `selectedListingId` itself so an intentional Close doesn't get
+  // immediately re-filled by the very next render: set only by the Close
+  // button, cleared by any real selection (a row click, or a fresh manual
+  // pick after a filter change). Purely a display-focus flag — never
+  // touches bulkSelectedIds, never ticks a checkbox, never writes to the
+  // database.
+  const [inspectorClosed, setInspectorClosed] = useState(false);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
 
   const [editFieldsListingId, setEditFieldsListingId] = useState<string | null>(null);
@@ -143,6 +208,33 @@ export default function ListingsReviewWorkspace() {
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<ExtensionBatchStatus | null>(null);
+  // Production-polish pass — a short, self-clearing "Copied" confirmation
+  // for the pairing-code copy button. Purely cosmetic local state, reset
+  // whenever a fresh code is issued so a stale "Copied" can never survive
+  // into a new batch.
+  const [codeCopied, setCodeCopied] = useState(false);
+
+  // Listings Review redesign — a session-only projection, never persisted
+  // (see DraftActivityPanel.tsx's own comment): one real event per genuine
+  // transition observed while polling, newest first.
+  //
+  // Polish pass — this is now the ONLY place detailed extension progress is
+  // ever surfaced on this page. The previous bottom-right toast stack
+  // (ExtensionNotifications) was removed entirely: every event it ever
+  // showed (draft started/in-progress detail, item drafted, draft failed,
+  // batch completed) was already redundant with this panel and the row's
+  // own Workflow status/secondary line — see this file's own git history
+  // for the removed component. Batch completion, which the toast used to
+  // be the ONLY place showing, now gets its own real activity event
+  // instead of silently disappearing.
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  // previousItemsRef holds the PRIOR poll's items for the currently active
+  // batch, keyed by itemId — null means "no poll observed yet for this
+  // batch", which deliberately suppresses event synthesis on the very
+  // first poll (we can't tell what changed relative to a snapshot we've
+  // never seen, so nothing is fabricated — see the polling effect below).
+  const previousItemsRef = useRef<Map<string, ExtensionBatchItemStatusRow> | null>(null);
+  const batchCompletionLoggedRef = useRef(false);
 
   const loadListings = useCallback(async () => {
     try {
@@ -160,6 +252,27 @@ export default function ListingsReviewWorkspace() {
   }, []);
   useEffect(() => { loadListings(); }, [loadListings]);
 
+  // Listings Review redesign — root-cause fix: resume tracking a batch
+  // that's still genuinely in flight from an EARLIER page load (the
+  // extension keeps working regardless of whether this tab is open).
+  // Runs once, only when nothing is already being tracked in this session
+  // — never overrides an activeBatchId this session itself just set via
+  // handleSendToExtension.
+  useEffect(() => {
+    if (activeBatchId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/listing-studio/extension-batches");
+        if (!response.ok || cancelled) return;
+        const body = await response.json() as { activeBatchId: string | null };
+        if (!cancelled && body.activeBatchId) setActiveBatchId(body.activeBatchId);
+      } catch { /* best-effort — the page still works without resuming */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately runs once on mount only; re-checking on every activeBatchId change (including the ones this effect itself causes) would defeat the "only resume when nothing is already tracked" guard.
+  }, []);
+
   // One lookup built once per images change, rather than every listing
   // re-filtering/re-sorting the whole array on every render.
   const photoIdsByDraftId = useMemo(() => {
@@ -172,9 +285,13 @@ export default function ListingsReviewWorkspace() {
     return map;
   }, [images]);
 
-  // Status/warnings/edited-ness computed exactly once per listing here —
-  // never recomputed by ListingsTable or ListingDetailsPanel themselves.
-  const listingRows: ListingRow[] = useMemo(() => drafts.map(draft => {
+  // Status/warnings/edited-ness/cost/profit computed exactly once per
+  // listing here — never recomputed by ListingsTable or ListingDetailsPanel
+  // themselves. Deliberately does NOT depend on batchStatus (the live
+  // 4s-polled extension status) — see the separate listingRows memo below,
+  // which layers workflow status on top — so a poll tick that hasn't
+  // changed any listing's own data never re-runs this whole pipeline.
+  const baseListingRows = useMemo(() => drafts.map(draft => {
     const photoIds = photoIdsByDraftId.get(draft.id) ?? [];
     const reviewable: ReviewableListing = {
       brand: draft.brand, model: draft.model, productType: draft.product_type, colours: draft.colours ?? [], material: draft.material,
@@ -190,6 +307,7 @@ export default function ListingsReviewWorkspace() {
       generatedTitle: draft.generated_title ?? "", generatedDescription: draft.generated_description ?? "",
       condition: draft.condition, hasPhoto: photoIds.length > 0,
     };
+    const costPence = computeCostPence(draft.purchase_match);
     return {
       ...reviewable,
       id: draft.id,
@@ -200,16 +318,106 @@ export default function ListingsReviewWorkspace() {
       warnings: buildListingWarnings(reviewable),
       coverPhotoId: photoIds[0] ?? null,
       photoIds,
+      costPence,
+      profitPence: computeProfitPence(costPence, draft.confirmed_price_pence),
+      extensionStatusSnapshot: draft.extension_status,
     };
   }), [drafts, photoIdsByDraftId]);
 
+  // Layers real-time workflow status on top of the base rows: the LIVE
+  // active-batch item for this draft wins when present (freshest —
+  // updates every 4s poll), otherwise the page-load historical aggregate
+  // (extensionStatusSnapshot) is used, so status stays correct even after
+  // the active batch is cleared or on a page that never had one this
+  // session. Only this small mapping re-runs on a poll tick, never the
+  // full baseListingRows pipeline above.
+  const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {
+    const liveItem = batchStatus?.items.find(item => item.draftId === row.id);
+    const workflowStatus = liveItem
+      ? computeExtensionWorkflowStatus(liveItem.status, batchStatus!.status)
+      : row.extensionStatusSnapshot
+        ? computeExtensionWorkflowStatus(row.extensionStatusSnapshot.item_status, row.extensionStatusSnapshot.batch_status)
+        : null;
+    // Visual-accuracy redesign — the same live-first-else-aggregate
+    // precedence workflowStatus itself already uses, extended to the
+    // fields a truthful secondary line needs (position/step/detail/draft
+    // id/error). One source of truth (computeWorkflowSecondaryLine) reads
+    // these identically in the table and the inspector.
+    const queuePosition = liveItem ? liveItem.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;
+    const currentStep = liveItem ? liveItem.currentStep : row.extensionStatusSnapshot?.current_step ?? null;
+    const detail = liveItem ? liveItem.detail : row.extensionStatusSnapshot?.step_detail ?? null;
+    const vintedDraftId = liveItem ? liveItem.vintedDraftId : row.extensionStatusSnapshot?.vinted_draft_id ?? null;
+    const errorMessage = liveItem ? liveItem.errorMessage : row.extensionStatusSnapshot?.error_message ?? null;
+    return { ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage };
+  }), [baseListingRows, batchStatus]);
+
   const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);
 
+  const categoryOptions = useMemo(() => {
+    const values = new Set(listingRows.map(row => row.productType).filter((value): value is string => Boolean(value)));
+    return [...values].sort((a, b) => a.localeCompare(b));
+  }, [listingRows]);
+
+  // Readiness (Ready/Needs review) and extension workflow (Drafts/Sent)
+  // are deliberately separate concepts, per WORKFLOW_STATUS_TAB_GROUPS —
+  // never merged into one count. "Ready" includes "edited" (both pass
+  // every readiness rule; "edited" just hasn't been re-confirmed since a
+  // change), matching this page's own existing readiness definition.
+  const readyCount = useMemo(() => listingRows.filter(row => row.status !== "needs_review").length, [listingRows]);
+  const needsReviewCount = useMemo(() => listingRows.filter(row => row.status === "needs_review").length, [listingRows]);
+  const draftsCount = useMemo(() => listingRows.filter(row => row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)).length, [listingRows]);
+  const sentCount = useMemo(() => listingRows.filter(row => row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)).length, [listingRows]);
+  const failedCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "failed").length, [listingRows]);
+  // Visual-accuracy redesign — the 4th KPI card. Real, persisted extension-
+  // item state (preparing/filling/saving), never a client-only guess.
+  const draftingCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "in_progress").length, [listingRows]);
+
+  const filtersActive = topTab !== "all" || categoryFilter !== "all" || activeQuickFilters.size > 0 || showEditedOnly || showFailedOnly || showSentOnly || searchQuery.trim().length > 0;
+  const clearFilters = useCallback(() => {
+    setTopTab("all"); setCategoryFilter("all"); setActiveQuickFilters(new Set());
+    setShowEditedOnly(false); setShowFailedOnly(false); setShowSentOnly(false); setSearchQuery("");
+  }, []);
+
   const filteredRows = useMemo(() => listingRows.filter(row => {
-    if (statusFilter !== "all" && row.status !== statusFilter) return false;
+    if (topTab === "ready" && row.status === "needs_review") return false;
+    if (topTab === "needs_review" && row.status !== "needs_review") return false;
+    if (topTab === "drafted" && row.workflowStatus !== "drafted") return false;
+    if (categoryFilter !== "all" && row.productType !== categoryFilter) return false;
+    if (showEditedOnly && row.status !== "edited") return false;
+    if (showFailedOnly && row.workflowStatus !== "failed") return false;
+    if (showSentOnly && !(row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus))) return false;
     for (const filter of activeQuickFilters) if (!matchesQuickFilter(row, filter)) return false;
     return matchesListingSearch({ generatedTitle: row.generatedTitle, sku: row.sku, brand: row.brand, model: row.model, colours: row.colours }, searchQuery);
-  }), [listingRows, statusFilter, activeQuickFilters, searchQuery]);
+  }), [listingRows, topTab, categoryFilter, showEditedOnly, showFailedOnly, showSentOnly, activeQuickFilters, searchQuery]);
+
+  const selectedListingPosition = useMemo(() => {
+    const index = filteredRows.findIndex(row => row.id === selectedListingId);
+    return index === -1 ? null : { index, total: filteredRows.length };
+  }, [filteredRows, selectedListingId]);
+
+  // Production-polish pass — on initial load, and after any search/filter
+  // change, keep the inspector showing something whenever listings are
+  // visible: retain the current selection if it's still in the filtered
+  // set, otherwise fall back to the first visible listing. Skipped
+  // entirely once the user has explicitly closed the inspector (Close
+  // button), and never fires while nothing is filtered in (the existing
+  // empty state is left exactly as-is). Inspector focus ONLY — never
+  // selects a bulk checkbox, marks anything ready, or writes anywhere.
+  useEffect(() => {
+    if (inspectorClosed) return;
+    if (filteredRows.length === 0) return;
+    const stillVisible = selectedListingId !== null && filteredRows.some(row => row.id === selectedListingId);
+    if (!stillVisible) setSelectedListingId(filteredRows[0].id);
+  }, [filteredRows, selectedListingId, inspectorClosed]);
+
+  const selectListing = useCallback((id: string) => {
+    setInspectorClosed(false);
+    setSelectedListingId(id);
+  }, []);
+  const closeInspector = useCallback(() => {
+    setInspectorClosed(true);
+    setSelectedListingId(null);
+  }, []);
 
   const tableRows: ListingTableRow[] = filteredRows;
   const selectedListing = selectedListingId ? listingsById.get(selectedListingId) ?? null : null;
@@ -484,8 +692,13 @@ export default function ListingsReviewWorkspace() {
   // is entirely the extension's own job, running in the user's normal
   // Chrome profile, once they enter the code. Never clears the current
   // selection on failure, same reasoning as handleExport above.
-  async function handleSendToExtension() {
-    const ids = [...bulkSelectedIds];
+  // Listings Review redesign — idsOverride lets the inspector's contextual
+  // "Send to extension"/"Resend to extension" button reuse this EXACT
+  // function for a single listing, never a second batch-creation path.
+  // Every existing call site (the sticky bar, with no argument) keeps
+  // reading from bulkSelectedIds exactly as before.
+  async function handleSendToExtension(idsOverride?: string[]) {
+    const ids = idsOverride ?? [...bulkSelectedIds];
     if (!ids.length || sendToExtensionRunning) return;
     if (ids.length > MAX_EXTENSION_BATCH_LISTINGS) {
       setSendToExtensionError(`Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings to send to the extension at once (${ids.length} selected).`);
@@ -508,6 +721,7 @@ export default function ListingsReviewWorkspace() {
       setPairingCode(body.pairingCode);
       setActiveBatchId(body.batchId);
       setBatchStatus(null);
+      setCodeCopied(false);
     } catch {
       setSendToExtensionError("Network error — could not send these listings to the extension. Your selection has been kept.");
     } finally {
@@ -518,6 +732,18 @@ export default function ListingsReviewWorkspace() {
   async function handleCancelExtensionBatch() {
     if (!activeBatchId) return;
     await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`, { method: "DELETE" }).catch(() => {});
+  }
+
+  // Production-polish pass — copies the real pairing code to the
+  // clipboard; the short "Copied" confirmation self-clears so it can never
+  // linger and be mistaken for a permanent label.
+  async function handleCopyPairingCode() {
+    if (!pairingCode) return;
+    try {
+      await navigator.clipboard.writeText(pairingCode);
+      setCodeCopied(true);
+      window.setTimeout(() => setCodeCopied(false), 1600);
+    } catch { /* clipboard access denied — the code remains visible/selectable regardless */ }
   }
 
   function handleClearExtensionBatch() {
@@ -531,24 +757,143 @@ export default function ListingsReviewWorkspace() {
   // connection) — matches this app's existing architecture, which has no
   // server-push channel anywhere. Stops itself once the batch reaches a
   // terminal status, and is fully torn down on unmount.
+  //
+  // Listings Review redesign — this same poll tick also derives
+  // activityEvents/notifications by DIFFING the previous poll's items
+  // against the new ones (never a second fetch, never a second interval).
+  // Only a genuinely observed transition ever produces an event/
+  // notification: the FIRST poll for a freshly-started batch only seeds
+  // previousItemsRef (plus one real "sent" event, timestamped with the
+  // batch's own real createdAt) and never synthesizes anything else, since
+  // there is nothing yet to compare against — this is what keeps a page
+  // reload mid-batch, or simply the initial load, from fabricating a
+  // history it never actually observed. Every subsequent poll diffs
+  // real status/attemptCount/step changes only; an unchanged poll (the
+  // common case) produces zero new events and zero notifications.
   useEffect(() => {
     if (!activeBatchId) return;
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    // Final-item sync fix — a monotonic sequence number per poll request.
+    // The loop below is sequential by construction (the next poll is only
+    // ever scheduled after this one has been fully applied), so this only
+    // ever matters against some other, future source of an out-of-order
+    // response — never lets an older result overwrite a newer, already-
+    // applied one (see shouldApplyBatchPollResponse).
+    let issuedSeq = 0;
+    let appliedSeq = 0;
+    previousItemsRef.current = null;
+    batchCompletionLoggedRef.current = false;
+
     async function poll() {
+      const seq = ++issuedSeq;
+      let body: ExtensionBatchStatus;
       try {
         const response = await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`);
-        if (!response.ok || cancelled) return;
-        const body = await response.json() as ExtensionBatchStatus;
-        if (!cancelled) setBatchStatus(body);
-      } catch { /* transient — the next tick tries again */ }
+        if (cancelled) return;
+        if (!response.ok) {
+          // Genuinely gone (404 — deleted, or a resumed batch that expired
+          // between the resume check and this poll) rather than a
+          // transient error: reset tracking instead of leaving stale
+          // pairing-code/status state displayed forever with no way for
+          // the UI to recover on its own.
+          if (response.status === 404) { setActiveBatchId(null); setPairingCode(null); setBatchStatus(null); return; }
+          // Any other failure (network blip, 5xx) is transient — keep
+          // polling on the same cadence rather than silently going quiet.
+          if (!cancelled) timeoutId = setTimeout(poll, 4000);
+          return;
+        }
+        body = await response.json() as ExtensionBatchStatus;
+      } catch {
+        if (!cancelled) timeoutId = setTimeout(poll, 4000); // transient — the next tick tries again
+        return;
+      }
+      if (cancelled) return;
+      if (!shouldApplyBatchPollResponse(appliedSeq, seq)) return;
+      appliedSeq = seq;
+      // Final-item sync fix — this is the ONE authoritative merge of every
+      // item's latest status into local state, unconditionally applied
+      // before anything below decides whether polling should continue. A
+      // batch can never be treated as reconciled in the UI until this line
+      // has run with the response that made it terminal — including the
+      // final item's own terminal state.
+      setBatchStatus(body);
+
+      const previousItems = previousItemsRef.current;
+      if (previousItems === null) {
+        setActivityEvents(current => [
+          { id: `${body.batchId}:sent`, tone: "sent", message: `${body.items.length} listing${body.items.length === 1 ? "" : "s"} sent to extension`, timestampIso: body.createdAt },
+          ...current,
+        ]);
+      } else {
+        const newEvents: ActivityEvent[] = [];
+        const updatedDetailByEventId = new Map<string, string | null>();
+        for (const item of body.items) {
+          const prev = previousItems.get(item.itemId);
+          if (!prev) continue;
+          const label = item.generatedTitle || item.sku || "Listing";
+          const isInProgress = item.status === "preparing" || item.status === "filling" || item.status === "saving";
+          const wasInProgress = prev.status === "preparing" || prev.status === "filling" || prev.status === "saving";
+
+          if (isInProgress && !wasInProgress) {
+            newEvents.push({ id: `${item.itemId}:started`, tone: "progress", message: `${label} — draft started`, detail: item.detail, timestampIso: item.startedAt ?? new Date().toISOString() });
+          } else if (isInProgress && wasInProgress && (item.currentStep !== prev.currentStep || item.detail !== prev.detail)) {
+            updatedDetailByEventId.set(`${item.itemId}:started`, item.detail);
+          }
+
+          if (item.status === "completed" && prev.status !== "completed") {
+            newEvents.push({ id: `${item.itemId}:completed`, tone: "success", message: `${label} saved successfully`, timestampIso: item.completedAt ?? new Date().toISOString() });
+          }
+          if (item.status === "failed" && prev.status !== "failed") {
+            newEvents.push({ id: `${item.itemId}:failed`, tone: "failure", message: `${label} — draft failed: ${item.errorMessage ?? "Unknown error"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
+          }
+          if (item.attemptCount > prev.attemptCount && prev.attemptCount > 0) {
+            newEvents.push({ id: `${item.itemId}:retry-${item.attemptCount}`, tone: "progress", message: `${label} — retry started`, timestampIso: new Date().toISOString() });
+          }
+        }
+        if (newEvents.length > 0 || updatedDetailByEventId.size > 0) {
+          setActivityEvents(current => {
+            const withUpdatedDetail = updatedDetailByEventId.size > 0
+              ? current.map(event => updatedDetailByEventId.has(event.id) ? { ...event, detail: updatedDetailByEventId.get(event.id) ?? null } : event)
+              : current;
+            return newEvents.length > 0 ? [...newEvents, ...withUpdatedDetail] : withUpdatedDetail;
+          });
+        }
+      }
+      previousItemsRef.current = new Map(body.items.map(item => [item.itemId, item]));
+
+      // Polish pass — batch completion used to be shown ONLY via the now-
+      // removed toast; it now gets a real Live Activity event instead of
+      // silently disappearing. Fires at most once per batch (guarded by
+      // the same ref the toast previously used), so re-polling an
+      // already-completed batch never re-adds it.
+      if (body.status === "completed" && !batchCompletionLoggedRef.current) {
+        batchCompletionLoggedRef.current = true;
+        const savedCount = body.items.filter(item => item.status === "completed").length;
+        setActivityEvents(current => [
+          { id: `${body.batchId}:batch-complete`, tone: "success", message: `Batch completed — ${savedCount} item${savedCount === 1 ? "" : "s"} saved to Vinted drafts`, timestampIso: body.completedAt ?? new Date().toISOString() },
+          ...current,
+        ]);
+      }
+
+      // Final-item sync fix — replaces the old setInterval, which decided
+      // whether to skip a tick using a `batchStatus` value frozen in a
+      // stale closure (this effect intentionally never re-runs on a
+      // batchStatus change, so that value never updated) and therefore
+      // never actually stopped polling via that check. This decides using
+      // `body.status` — the response JUST applied above via setBatchStatus
+      // — so a batch can never be treated as reconciled in the UI, and
+      // polling can never stop, until every item's terminal state
+      // (including the final item's) has already been merged into local
+      // state. Sequential by construction: the next poll is only ever
+      // scheduled here, after this one has fully resolved and applied —
+      // never on a fixed clock regardless of the previous request's state.
+      if (!cancelled && !isBatchStatusTerminal(body.status)) {
+        timeoutId = setTimeout(poll, 4000);
+      }
     }
     poll();
-    const interval = setInterval(() => {
-      if (batchStatus && ["completed", "cancelled", "expired"].includes(batchStatus.status)) return;
-      poll();
-    }, 4000);
-    return () => { cancelled = true; clearInterval(interval); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-subscribes only when the batch id itself changes; batchStatus is read, not a dependency, so the interval isn't torn down/recreated on every poll tick.
+    return () => { cancelled = true; if (timeoutId !== undefined) clearTimeout(timeoutId); };
   }, [activeBatchId]);
 
   async function commitDelete(ids: string[]) {
@@ -620,108 +965,195 @@ export default function ListingsReviewWorkspace() {
 
   const hasAnyData = drafts.length > 0;
   const bulkCount = bulkSelectedIds.size;
+  // A batch not yet claimed, or claimed/in_progress, is genuinely still
+  // live; completed/cancelled/expired are terminal — matches the same
+  // terminal-status list the polling effect itself stops on.
+  const batchIsLive = Boolean(activeBatchId) && batchStatus !== null && !isBatchStatusTerminal(batchStatus.status);
 
-  return <div className="listings-review-layout">
+  return <div className="lr-layout">
+    <div className="lr-topline">
+      <h1>Listings Review</h1>
+      <span className="lr-safety-badge">Drafts only — never publishes</span>
+    </div>
+
+    {/* Visual-accuracy redesign — 4 KPI cards, the canonical, only place
+        these totals appear (never duplicated as inline heading stats
+        elsewhere on this page). Every value is real computed data —
+        Drafting is real, persisted extension-item state
+        (preparing/filling/saving), never a client-only guess. */}
+    <div className="lr-kpis" role="group" aria-label="Workspace summary">
+      <div className="lr-kpi lr-kpi-listings">
+        <KpiIcon tone="listings"><path d="M1.5 1.5h4.6L11.5 6.6 6.6 11.5 1.5 6.4V1.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><circle cx="4" cy="4" r=".9" fill="currentColor" /></KpiIcon>
+        <div><strong>{listingRows.length}</strong><span className="lr-kpi-label">Listings</span></div>
+      </div>
+      <div className="lr-kpi lr-kpi-ready">
+        <KpiIcon tone="ready"><path d="M2 6.8l3 3 6-6.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></KpiIcon>
+        <div><strong>{readyCount}</strong><span className="lr-kpi-label">Ready</span></div>
+      </div>
+      <div className="lr-kpi lr-kpi-drafting">
+        <KpiIcon tone="drafting"><path d="M11 6.5A4.5 4.5 0 1 1 8.9 2.7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /><path d="M8.5 1.8l.6 1.4-1.5.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></KpiIcon>
+        <div><strong>{draftingCount}</strong><span className="lr-kpi-label">Drafting</span></div>
+      </div>
+      <div className="lr-kpi lr-kpi-review">
+        <KpiIcon tone="review"><path d="M6.5 3.6v3.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /><circle cx="6.5" cy="9" r=".8" fill="currentColor" /><circle cx="6.5" cy="6.5" r="5.2" stroke="currentColor" strokeWidth="1.1" /></KpiIcon>
+        <div><strong>{needsReviewCount}</strong><span className="lr-kpi-label">Need review</span></div>
+      </div>
+    </div>
+
     <ListingsFilterBar
       searchQuery={searchQuery}
       onSearchQueryChange={setSearchQuery}
-      statusFilter={statusFilter}
-      onStatusFilterChange={setStatusFilter}
+      topTab={topTab}
+      onTopTabChange={setTopTab}
+      totalCount={listingRows.length}
+      readyCount={readyCount}
+      needsReviewCount={needsReviewCount}
+      draftsCount={draftsCount}
+      categoryFilter={categoryFilter}
+      onCategoryFilterChange={setCategoryFilter}
+      categoryOptions={categoryOptions}
       activeQuickFilters={activeQuickFilters}
       onToggleQuickFilter={toggleQuickFilter}
+      showEditedOnly={showEditedOnly}
+      onToggleEditedOnly={() => setShowEditedOnly(current => !current)}
+      showFailedOnly={showFailedOnly}
+      onToggleFailedOnly={() => setShowFailedOnly(current => !current)}
+      showSentOnly={showSentOnly}
+      onToggleSentOnly={() => setShowSentOnly(current => !current)}
+      sentCount={sentCount}
+      failedCount={failedCount}
+      filtersActive={filtersActive}
+      onClearFilters={clearFilters}
     />
 
     {loadError && <div className="home-error">{loadError}</div>}
     {bulkActionError && <div className="home-error" role="alert">{bulkActionError}</div>}
-    {bulkActionMessage && <div className="listings-review-bulk-message" role="status">{bulkActionMessage}</div>}
+    {bulkActionMessage && <div className="lr-bulk-message" role="status">{bulkActionMessage}</div>}
     {exportError && <div className="home-error" role="alert">
       {exportError}
-      {exportRejected.length > 0 && <ul className="listings-review-export-rejected">
+      {exportRejected.length > 0 && <ul className="lr-export-rejected">
         {exportRejected.map(item => <li key={item.draftId}>{item.sku ?? item.draftId}: {item.reasons.join(", ")}</li>)}
       </ul>}
     </div>}
     {sendToExtensionError && <div className="home-error" role="alert">
       {sendToExtensionError}
-      {sendToExtensionRejected.length > 0 && <ul className="listings-review-export-rejected">
+      {sendToExtensionRejected.length > 0 && <ul className="lr-export-rejected">
         {sendToExtensionRejected.map(item => <li key={item.draftId}>{item.sku ?? item.draftId}: {item.reasons.join(", ")}</li>)}
       </ul>}
     </div>}
 
-    {bulkCount > 0 && <div className="listings-review-bulk-bar" role="toolbar" aria-label="Bulk actions">
-      <span className="listings-review-bulk-count">{bulkCount} selected</span>
-      <button type="button" className="button-secondary" disabled={bulkActionRunning} onClick={handleBulkAssignCategories}>{bulkActionRunning ? "Assigning categories…" : "Assign missing categories"}</button>
-      <button type="button" className="button-secondary" disabled={bulkActionRunning} onClick={handleBulkMarkReady}>Mark ready</button>
-      <button type="button" className="button-danger" disabled={bulkActionRunning} onClick={() => setBulkDeleteConfirmOpen(true)}>Delete</button>
-      <button
-        type="button"
-        className="button-secondary"
-        disabled={exportRunning || bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH}
-        title={bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH ? `Select at most ${MAX_EXPORT_LISTINGS_PER_BATCH} listings to export at once.` : "Download a ZIP package for manual transfer into Vinted — never publishes anything"}
-        onClick={handleExport}
-      >
-        {exportRunning ? (exportStep || "Exporting…") : "Export"}
-      </button>
-      <button
-        type="button"
-        className="button-secondary"
-        disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS || Boolean(activeBatchId)}
-        title={bulkCount > MAX_EXTENSION_BATCH_LISTINGS ? `Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings for the extension at once.` : "Fills Vinted's Create Listing form via the Chrome extension and saves each item as a draft — never publishes anything"}
-        onClick={handleSendToExtension}
-      >
-        {sendToExtensionRunning ? "Preparing batch…" : "Send to Chrome extension"}
-      </button>
+    {/* Compact contextual strip, not a dominant panel — collapses further
+        the moment the extension claims the batch (progress from then on
+        lives in the table's Workflow column, Live Activity, and toasts,
+        never repeated here as a transcript). The permanent safety badge
+        now lives in the page's own top line, so this strip doesn't repeat
+        it. */}
+    {(pairingCode || activeBatchId) && <div className="lr-pairing-strip" role="status">
+      {/* Terminal status is checked FIRST, ahead of claimedAt — a batch
+          cancelled/expired before ever being claimed has claimedAt stuck at
+          null forever, so gating on claimedAt alone would leave this strip
+          showing a dead pairing code indefinitely instead of collapsing to
+          the terminal "Clear" state. */}
+      {batchStatus && isBatchStatusTerminal(batchStatus.status) ? <>
+        <span>Batch {batchStatus.status}</span>
+        <button type="button" className="lr-pairing-clear" onClick={handleClearExtensionBatch}>Clear</button>
+      </> : !batchStatus?.claimedAt ? <>
+        <span>Pairing code: {pairingCode && <code className="lr-pairing-code">{pairingCode}</code>}</span>
+        {pairingCode && <button type="button" className="lr-pairing-copy" onClick={handleCopyPairingCode} aria-label="Copy pairing code">
+          {codeCopied ? "Copied" : "Copy"}
+        </button>}
+        <span className="lr-pairing-hint">
+          {pairingCode ? "Enter this code in the extension's side panel — single use" : "Waiting for the extension to claim this batch…"}
+        </span>
+        {batchStatus?.expiresAt && <span className="lr-pairing-expiry">Expires {formatRelativeMinutes(batchStatus.expiresAt)}</span>}
+        <button type="button" className="button-danger lr-pairing-cancel" onClick={handleCancelExtensionBatch}>Cancel</button>
+      </> : <>
+        <span>Extension is processing your batch</span>
+        <button type="button" className="button-secondary lr-pairing-cancel" onClick={handleCancelExtensionBatch}>Cancel batch</button>
+      </>}
     </div>}
 
-    {(pairingCode || activeBatchId) && <div className="listings-review-extension-panel" role="status">
-      <p className="listings-review-extension-safety-label">Drafts only — never publishes</p>
-      {pairingCode && !batchStatus?.claimedAt && <>
-        <p>Pairing code: <code className="listings-review-pairing-code">{pairingCode}</code></p>
-        <p className="muted">Open the Vinted Draft Queue extension&apos;s side panel and enter this code. It expires soon and can only be used once.</p>
-      </>}
-      {batchStatus && <>
-        <p>Batch {batchStatus.batchId.slice(0, 8)}… — status: <strong>{batchStatus.status}</strong>
-          {batchStatus.claimedAt && <span> — claimed by the extension</span>}
-        </p>
-        <ol className="listings-review-extension-queue">
-          {batchStatus.items.map(item => <li key={item.itemId}>
-            {item.queuePosition + 1}. {item.generatedTitle || item.sku || item.draftId} — <strong>{item.status}</strong>
-            {item.vintedDraftId && <span> — Vinted draft {item.vintedDraftId}</span>}
-            {item.errorMessage && <span className="listings-review-extension-item-error"> — {item.errorMessage}</span>}
-          </li>)}
-        </ol>
-      </>}
-      <div className="controls">
-        {batchStatus && !["completed", "cancelled", "expired"].includes(batchStatus.status)
-          && <button type="button" className="button-danger" onClick={handleCancelExtensionBatch}>Cancel batch</button>}
-        {(!batchStatus || ["completed", "cancelled", "expired"].includes(batchStatus.status))
-          && <button type="button" className="button-secondary" onClick={handleClearExtensionBatch}>Clear</button>}
+    {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
+
+    {/* Two-column workspace (reference image 4's exact proportions). The
+        bulk-action bar lives INSIDE the table column, sticky to its own
+        bottom — never a viewport-spanning position:fixed overlay — so it
+        structurally cannot overlap the inspector/activity column, and
+        never needs a guessed padding-bottom reservation. */}
+    {hasAnyData && <div className="lr-workspace">
+      <div className="lr-table-column">
+        <ListingsTable
+          rows={tableRows}
+          selectedListingId={selectedListingId}
+          bulkSelectedIds={bulkSelectedIds}
+          onSelectListing={selectListing}
+          onToggleBulkSelect={toggleBulkSelect}
+          onToggleSelectAll={toggleSelectAll}
+          onPreview={setPreviewListingId}
+          onEditFields={setEditFieldsListingId}
+          onSendToExtension={id => handleSendToExtension([id])}
+        />
+        {bulkCount > 0 && <div className="lr-bulk-bar" role="toolbar" aria-label="Bulk actions">
+          <div className="lr-bulk-bar-selection" role="status">
+            <strong>{bulkCount} selected</strong>
+            <button type="button" className="button-secondary" onClick={() => setBulkSelectedIds(new Set())}>Clear selection</button>
+          </div>
+          <div className="lr-bulk-bar-actions">
+            {/* Assign categories/Mark ready/Export are real, already-shipped
+                batch actions — never removed — but the reference's own
+                hierarchy only surfaces Delete + Send as primary, so the
+                rest move into an overflow menu rather than visually
+                competing with them. */}
+            <OverflowMenu label="More bulk actions" items={[
+              { label: bulkActionRunning ? "Assigning categories…" : "Assign missing categories", onClick: handleBulkAssignCategories, disabled: bulkActionRunning },
+              { label: "Mark ready", onClick: handleBulkMarkReady, disabled: bulkActionRunning },
+              {
+                label: exportRunning ? (exportStep || "Exporting…") : "Export",
+                onClick: handleExport,
+                disabled: exportRunning || bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH,
+                title: bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH ? `Select at most ${MAX_EXPORT_LISTINGS_PER_BATCH} listings to export at once.` : "Download a ZIP package for manual transfer into Vinted — never publishes anything",
+              },
+            ]} />
+            <button type="button" className="button-danger" disabled={bulkActionRunning} onClick={() => setBulkDeleteConfirmOpen(true)}>Delete</button>
+            <button
+              type="button"
+              className="button"
+              disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS || Boolean(activeBatchId)}
+              title={bulkCount > MAX_EXTENSION_BATCH_LISTINGS ? `Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings for the extension at once.` : "Fills Vinted's Create Listing form via the Chrome extension and saves each item as a draft — never publishes anything"}
+              onClick={() => handleSendToExtension()}
+            >
+              {sendToExtensionRunning ? "Preparing batch…" : `Send ${bulkCount} to extension`}
+            </button>
+          </div>
+        </div>}
       </div>
-    </div>}
-
-    {!loading && !hasAnyData && !loadError && <p className="listing-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
-
-    {hasAnyData && <div className="listings-review-split">
-      <ListingsTable
-        rows={tableRows}
-        selectedListingId={selectedListingId}
-        bulkSelectedIds={bulkSelectedIds}
-        onSelectListing={setSelectedListingId}
-        onToggleBulkSelect={toggleBulkSelect}
-        onToggleSelectAll={toggleSelectAll}
-      />
-      <ListingDetailsPanel
-        listing={selectedListing}
-        markingReady={markingReadyId === selectedListingId}
-        assigningCategory={assigningCategoryId === selectedListingId}
-        reassessingAudience={reassessingAudienceId === selectedListingId}
-        onOpenCarousel={id => openCarousel(id)}
-        onPreview={setPreviewListingId}
-        onEditFields={setEditFieldsListingId}
-        onAssignCategory={handleAssignCategory}
-        onReassessAudience={handleReassessAudience}
-        onMarkReady={handleMarkReady}
-        onSellingPriceSaved={handleSellingPriceSaved}
-      />
+      <div className="lr-rail">
+        <ListingDetailsPanel
+          listing={selectedListing}
+          position={selectedListingPosition}
+          markingReady={markingReadyId === selectedListingId}
+          assigningCategory={assigningCategoryId === selectedListingId}
+          reassessingAudience={reassessingAudienceId === selectedListingId}
+          onOpenCarousel={(id, photoId) => openCarousel(id, photoId)}
+          onPreview={setPreviewListingId}
+          onEditFields={setEditFieldsListingId}
+          onAssignCategory={handleAssignCategory}
+          onReassessAudience={handleReassessAudience}
+          onMarkReady={handleMarkReady}
+          onSellingPriceSaved={handleSellingPriceSaved}
+          onClose={closeInspector}
+          onPrevious={() => {
+            if (!selectedListingPosition || selectedListingPosition.index === 0) return;
+            setSelectedListingId(filteredRows[selectedListingPosition.index - 1].id);
+          }}
+          onNext={() => {
+            if (!selectedListingPosition || selectedListingPosition.index >= selectedListingPosition.total - 1) return;
+            setSelectedListingId(filteredRows[selectedListingPosition.index + 1].id);
+          }}
+          onSendToExtension={id => handleSendToExtension([id])}
+        />
+        <DraftActivityPanel events={activityEvents} isLive={batchIsLive} />
+      </div>
     </div>}
 
     {carouselListing && <PhotoCarouselDialog

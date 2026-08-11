@@ -1,11 +1,22 @@
 import { NextResponse } from "next/server";
-import { supabaseRequestAll } from "@/lib/supabase";
+import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 import { getVintedCategoriesByIds, isPublishableVintedCategory } from "@/lib/listing-studio/vinted-categories-data";
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { buildPurchaseMatchIndex, matchSkuToPurchase, buildPurchaseSkuLookupQueries, type PurchaseMatchRecord } from "@/lib/listing-studio/purchase-match";
+
+// Listings Review redesign — one row per draft, the most recent extension
+// batch-item status across EVERY batch the owner has ever sent (see
+// rpc/listing_studio_latest_extension_status in supabase-listing-studio.sql).
+// Never re-derived per row client-side from a client-visible full batch
+// history — this IS the full history, already reduced server-side.
+export type LatestExtensionStatusRow = {
+  draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
+  error_code: string | null; error_message: string | null; vinted_draft_id: string | null;
+  started_at: string | null; completed_at: string | null; current_step: string | null; step_detail: string | null;
+};
 
 export const runtime = "nodejs";
 
@@ -64,7 +75,7 @@ export async function GET() {
     // the whole purchases table. Empty when no listing has a SKU, in
     // which case zero purchase requests are made at all.
     const purchaseQueries = buildPurchaseSkuLookupQueries(drafts.map(draft => draft.sku));
-    const [images, categoriesById, purchaseRecordChunks] = await Promise.all([
+    const [images, categoriesById, purchaseRecordChunks, extensionStatusRows] = await Promise.all([
       supabaseRequestAll<ImageRow>(
         `listing_draft_images?draft_id=in.(${draftIds.join(",")})&owner_id=eq.${user.id}&upload_state=eq.uploaded&select=id,draft_id,sort_order&order=sort_order.asc`,
       ),
@@ -81,9 +92,22 @@ export async function GET() {
       // item_size, quantity, item_condition, arrived) is ever fetched or
       // exposed here.
       Promise.all(purchaseQueries.map(query => supabaseRequestAll<PurchaseMatchRecord>(query))),
+      // Listings Review redesign — ONE call, owner-scoped server-side by
+      // the RPC itself, returning at most one row per draft (never a
+      // second query per listing). Read-only. Degrades gracefully to "no
+      // extension status known" (every listing falls back to its
+      // readiness status, exactly like before this feature existed)
+      // rather than failing the whole page, so this route keeps working
+      // immediately after deploy even before the SQL migration adding
+      // rpc/listing_studio_latest_extension_status has been run against
+      // the database.
+      supabaseRequest("rpc/listing_studio_latest_extension_status", {
+        method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
+      }).then(response => response.json() as Promise<LatestExtensionStatusRow[]>).catch(() => [] as LatestExtensionStatusRow[]),
     ]);
 
     const purchaseIndex = buildPurchaseMatchIndex(purchaseRecordChunks.flat());
+    const extensionStatusByDraftId = new Map(extensionStatusRows.map(row => [row.draft_id, row]));
 
     const draftsWithCategoryValidity = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);
@@ -114,6 +138,9 @@ export async function GET() {
         // (and, for a duplicate, the minimal safe fields needed to display
         // it), never any other purchase's data.
         purchase_match: matchSkuToPurchase(draft.sku, purchaseIndex),
+        // Listings Review redesign — null when this draft has never been
+        // part of any (non-cancelled) extension batch item.
+        extension_status: extensionStatusByDraftId.get(draft.id) ?? null,
       };
     });
 

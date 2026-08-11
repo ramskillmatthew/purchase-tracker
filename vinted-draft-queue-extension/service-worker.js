@@ -937,9 +937,33 @@ async function postResultToApp(itemId, status, extra = {}) {
   const state = await getState();
   if (!state.pairing?.batchToken) return;
   const { appBaseUrl } = await getSettings();
-  fetch(`${appBaseUrl}/api/extension/batch/items/${itemId}/result`, {
+  // Listings Review redesign (reporting-only change — form-steps.js's own
+  // field-filling logic is untouched) — currentStep/detail were already
+  // computed locally by every report() call in form-steps.js but were
+  // previously dropped here; now forwarded so the app can show real
+  // in-progress detail instead of nothing.
+  //
+  // Final-item sync bug fix — this fetch used to be fire-and-forget (no
+  // `await`/`return`), so this function resolved as soon as the request
+  // was merely STARTED. Its caller chain (reportItemResult -> the
+  // chrome.runtime.onMessage listener -> sendResponse) is what tells Chrome
+  // the service worker is still doing necessary work; once sendResponse
+  // fires, Chrome may terminate the worker at any time. For every item
+  // except the last in a batch, the NEXT item's own processing kept the
+  // worker alive long enough for the previous stray fetch to finish in the
+  // background anyway — but the final item has no follow-up activity, so
+  // its report could be (and was) cut off before the app ever received it,
+  // even though the Vinted draft itself had already been created. Awaiting
+  // the fetch here means the response is never released until the report
+  // has genuinely landed (or definitively failed) — same request, same
+  // body, same best-effort error handling, just no longer detached from
+  // the promise chain that keeps this worker alive.
+  await fetch(`${appBaseUrl}/api/extension/batch/items/${itemId}/result`, {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.pairing.batchToken}` },
-    body: JSON.stringify({ status, errorCode: extra.errorCode ?? null, errorMessage: extra.errorMessage ?? null, vintedDraftId: extra.vintedDraftId ?? null }),
+    body: JSON.stringify({
+      status, errorCode: extra.errorCode ?? null, errorMessage: extra.errorMessage ?? null, vintedDraftId: extra.vintedDraftId ?? null,
+      currentStep: extra.currentStep ?? null, detail: extra.detail ?? null,
+    }),
   }).catch(() => {});
 }
 

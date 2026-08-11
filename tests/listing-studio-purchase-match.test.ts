@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPurchaseMatchIndex, matchSkuToPurchase, describePurchaseMatch, buildPurchaseSkuLookupQueries,
-  MAX_SKU_LOOKUP_CHUNK_SIZE, type PurchaseMatchRecord,
+  computeCostPence, computeProfitPence,
+  MAX_SKU_LOOKUP_CHUNK_SIZE, type PurchaseMatchRecord, type SkuPurchaseMatch,
 } from "@/lib/listing-studio/purchase-match";
 
 function purchase(overrides: Partial<PurchaseMatchRecord> = {}): PurchaseMatchRecord {
@@ -203,5 +204,49 @@ describe("buildPurchaseSkuLookupQueries — Follow-up correction: restricting th
   it("every returned query string is ready to pass straight to supabaseRequestAll — a complete path, not a fragment", () => {
     const [query] = buildPurchaseSkuLookupQueries(["AA1711"]);
     expect(query.startsWith("purchases?")).toBe(true);
+  });
+});
+
+describe("computeCostPence — Listings Review redesign: the Cost column", () => {
+  it("returns the real purchase price for a single, unambiguous match", () => {
+    const match: SkuPurchaseMatch = { status: "matched", sku: "AA1711", purchasePricePence: 1850 };
+    expect(computeCostPence(match)).toBe(1850);
+  });
+
+  it("returns null for a matched SKU whose stored price is itself unavailable — never invents a cost", () => {
+    const match: SkuPurchaseMatch = { status: "matched", sku: "AA1711", purchasePricePence: null };
+    expect(computeCostPence(match)).toBeNull();
+  });
+
+  it("returns null (never a guess) for missing_sku, not_found, and duplicate — all genuinely ambiguous outcomes", () => {
+    expect(computeCostPence({ status: "missing_sku" })).toBeNull();
+    expect(computeCostPence({ status: "not_found", sku: "AA1711" })).toBeNull();
+    expect(computeCostPence({ status: "duplicate", sku: "AA1711", matches: [] })).toBeNull();
+  });
+});
+
+describe("computeProfitPence — Listings Review redesign: Price minus Cost, in pence", () => {
+  it("computes a real positive profit", () => {
+    expect(computeProfitPence(1850, 4500)).toBe(2650);
+  });
+
+  it("computes a real negative profit (sold at a loss) rather than clamping to zero", () => {
+    expect(computeProfitPence(4500, 1850)).toBe(-2650);
+  });
+
+  it("returns null when cost is unknown, even if price is known", () => {
+    expect(computeProfitPence(null, 4500)).toBeNull();
+  });
+
+  it("returns null when price is unknown, even if cost is known", () => {
+    expect(computeProfitPence(1850, null)).toBeNull();
+  });
+
+  it("returns null when both are unknown", () => {
+    expect(computeProfitPence(null, null)).toBeNull();
+  });
+
+  it("never performs marketplace-fee deduction — profit is exactly price minus cost, nothing else", () => {
+    expect(computeProfitPence(1000, 2000)).toBe(1000);
   });
 });

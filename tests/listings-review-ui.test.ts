@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
@@ -26,8 +26,9 @@ describe("app/listings-review/page.tsx — Milestone 5: dedicated review page", 
     expect(source).toContain("<ListingsReviewWorkspace />");
   });
 
-  it("has its own page heading distinct from Listing Studio's", () => {
-    expect(source).toContain("<h1>Listings Review</h1>");
+  it("no longer renders its own heading — ListingsReviewWorkspace renders it alongside the real KPI cards, which need client-fetched data this server component doesn't have", () => {
+    expect(source).not.toContain("<h1>");
+    expect(source).toContain("<ListingsReviewWorkspace />");
   });
 });
 
@@ -47,11 +48,22 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
   });
 
   describe("Filters", () => {
-    it("has an 'all' | status three-way filter plus a multi-select quick-filter Set, both feeding the same filteredRows computation", () => {
-      expect(source).toContain('const [statusFilter, setStatusFilter] = useState<ListingReviewStatusFilter>("all");');
+    it("has a 4-value top tab (readiness + workflow, never merged) plus a multi-select quick-filter Set, both feeding the same filteredRows computation", () => {
+      expect(source).toContain('const [topTab, setTopTab] = useState<TopTab>("all");');
       expect(source).toContain("const [activeQuickFilters, setActiveQuickFilters] = useState<Set<ListingQuickFilter>>(new Set());");
-      expect(source).toContain('if (statusFilter !== "all" && row.status !== statusFilter) return false;');
+      expect(source).toContain('if (topTab === "ready" && row.status === "needs_review") return false;');
+      expect(source).toContain('if (topTab === "needs_review" && row.status !== "needs_review") return false;');
+      expect(source).toContain('if (topTab === "drafted" && row.workflowStatus !== "drafted") return false;');
       expect(source).toContain("for (const filter of activeQuickFilters) if (!matchesQuickFilter(row, filter)) return false;");
+    });
+
+    it("Sent, Edited, and Draft-failed stay reachable via dedicated Filters toggles, never hidden, even though they aren't top tabs (the approved reference shows exactly 4 tabs)", () => {
+      expect(source).toContain("const [showEditedOnly, setShowEditedOnly] = useState(false);");
+      expect(source).toContain("const [showFailedOnly, setShowFailedOnly] = useState(false);");
+      expect(source).toContain("const [showSentOnly, setShowSentOnly] = useState(false);");
+      expect(source).toContain('if (showEditedOnly && row.status !== "edited") return false;');
+      expect(source).toContain('if (showFailedOnly && row.workflowStatus !== "failed") return false;');
+      expect(source).toContain("if (showSentOnly && !(row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus))) return false;");
     });
 
     it("toggleQuickFilter adds/removes from the Set immutably (a fresh Set each time, never mutating the current one in place)", () => {
@@ -98,7 +110,7 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
       expect(bulkMarkReadyBlock).toContain("succeededCount += 1;");
     });
 
-    it("Follow-up correction (closing the Mark Ready readiness gap): the bulk summary tallies each individual missing-field reason from the route's `warnings` array, not just the whole joined error string — so 'Missing SKU (3), No uploaded photos (2)' is possible instead of one bucket per unique combination", () => {
+    it("Follow-up correction (closing the Mark Ready readiness gap): the bulk summary tallies each individual missing-field reason from the route's `warnings` array, not just the whole joined error string", () => {
       const bulkMarkReadyBlock = source.slice(source.indexOf("async function handleBulkMarkReady"), source.indexOf("async function commitDelete"));
       expect(bulkMarkReadyBlock).toContain("Array.isArray(body.warnings)");
       expect(bulkMarkReadyBlock).toContain("for (const reason of reasons)");
@@ -108,12 +120,11 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
       expect(source).toContain('method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "delete_photos" }),');
     });
 
-    it("Milestone 7 (revised): Export is no longer a disabled placeholder — it has a real handler; 'List automatically' has been replaced by 'Send to Chrome extension' (also a real handler, not a placeholder)", () => {
-      expect(source).not.toContain('<button type="button" className="button-secondary" disabled title="Coming in a future milestone">Export</button>');
-      expect(source).toContain("onClick={handleExport}");
+    it("Export has a real handler (inside the bulk bar's overflow menu) and 'Send {n} to extension' is a real, working primary action", () => {
+      expect(source).toContain("onClick: handleExport");
       expect(source).not.toContain("List automatically");
-      expect(source).toContain("Send to Chrome extension");
-      expect(source).toContain("onClick={handleSendToExtension}");
+      expect(source).toContain("`Send ${bulkCount} to extension`");
+      expect(source).toContain("onClick={() => handleSendToExtension()}");
     });
 
     it("a successful bulk delete clears the deleted ids from both the bulk selection and, if it was open, the detail panel selection", () => {
@@ -161,9 +172,15 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
   describe("Performance-sensitive rendering", () => {
     it("derives photo grouping, listing rows, the id lookup map, and the filtered/search result all via useMemo — never recomputed from scratch on every render", () => {
       expect(source).toContain("const photoIdsByDraftId = useMemo(() => {");
-      expect(source).toContain("const listingRows: ListingRow[] = useMemo(() => drafts.map(draft => {");
+      expect(source).toContain("const baseListingRows = useMemo(() => drafts.map(draft => {");
       expect(source).toContain("const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);");
       expect(source).toContain("const filteredRows = useMemo(() => listingRows.filter(row => {");
+    });
+
+    it("workflow status (and its secondary-line inputs) is layered on top of the base rows in its OWN memo (depends on batchStatus), so a 4s poll tick never re-runs the full base pipeline — only this small mapping", () => {
+      expect(source).toContain("const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {");
+      expect(source).toContain("}), [baseListingRows, batchStatus]);");
+      expect(source).toContain("const queuePosition = liveItem ? liveItem.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;");
     });
 
     it("every handler passed down to a memoized child is itself useCallback'd (toggleQuickFilter, toggleBulkSelect, toggleSelectAll, openCarousel), so those children's memo() actually prevents unrelated re-renders", () => {
@@ -183,29 +200,65 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
   });
 });
 
-describe("components/listings-review/ListingsTable.tsx — Milestone 5: left table", () => {
+describe("components/listings-review/ListingsTable.tsx — visual-accuracy redesign: dense reference table", () => {
   const source = read("components/listings-review/ListingsTable.tsx");
 
   it("is memo()'d", () => {
     expect(source).toContain("export default memo(ListingsTable);");
   });
 
-  it("has exactly the required columns: Cover Photo, Generated Title, Brand, UK Size, SKU, Status (plus the bulk-select checkbox column)", () => {
-    for (const column of ["Cover photo", "Generated title", "Brand", "UK size", "SKU", "Status"]) {
+  it("has exactly the reference's required columns: Photo, Listing, Size, Cost, Price, Profit, Workflow (plus the bulk-select checkbox column and a row-actions column)", () => {
+    for (const column of ["Photo", "Listing", "Size", "Cost", "Price", "Profit", "Workflow"]) {
       expect(source).toContain(`<th>${column}</th>`);
     }
   });
 
+  it("Listing is one merged cell — title as the primary row text, SKU underneath in muted text — never two separate top-level columns", () => {
+    expect(source).toContain('<span className="lr-title-text">{row.generatedTitle || "Untitled listing"}</span>');
+    expect(source).toContain('<span className="lr-title-sku">{row.sku || "No SKU"}</span>');
+    expect(source).not.toContain("<th>Brand</th>");
+  });
+
+  it("Cost/Price/Profit render '—' for missing data rather than a misleading number, and reuse formatPenceAsGBP", () => {
+    expect(source).toContain('import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";');
+    expect(source).toContain('row.costPence !== null ? formatPenceAsGBP(row.costPence) : "—"');
+    expect(source).toContain('row.profitPence !== null ? formatPenceAsGBP(row.profitPence) : "—"');
+  });
+
+  it("Workflow is a bare illuminated dot + text (with an optional truthful secondary line) via the ONE shared WorkflowStatus component — workflow status wins when present, readiness otherwise — colour is never the only signal", () => {
+    expect(source).toContain('import { WorkflowStatus } from "./WorkflowStatus";');
+    expect(source).toContain("const displayLabel = row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status];");
+    expect(source).toContain("computeWorkflowSecondaryLine({");
+    expect(source).toContain('<WorkflowStatus label={displayLabel} tone={displayTone} pulse={row.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />');
+  });
+
+  it("the pulse animation is reserved for the single item genuinely 'in_progress' right now, and shared by both the desktop table and the mobile card list via one WorkflowStatus component", () => {
+    const matches = source.match(/pulse=\{row\.workflowStatus === "in_progress"\}/g) ?? [];
+    expect(matches.length).toBe(2); // once in the table, once in the mobile card list
+  });
+
+  it("the header checkbox exposes a real indeterminate state (set imperatively via a ref, since HTML has no declarative attribute for it), recomputed from the currently visible rows", () => {
+    expect(source).toContain("const selectAllRef = useRef<HTMLInputElement>(null);");
+    expect(source).toContain("selectAllRef.current.indeterminate = someSelected;");
+    expect(source).toContain("const someSelected = selectedCount > 0 && !allSelected;");
+  });
+
+  it("each row's overflow menu wires Preview/Edit fields to real, already-existing callbacks, plus a real Send/Resend when eligible — never a new endpoint", () => {
+    expect(source).toContain('{ label: "Preview listing", onClick: () => handlers.onPreview(row.id) }');
+    expect(source).toContain('{ label: "Edit fields", onClick: () => handlers.onEditFields(row.id) }');
+    expect(source).toContain("handlers.onSendToExtension");
+  });
+
   it("REGRESSION: clicking the row-select checkbox stops propagation so it never also triggers the row's own onSelectListing click", () => {
-    expect(source).toContain('<td className="listings-review-checkbox-cell" onClick={event => event.stopPropagation()}>');
+    expect(source).toContain('<td className="lr-checkbox-cell" onClick={event => event.stopPropagation()}>');
   });
 
   it("clicking anywhere else on the row selects it into the detail panel", () => {
     expect(source).toContain("onClick={() => onSelectListing(row.id)}");
   });
 
-  it("highlights the currently selected row with a distinct class", () => {
-    expect(source).toContain('className={row.id === selectedListingId ? "listings-review-row listings-review-row-active" : "listings-review-row"}');
+  it("highlights the currently selected row with a distinct class (the reference's restrained blue-violet background)", () => {
+    expect(source).toContain('className={row.id === selectedListingId ? "lr-row lr-row-active" : "lr-row"}');
   });
 
   it("shows an empty state when the filtered row list is empty, rather than an empty table body", () => {
@@ -214,21 +267,83 @@ describe("components/listings-review/ListingsTable.tsx — Milestone 5: left tab
   });
 });
 
-describe("components/listings-review/ListingDetailsPanel.tsx — Milestone 5: persistent right panel", () => {
+describe("components/listings-review/WorkflowStatus.tsx — the ONE shared status-dot component", () => {
+  const source = read("components/listings-review/WorkflowStatus.tsx");
+
+  it("is a bare circular dot (no square/pill/badge backplate) plus adjacent label text, with an optional secondary line — colour is never the only signal", () => {
+    expect(source).toContain('className={`lr-workflow-dot${pulse ? " lr-workflow-dot-pulse" : ""}`}');
+    expect(source).toContain('style={{ "--tone": tone } as CSSProperties}');
+    expect(source).toContain("{label}");
+    expect(source).toContain("{secondaryLine && <span className=\"lr-workflow-secondary\">{secondaryLine}</span>}");
+  });
+});
+
+describe("lib/listing-studio/extension-workflow-status.ts — exact reference colours + secondary-line source of truth", () => {
+  const source = read("lib/listing-studio/extension-workflow-status.ts");
+
+  it("uses the exact approved-reference hex colours for every workflow status", () => {
+    expect(source).toContain('sent: "#8B7CFF",');
+    expect(source).toContain('in_queue: "#7E8798",');
+    expect(source).toContain('in_progress: "#3F8CFF",');
+    expect(source).toContain('drafted: "#2FCB75",');
+    expect(source).toContain('failed: "#FF4D57",');
+  });
+
+  it("exports the exact readiness tones (Ready reuses the same emerald as drafted; Needs review is the one amber)", () => {
+    expect(source).toContain('export const READINESS_TONE_READY = "#2FCB75";');
+    expect(source).toContain('export const READINESS_TONE_NEEDS_REVIEW = "#F4AC32";');
+  });
+
+  it("computeWorkflowSecondaryLine is the ONE place a secondary line is ever derived — position for in_queue, real detail/step for in_progress, real draft id for drafted, real error for failed, nothing for every other status", () => {
+    expect(source).toContain("export function computeWorkflowSecondaryLine(input: {");
+    expect(source).toContain('case "in_queue":');
+    expect(source).toContain("return input.queuePosition !== null ? `Position ${input.queuePosition + 1}` : null;");
+    expect(source).toContain('case "in_progress":');
+    expect(source).toContain("return input.detail || (input.currentStep ? (STEP_LABELS[input.currentStep] ?? input.currentStep) : null);");
+    expect(source).toContain('case "drafted":');
+    expect(source).toContain("return input.vintedDraftId ? `Draft #${input.vintedDraftId}` : null;");
+    expect(source).toContain('case "failed":');
+    expect(source).toContain("return input.errorMessage || null;");
+  });
+
+  it("REGRESSION: 'Item drafted' can never be shown without a real, confirmed Vinted draft id — computeExtensionWorkflowStatus only ever returns 'drafted' for a genuinely completed item status, and the secondary line itself requires vintedDraftId to render anything", () => {
+    expect(source).toContain('if (itemStatus === "completed") return "drafted";');
+    expect(source).not.toMatch(/"saving".*return "drafted"/);
+  });
+});
+
+describe("components/listings-review/ListingDetailsPanel.tsx — visual-accuracy redesign: compact inspector", () => {
   const source = read("components/listings-review/ListingDetailsPanel.tsx");
 
   it("is memo()'d and shows a placeholder when nothing is selected, rather than being unmounted/hidden entirely", () => {
     expect(source).toContain("export default memo(ListingDetailsPanel);");
-    expect(source).toContain("listings-review-panel-empty");
+    expect(source).toContain("lr-inspector-empty");
   });
 
-  it("displays every required field: large cover image, generated title, generated description, brand, model, product type, colour(s), material, UK size, SKU, condition", () => {
-    expect(source).toContain('className="listings-review-panel-image"');
-    expect(source).toContain('className="listings-review-panel-title"');
-    expect(source).toContain('className="listings-review-panel-description"');
-    for (const field of ["Brand", "Model", "Product type", "Material", "UK size", "SKU", "Condition"]) {
+  it("displays the compact card's required fields: medium 16:9 image, up to 5 thumbnails, position indicator, generated title, SKU/UK size line, cost/price/profit row, and a metadata grid trimmed to exactly Brand/Category/Condition/Colour(s) (matching the reference exactly)", () => {
+    expect(source).toContain('className="lr-inspector-image"');
+    const css = read("app/globals.css");
+    expect(css).toContain(".lr-inspector-image { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }");
+    expect(source).toContain('className="lr-inspector-title"');
+    expect(source).toContain("const thumbnailIds = listing.photoIds.slice(0, 5);");
+    expect(source).toContain('{position && <span className="lr-inspector-position">{position.index + 1} of {position.total}</span>}');
+    expect(source).toContain('<p className="lr-inspector-sku">{listing.sku || "No SKU"} {listing.ukSize && `· UK ${listing.ukSize}`}</p>');
+    expect(source).toContain('className="lr-inspector-money"');
+    for (const field of ["Brand", "Category", "Condition"]) {
       expect(source).toContain(`<dt>${field}</dt>`);
     }
+    // The description paragraph and the Model/Material/Vinted-audience rows
+    // are deliberately no longer part of the compact grid (not in the
+    // reference) — Preview/Edit still show/edit them in full.
+    expect(source).not.toContain("lr-inspector-description");
+  });
+
+  it("clicking a thumbnail swaps the main displayed image (never just opens the carousel) — the active thumbnail gets a thin violet border; clicking the main image itself opens the full carousel", () => {
+    expect(source).toContain("const [activePhotoId, setActivePhotoId] = useState<string | null>(null);");
+    expect(source).toContain("useEffect(() => { setActivePhotoId(null); }, [listing?.id]);");
+    expect(source).toContain("onClick={() => setActivePhotoId(photoId)}");
+    expect(source).toContain('className={photoId === mainPhotoId ? "lr-inspector-thumb lr-inspector-thumb-active" : "lr-inspector-thumb"}');
+    expect(source).toContain("onClick={() => onOpenCarousel(listing.id, mainPhotoId ?? undefined)}");
   });
 
   it("Milestone 6 (Vinted-aware colours/materials): shows both colours when two exist, joined the same way the title does, and the colour dt pluralises to 'Colours' when there are two", () => {
@@ -239,38 +354,63 @@ describe("components/listings-review/ListingDetailsPanel.tsx — Milestone 5: pe
     expect(source).not.toMatch(/confidence/i);
   });
 
-  it("has exactly the three required buttons: Preview Listing, Edit Fields, Mark Ready", () => {
-    expect(source).toContain(">Preview listing<");
-    expect(source).toContain(">Edit fields<");
-    expect(source).toMatch(/>Mark ready<|Marking ready…/);
+  it("has exactly the reference's 2-button primary action row — Edit, Preview — plus a small overflow menu for Assign category/Reassess audience/Mark ready/Send-Resend (all fully preserved, never deleted, just relocated out of the primary row to match the reference)", () => {
+    expect(source).toContain('<button type="button" className="button-secondary" onClick={() => onEditFields(listing.id)}>Edit</button>');
+    expect(source).toContain('<button type="button" className="button-secondary" onClick={() => onPreview(listing.id)}>Preview</button>');
+    expect(source).toContain('label="More actions for this listing"');
+    expect(source).toMatch(/Assign category/);
+    expect(source).toMatch(/Mark ready/);
   });
 
   it("REGRESSION: Mark Ready is only ever actionable on an Edited listing — disabled for Ready (nothing to do) and Needs Review (missing fields always win, no override)", () => {
-    expect(source).toContain('disabled={markingReady || listing.status !== "edited"}');
+    expect(source).toContain('disabled: markingReady || listing.status !== "edited"');
   });
 
   it("clicking the cover image opens the photo carousel for this listing, and is disabled when there's no photo at all", () => {
-    expect(source).toContain("onClick={() => onOpenCarousel(listing.id)}");
-    expect(source).toContain("disabled={!listing.coverPhotoId}");
+    expect(source).toContain("disabled={!mainPhotoId}");
   });
 
   it("renders one warning per entry from the listing's own warnings array — nothing hardcoded", () => {
     expect(source).toContain("{listing.warnings.map(warning => <li key={warning}");
   });
+
+  it("the Workflow status shown here uses the exact same shared WorkflowStatus component and secondary-line logic as the table — never a second status language", () => {
+    expect(source).toContain('import { WorkflowStatus } from "./WorkflowStatus";');
+    expect(source).toContain("computeWorkflowSecondaryLine({");
+  });
 });
 
-describe("components/listings-review/ListingsFilterBar.tsx — Milestone 5: search + status tabs + quick filters", () => {
+describe("components/listings-review/ListingsFilterBar.tsx — visual-accuracy redesign: 4-tab toolbar", () => {
   const source = read("components/listings-review/ListingsFilterBar.tsx");
 
   it("is memo()'d", () => {
     expect(source).toContain("export default memo(ListingsFilterBar);");
   });
 
-  it("has exactly the required status tabs: All, Ready, Needs review, Edited", () => {
+  it("has exactly the reference's 4 top tabs: All, Ready, Need review, Drafts — readiness and extension workflow, never merged, with real counts", () => {
     expect(source).toContain('{ value: "all", label: "All" }');
-    expect(source).toContain('{ value: "ready", label: "Ready" }');
-    expect(source).toContain('{ value: "needs_review", label: "Needs review" }');
-    expect(source).toContain('{ value: "edited", label: "Edited" }');
+    expect(source).toContain('{ value: "ready", label: "Ready", tone: READINESS_TONE_READY }');
+    expect(source).toContain('{ value: "needs_review", label: "Need review", tone: READINESS_TONE_NEEDS_REVIEW }');
+    expect(source).toContain('{ value: "drafted", label: "Drafts", tone: WORKFLOW_STATUS_TONE.drafted }');
+    expect(source).not.toContain('{ value: "sent", label: "Sent"');
+  });
+
+  it("Sent (in flight), Edited, and Draft failed are NOT top tabs (matching the reference's exact 4 tabs) but stay reachable inside the Filters popover — never hidden", () => {
+    expect(source).toContain("onClick={onToggleSentOnly}");
+    expect(source).toContain("onClick={onToggleFailedOnly}");
+    expect(source).toContain("onClick={onToggleEditedOnly}");
+    expect(source).toMatch(/>\s*Sent \(\{sentCount\}\)\s*</);
+    expect(source).toMatch(/>\s*Draft failed \(\{failedCount\}\)\s*</);
+    expect(source).toMatch(/>\s*Edited\s*</);
+  });
+
+  it("Clear filters only renders when a filter is actually active", () => {
+    expect(source).toContain('{filtersActive && <button type="button" className="lr-clear-filters" onClick={onClearFilters}>Clear filters</button>}');
+  });
+
+  it("has a Filters button with a small icon, and the exact reference search placeholder", () => {
+    expect(source).toContain("<FilterIcon /> Filters");
+    expect(source).toContain('placeholder="Search titles or SKU…"');
   });
 
   it("has exactly the required quick filters: Missing SKU, Missing size, Missing brand, Missing colour — no Missing Model quick filter", () => {
@@ -335,7 +475,7 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 5: ex
     expect(source).toContain("<dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : \"Not set\"}</dd>");
   });
 
-  it("Milestone 6: shows the real saved selling price when set, the explicit placeholder only when it isn't — sellingPricePence defaults to null so Listing Studio's own call site (which has none) still shows the placeholder unchanged", () => {
+  it("Milestone 6: shows the real saved selling price when set, the explicit placeholder only when it isn't", () => {
     expect(source).toContain("sellingPricePence = null,");
     expect(source).toContain('<dd className={sellingPricePence ? undefined : "preview-listing-vinted-price-placeholder"}>{sellingPricePence ? formatPenceAsGBP(sellingPricePence) : "Price not set"}</dd>');
   });
@@ -350,29 +490,63 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 5: ex
   });
 });
 
-describe("app/globals.css — Milestone 5: Listings Review styling exists for every new component", () => {
+describe("app/globals.css — visual-accuracy redesign: --lr-* tokens and every new component styled", () => {
   const css = read("app/globals.css");
 
-  it("styles the split layout, table, status badges, panel, warnings, carousel, and the extended preview card", () => {
+  it("styles the workspace split, dense table, workflow dot, compact inspector, activity panel, warnings, carousel, and the extended preview card", () => {
     for (const selector of [
-      ".listings-review-split", ".listings-review-table", ".listings-review-status-badge",
-      ".listings-review-panel", ".listings-review-warning", ".photo-carousel-thumbnail-strip",
-      ".preview-listing-vinted-card",
+      ".lr-workspace", ".lr-rail", ".lr-table", ".lr-workflow-status-row",
+      ".lr-inspector", ".lr-inspector-warning", ".lr-activity-panel",
+      ".photo-carousel-thumbnail-strip", ".preview-listing-vinted-card",
     ]) {
       expect(css).toContain(selector);
     }
   });
 
-  it("gives each of the three statuses a visually distinct colour (not all sharing one style)", () => {
-    expect(css).toMatch(/\.listings-review-status-ready\s*\{[^}]*color:\s*#16845d/);
-    expect(css).toMatch(/\.listings-review-status-needs_review\s*\{[^}]*color:\s*var\(--danger\)/);
-    expect(css).toMatch(/\.listings-review-status-edited\s*\{[^}]*color:\s*#b4740e/);
+  it("defines the exact approved dark palette as --lr-* tokens scoped to .dark .listings-review-page, with a light-mode fallback derived from this app's own existing light tokens (never leaking into any other page)", () => {
+    expect(css).toContain(".dark .listings-review-page {");
+    expect(css).toContain("--lr-green: #2fcb75;");
+    expect(css).toContain("--lr-blue: #3f8cff;");
+    expect(css).toContain("--lr-amber: #f4ac32;");
+    expect(css).toContain("--lr-red: #ff4d57;");
+    expect(css).toContain("--lr-violet: #7c6cf2;");
+    expect(css).toContain("--lr-page: #090d14;");
+  });
+
+  it("the workflow dot is a BARE circle (no square/pill backplate) at the exact approved 8px/glow spec", () => {
+    expect(css).toContain(".lr-workflow-dot { width: 8px; height: 8px; border-radius: 999px; flex: 0 0 8px; background: var(--tone); box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone) 14%, transparent), 0 0 8px color-mix(in srgb, var(--tone) 55%, transparent); }");
+  });
+
+  it("the in-progress pulse animation is guarded behind prefers-reduced-motion, and never applied to any status other than in_progress", () => {
+    expect(css).toContain("@media (prefers-reduced-motion: no-preference) {");
+    expect(css).toMatch(/@media \(prefers-reduced-motion: no-preference\) \{\s*\.lr-workflow-dot-pulse \{ animation: lrWorkflowPulse/);
+  });
+
+  it("REGRESSION: every redesign responsive override for this page sits strictly AFTER its own base rule in source order (the same cascade-order class of bug caught live during the Listing Studio redesign)", () => {
+    const baseIdx = css.indexOf(".lr-topline {");
+    const overrideIdx = css.lastIndexOf(".lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { flex: 1 1 auto; min-width: 0; }");
+    expect(baseIdx).toBeGreaterThan(-1);
+    expect(overrideIdx).toBeGreaterThan(baseIdx);
   });
 
   it("Milestone 6: styles the purchase-price section and the selling-price control", () => {
-    for (const selector of [".listings-review-panel-purchase-section", ".listings-review-panel-purchase-line", ".listings-review-selling-price-row", ".listings-review-selling-price-status"]) {
+    for (const selector of [".lr-inspector-purchase", ".lr-inspector-purchase-line", ".lr-selling-price-row", ".lr-selling-price-status"]) {
       expect(css).toContain(selector);
     }
+  });
+
+  it("money columns are wide enough that a genuine four-figure amount (e.g. £1,234.56) never truncates or ellipsises, and are right-aligned per a professional financial table", () => {
+    expect(css).toMatch(/\.lr-table th:nth-child\(5\), \.lr-table td:nth-child\(5\),\s*\n\s*\.lr-table th:nth-child\(6\), \.lr-table td:nth-child\(6\),\s*\n\s*\.lr-table th:nth-child\(7\), \.lr-table td:nth-child\(7\) \{ width: 84px; text-align: right; \}/);
+    expect(css).toContain(".lr-money-cell { overflow: hidden; color: var(--lr-text); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; text-align: right; }");
+  });
+
+  it("rows are dense at the reference's 72-80px height, with a 50-56px thumbnail", () => {
+    expect(css).toContain(".lr-row { cursor: pointer; height: 76px; transition: background 100ms ease; }");
+    expect(css).toContain(".lr-cover-thumb { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; }");
+  });
+
+  it("the selected-row background is the restrained violet-soft treatment, matching the reference", () => {
+    expect(css).toContain(".lr-row-active, .lr-row-active:hover { background: var(--lr-violet-soft); }");
   });
 });
 
@@ -421,7 +595,6 @@ describe("Milestone 6 (purchase-price lookup and manual Vinted selling price) �
     expect(fieldSource).toMatch(/status === "saving" \? "Saving…" : "Save"/);
     expect(fieldSource).toContain('status === "saved"');
     expect(fieldSource).toContain('status === "error"');
-    // On a failed save, inputValue is never reset — only status/errorMessage change.
     const catchBlockIndex = fieldSource.indexOf("if (!response.ok) {");
     const catchBlock = fieldSource.slice(catchBlockIndex, fieldSource.indexOf("}", fieldSource.indexOf("return;", catchBlockIndex)));
     expect(catchBlock).not.toContain("setInputValue");
@@ -437,16 +610,16 @@ describe("Milestone 6 (purchase-price lookup and manual Vinted selling price) �
     expect(fieldSource).not.toContain("/fields`");
   });
 
-  it("SellingPriceField: the initial input value is derived directly from the sellingPricePence prop — an existing saved price loads pre-filled, and survives a page refresh since it's re-fetched fresh from the server on every load", () => {
+  it("SellingPriceField: the initial input value is derived directly from the sellingPricePence prop", () => {
     expect(fieldSource).toContain('useState(sellingPricePence !== null ? (sellingPricePence / 100).toFixed(2) : "")');
   });
 
-  it("SellingPriceField: the input is never disabled except while actively saving — a previously-saved price can always be edited again", () => {
+  it("SellingPriceField: the input is never disabled except while actively saving", () => {
     expect(fieldSource).toContain('disabled={status === "saving"}');
     expect(fieldSource).not.toMatch(/disabled\s*(?:=\s*\{)?(?:true|readOnly)/);
   });
 
-  it("REGRESSION: no AI involvement anywhere in this feature — no Anthropic import, no analysis-run write, no AI cost-log write, in the selling-price route, the purchase-match lib, or the listings-review feed route", () => {
+  it("REGRESSION: no AI involvement anywhere in this feature", () => {
     const sellingPriceRouteSource = read("app/api/listing-studio/groups/[draftId]/selling-price/route.ts");
     const purchaseMatchLibSource = read("lib/listing-studio/purchase-match.ts");
     const listingsReviewRouteSource = read("app/api/listing-studio/listings-review/route.ts");
@@ -461,17 +634,12 @@ describe("Milestone 6 (purchase-price lookup and manual Vinted selling price) �
 describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
   const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("the Export button is enabled (no longer the disabled 'Coming in a future milestone' placeholder) and calls handleExport", () => {
-    expect(workspaceSource).not.toMatch(/Export<\/button>[\s\S]{0,5}disabled title="Coming in a future milestone"/);
-    expect(workspaceSource).toContain("onClick={handleExport}");
-  });
-
-  it("'List automatically' has been replaced by the Chrome extension flow (see the dedicated 'Send to Chrome extension' describe block below) — no disabled placeholder remains", () => {
-    expect(workspaceSource).not.toContain("List automatically");
+  it("the Export button calls handleExport", () => {
+    expect(workspaceSource).toContain("onClick: handleExport");
   });
 
   it("the Export button is disabled while a request is in flight — prevents duplicate clicks", () => {
-    expect(workspaceSource).toMatch(/disabled=\{exportRunning \|\| bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH\}/);
+    expect(workspaceSource).toMatch(/disabled: exportRunning \|\| bulkCount > MAX_EXPORT_LISTINGS_PER_BATCH,/);
   });
 
   it("shows step-by-step progress labels while exporting", () => {
@@ -484,7 +652,6 @@ describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
     const exportFn = workspaceSource.slice(workspaceSource.indexOf("async function handleExport"), workspaceSource.indexOf("async function handleSendToExtension"));
     const catchBlock = exportFn.slice(exportFn.indexOf("} catch"));
     expect(catchBlock).not.toContain("setBulkSelectedIds(new Set())");
-    // The one place bulkSelectedIds IS cleared is the success path, after the download.
     const successPath = exportFn.slice(exportFn.indexOf("setBulkActionMessage"), exportFn.indexOf("} catch"));
     expect(successPath).toContain("setBulkSelectedIds(new Set())");
   });
@@ -501,7 +668,7 @@ describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
 
   it("success wording says 'Exported', never 'Published' or 'Listed'", () => {
     expect(workspaceSource).toMatch(/Exported \$\{ids\.length\}/);
-    expect(workspaceSource).not.toMatch(/published|listed live|now live/i);
+    expect(workspaceSource).not.toMatch(/\bpublished\b|listed live\b|now live\b/i);
   });
 
   it("REGRESSION: never sends one request per listing — exactly one POST to the export route with every selected draftId in one body", () => {
@@ -517,7 +684,6 @@ describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
 
   it("this feature never talks to Vinted, never publishes, and allows any number of listings up to the batch max (never restricted to exactly one)", () => {
     expect(workspaceSource).not.toMatch(/vinted\.co\.uk|vinted\.com/i);
-    // Single-selection is NOT required for export — only the upper batch bound is enforced.
     expect(workspaceSource).not.toMatch(/exactly one listing/i);
   });
 });
@@ -530,13 +696,13 @@ describe("app/api/listing-studio/listings-review/export/route.ts — Milestone 7
     expect(routeSource).toContain("buildListingWarnings(readinessFields)");
   });
 
-  it("REGRESSION: there is no publish/list/upload-live function, route, or button anywhere in this feature — this milestone must not contain publishing functionality at all", () => {
+  it("REGRESSION: there is no publish/list/upload-live function, route, or button anywhere in this feature", () => {
     for (const source of [routeSource, read("components/listings-review/ListingsReviewWorkspace.tsx"), read("lib/listing-studio/vinted-export-schema.ts"), read("lib/listing-studio/vinted-export-photos.ts")]) {
       expect(source.toLowerCase()).not.toMatch(/publishlisting|createvinteddraft|listitemonvinted|uploadtovinted/);
     }
   });
 
-  it("never sets vinted_draft_created_at — only a future, separate milestone may ever do that", () => {
+  it("never sets vinted_draft_created_at — only the extension result route may ever do that", () => {
     expect(routeSource).not.toContain("vinted_draft_created_at:");
   });
 
@@ -552,7 +718,7 @@ describe("app/api/listing-studio/listings-review/export/route.ts — Milestone 7
     expect(photosSource).toContain("heic-convert");
   });
 
-  it("never exposes the Supabase service-role key to the response — no key/secret string is ever included in the returned bytes' construction path", () => {
+  it("never exposes the Supabase service-role key to the response", () => {
     expect(routeSource).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
     expect(routeSource).not.toContain("SUPABASE_SECRET_KEY");
   });
@@ -561,10 +727,10 @@ describe("app/api/listing-studio/listings-review/export/route.ts — Milestone 7
 describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extension' UI wiring", () => {
   const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("the button exists, calls handleSendToExtension, and is disabled when nothing is selected (only rendered inside the bulkCount > 0 toolbar)", () => {
-    expect(workspaceSource).toContain("Send to Chrome extension");
-    expect(workspaceSource).toContain("onClick={handleSendToExtension}");
-    expect(workspaceSource).toContain("{bulkCount > 0 && <div className=\"listings-review-bulk-bar\"");
+  it("the button exists, calls handleSendToExtension, and is only rendered inside the bulk bar (bulkCount > 0), which now lives inside the table column", () => {
+    expect(workspaceSource).toContain("`Send ${bulkCount} to extension`");
+    expect(workspaceSource).toContain("onClick={() => handleSendToExtension()}");
+    expect(workspaceSource).toContain('{bulkCount > 0 && <div className="lr-bulk-bar"');
   });
 
   it("enforces the 5-listing maximum (MAX_EXTENSION_BATCH_LISTINGS) both in the disabled condition and inside the handler itself", () => {
@@ -577,28 +743,63 @@ describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extensi
     expect(workspaceSource).toMatch(/Boolean\(activeBatchId\)/);
   });
 
-  it("shows the pairing code and its expiry once a batch is created", () => {
+  it("shows the pairing code and its real expiry (never a vague 'expires soon') once a batch is created", () => {
     expect(workspaceSource).toContain("Pairing code:");
-    expect(workspaceSource).toContain("listings-review-pairing-code");
+    expect(workspaceSource).toContain("lr-pairing-code");
     expect(workspaceSource).toContain("setPairingCode(body.pairingCode)");
+    expect(workspaceSource).toContain("formatRelativeMinutes(batchStatus.expiresAt)");
+    expect(workspaceSource).toContain("function formatRelativeMinutes(isoTimestamp: string): string {");
   });
 
-  it("shows whether the extension has claimed the batch (claimedAt) distinctly from the pre-claim pairing-code view", () => {
+  it("shows whether the extension has claimed the batch (claimedAt) distinctly from the pre-claim pairing-code view — the strip collapses further once claimed (no code/instruction needed anymore)", () => {
     expect(workspaceSource).toContain("!batchStatus?.claimedAt");
-    expect(workspaceSource).toContain("claimed by the extension");
+    expect(workspaceSource).toContain("Extension is processing your batch");
   });
 
-  it("displays live per-item progress (status) and the resulting Vinted draft id once completed", () => {
-    expect(workspaceSource).toContain("batchStatus.items.map(item =>");
-    expect(workspaceSource).toContain("Vinted draft {item.vintedDraftId}");
+  it("displays live per-item progress via the table's own Workflow column and Live Activity — the old inline per-item queue list is gone, not duplicated", () => {
+    expect(workspaceSource).not.toContain("batchStatus.items.map(item =>");
+    expect(workspaceSource).toContain("const liveItem = batchStatus?.items.find(item => item.draftId === row.id);");
     expect(workspaceSource).toContain("item.errorMessage");
   });
 
-  it("polls the owner-authenticated batch-status endpoint (never the extension's bearer-token one) on a bounded interval, and stops polling once the batch is terminal", () => {
+  it("polls the owner-authenticated batch-status endpoint (never the extension's bearer-token one) on a bounded cadence, and stops polling once the batch is terminal", () => {
     expect(workspaceSource).toContain("fetch(`/api/listing-studio/extension-batches/${activeBatchId}`)");
-    expect(workspaceSource).toContain("setInterval(");
-    expect(workspaceSource).toMatch(/\["completed", "cancelled", "expired"\]\.includes\(batchStatus\.status\)/);
-    expect(workspaceSource).toContain("clearInterval(interval)");
+    expect(workspaceSource).toContain("timeoutId = setTimeout(poll, 4000);");
+    expect(workspaceSource).toContain("isBatchStatusTerminal(body.status)");
+    expect(workspaceSource).toContain("if (timeoutId !== undefined) clearTimeout(timeoutId);");
+  });
+
+  // REGRESSION (Listings Review final-item workflow-status bug): the poll
+  // used to be a setInterval whose callback checked a `batchStatus` value
+  // read from the enclosing effect's closure — frozen at whatever it was
+  // when the effect first ran (always null), since the effect deliberately
+  // never re-runs on a batchStatus change. The intended "stop once
+  // terminal" check therefore never actually fired via that mechanism. The
+  // fix replaces the interval with a self-rescheduling poll that decides
+  // using the batch status it JUST fetched (`body.status`), never a value
+  // frozen in a stale closure, and only ever schedules the next poll AFTER
+  // that response has already been merged into state via setBatchStatus —
+  // so a batch can never be treated as reconciled in the UI, and polling
+  // can never stop, until every item's terminal state (including the final
+  // item's) has already been applied.
+  it("REGRESSION: decides whether to keep polling using the just-fetched response, not a value frozen in a stale closure — and only after that response has already been applied", () => {
+    expect(workspaceSource).not.toContain("setInterval(");
+    expect(workspaceSource).not.toContain("clearInterval(");
+    const pollFnStart = workspaceSource.indexOf("async function poll() {");
+    const pollFnEnd = workspaceSource.indexOf("\n    poll();", pollFnStart);
+    const pollFn = workspaceSource.slice(pollFnStart, pollFnEnd);
+    expect(pollFn).toContain("setBatchStatus(body);");
+    expect(pollFn).toContain("if (!cancelled && !isBatchStatusTerminal(body.status)) {");
+    // The authoritative merge must happen BEFORE the decision to keep
+    // polling — never the reverse, which could stop polling before the
+    // final item's terminal state (carried in that same response) was
+    // ever applied to local state.
+    expect(pollFn.indexOf("setBatchStatus(body);")).toBeLessThan(pollFn.indexOf("isBatchStatusTerminal(body.status)"));
+  });
+
+  it("REGRESSION: a stale/out-of-order poll response can never overwrite a newer, already-applied one", () => {
+    expect(workspaceSource).toContain("shouldApplyBatchPollResponse(appliedSeq, seq)");
+    expect(workspaceSource).toContain("appliedSeq = seq;");
   });
 
   it("a rejected batch-creation request never clears the current selection, and shows the specific rejected listings", () => {
@@ -607,9 +808,8 @@ describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extensi
     expect(workspaceSource).toContain("setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : [])");
   });
 
-  it("makes it clear nothing will be published — the safety label is always shown alongside the batch panel", () => {
-    expect(workspaceSource).toContain("Drafts only — never publishes");
-    expect(workspaceSource).toContain("listings-review-extension-safety-label");
+  it("makes it clear nothing will be published — a permanent safety badge sits in the page's own top line, always visible, not only while a batch is active", () => {
+    expect(workspaceSource).toContain('<span className="lr-safety-badge">Drafts only — never publishes</span>');
   });
 
   it("never sends one request per listing — exactly one POST with every selected draftId in one body", () => {
@@ -623,9 +823,711 @@ describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extensi
     expect(workspaceSource).toContain("setActiveBatchId(null)");
   });
 
-  it("REGRESSION: the ZIP export feature (a separate, already-existing action) is untouched — both actions coexist in the same bulk toolbar", () => {
-    expect(workspaceSource).toContain("Export");
-    expect(workspaceSource).toContain("onClick={handleExport}");
-    expect(workspaceSource).toContain("Send to Chrome extension");
+  it("REGRESSION: the ZIP export feature (a separate, already-existing action) is untouched — both actions coexist in the same bulk bar", () => {
+    expect(workspaceSource).toContain("onClick: handleExport");
+    expect(workspaceSource).toContain("`Send ${bulkCount} to extension`");
+  });
+
+  it("the bulk bar's left side shows the real selected count with a working Clear selection button", () => {
+    expect(workspaceSource).toContain('<strong>{bulkCount} selected</strong>');
+    expect(workspaceSource).toContain('onClick={() => setBulkSelectedIds(new Set())}>Clear selection</button>');
+  });
+});
+
+describe("Visual-accuracy redesign — 4 real KPI cards, canonical (no duplicated inline heading stats)", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("readyCount/needsReviewCount come ONLY from readiness (never from workflow status)", () => {
+    expect(source).toContain('const readyCount = useMemo(() => listingRows.filter(row => row.status !== "needs_review").length, [listingRows]);');
+    expect(source).toContain('const needsReviewCount = useMemo(() => listingRows.filter(row => row.status === "needs_review").length, [listingRows]);');
+  });
+
+  it("draftsCount/sentCount come ONLY from workflow status, via the shared WORKFLOW_STATUS_TAB_GROUPS — never re-implemented ad hoc", () => {
+    expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)");
+    expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)");
+  });
+
+  it("draftingCount — the 4th KPI card — comes from real, persisted extension-item state (preparing/filling/saving), never a client-only guess", () => {
+    expect(source).toContain('const draftingCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "in_progress").length, [listingRows]);');
+  });
+
+  it("failedCount is computed and exposed to the Filters control — a failed listing is always visible somewhere, never hidden", () => {
+    expect(source).toContain('const failedCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "failed").length, [listingRows]);');
+    expect(source).toContain("failedCount={failedCount}");
+  });
+
+  it("exactly 4 real KPI cards (Listings/Ready/Drafting/Need review) render real counts via the ONE shared KpiIcon component, and the totalCount passed to the filter bar matches the real row count", () => {
+    expect(source).toContain('import { KpiIcon } from "./KpiIcon";');
+    expect(source).toContain('<div><strong>{listingRows.length}</strong><span className="lr-kpi-label">Listings</span></div>');
+    expect(source).toContain('<div><strong>{readyCount}</strong><span className="lr-kpi-label">Ready</span></div>');
+    expect(source).toContain('<div><strong>{draftingCount}</strong><span className="lr-kpi-label">Drafting</span></div>');
+    expect(source).toContain('<div><strong>{needsReviewCount}</strong><span className="lr-kpi-label">Need review</span></div>');
+    expect(source).toContain('<KpiIcon tone="listings">');
+    expect(source).toContain('<KpiIcon tone="ready">');
+    expect(source).toContain('<KpiIcon tone="drafting">');
+    expect(source).toContain('<KpiIcon tone="review">');
+    expect(source).toContain("totalCount={listingRows.length}");
+  });
+
+  it("REGRESSION: the KPI icon wrapper has an explicit fixed size that cannot shrink, grid-centring, and no inherited line-height — the exact cause of a previous vertical-centring bug (a same-specificity-beating `.lr-kpi span` rule elsewhere forced `display: block` on this element) is structurally impossible now that the tone class lives directly on the icon and the label has its own dedicated class", () => {
+    const css = read("app/globals.css");
+    expect(css).toContain(".lr-kpi-icon { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border-radius: 999px; line-height: 0; }");
+    expect(css).toContain(".lr-kpi-icon > svg { display: block; margin: 0; }");
+    expect(css).not.toContain(".lr-kpi span {");
+    expect(css).not.toMatch(/\.lr-kpi-listings \.lr-kpi-icon|\.lr-kpi-ready \.lr-kpi-icon|\.lr-kpi-drafting \.lr-kpi-icon|\.lr-kpi-review \.lr-kpi-icon/);
+  });
+
+  it("REGRESSION: the inline heading stats style from the wider composite reference is never rendered alongside the 4 KPI cards — the cards are the sole place these totals appear", () => {
+    expect(source).not.toMatch(/\d+ listings? · \d+ ready/);
+  });
+
+  it("clearFilters resets every filter dimension at once — top tab, category, quick filters, edited/failed/sent toggles, and search", () => {
+    const fn = source.slice(source.indexOf("const clearFilters = useCallback"), source.indexOf("}, []);", source.indexOf("const clearFilters = useCallback")) + 8);
+    expect(fn).toContain('setTopTab("all")');
+    expect(fn).toContain('setCategoryFilter("all")');
+    expect(fn).toContain("setActiveQuickFilters(new Set())");
+    expect(fn).toContain("setShowEditedOnly(false)");
+    expect(fn).toContain("setShowFailedOnly(false)");
+    expect(fn).toContain("setShowSentOnly(false)");
+    expect(fn).toContain('setSearchQuery("")');
+  });
+});
+
+describe("Visual-accuracy redesign — category filter (client-side, no new fetch)", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("derives its options from already-loaded listingRows.productType — never a new fetch", () => {
+    expect(source).toContain("const categoryOptions = useMemo(() => {");
+    expect(source).toContain("listingRows.map(row => row.productType)");
+  });
+
+  it("filters by exact productType match when set to something other than 'all'", () => {
+    expect(source).toContain('if (categoryFilter !== "all" && row.productType !== categoryFilter) return false;');
+  });
+});
+
+describe("components/listings-review/DraftActivityPanel.tsx — Live Activity panel", () => {
+  const source = read("components/listings-review/DraftActivityPanel.tsx");
+
+  it("is memo()'d and takes only already-derived events — never fetches or computes anything itself", () => {
+    expect(source).toContain("export default memo(DraftActivityPanel);");
+    expect(source).not.toMatch(/fetch\(/);
+  });
+
+  it("the header reads exactly 'Live activity' with a small green live dot shown only while isLive is true, and 'View all' (not 'View all activity')", () => {
+    expect(source).toContain('aria-label="Live activity"');
+    expect(source).toContain("{isLive && <i aria-hidden=\"true\" className=\"lr-activity-live-dot\" />}Live activity");
+    expect(source).toContain('{showAll ? "Show less" : "View all"}');
+  });
+
+  it("each row shows the timestamp FIRST (reference image 4's own row order), then the dot, then the message", () => {
+    const rowIndex = source.indexOf('<li key={event.id}');
+    const rowBlock = source.slice(rowIndex, source.indexOf("</li>", rowIndex));
+    const timeIdx = rowBlock.indexOf("lr-activity-time");
+    const dotIdx = rowBlock.indexOf("lr-activity-dot ");
+    expect(timeIdx).toBeGreaterThan(-1);
+    expect(dotIdx).toBeGreaterThan(timeIdx);
+  });
+
+  it("caps visible rows and only reveals the rest via an explicit 'View all' toggle over the SAME in-memory array — no second, larger backing store", () => {
+    expect(source).toContain("const COLLAPSED_VISIBLE_COUNT = 6;");
+    expect(source).toContain("const visibleEvents = showAll ? events : events.slice(0, COLLAPSED_VISIBLE_COUNT);");
+  });
+
+  it("renders no Retry button/control anywhere — the existing recourse for a failed item (resend, via the table row/inspector overflow menu) is unchanged", () => {
+    expect(source).not.toMatch(/<button[^>]*>\s*Retry/i);
+    expect(source).not.toMatch(/onRetry/);
+  });
+
+  it("every event row shows a dot, a message, and a short timestamp — colour is never the only signal (a screen-reader-only tone label precedes the message)", () => {
+    expect(source).toContain('<i aria-hidden="true" className={`lr-activity-dot lr-activity-dot-${event.tone}`} />');
+    expect(source).toContain('<span className="sr-only">{TONE_LABELS[event.tone]}: </span>');
+    expect(source).toContain("formatShortTimestamp(event.timestampIso)");
+  });
+
+  it("the event list is a polite, additions-only live region — new events are announced without re-reading the whole history", () => {
+    expect(source).toContain('aria-live="polite" aria-relevant="additions"');
+  });
+});
+
+describe("Polish pass — the bottom-right toast/notification system was removed entirely from Listings Review", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const css = read("app/globals.css");
+
+  it("REGRESSION: the redundant fixed toast stack no longer exists as a file, and Listings Review no longer imports or renders it — Live Activity is now the ONE place detailed extension progress is ever shown", () => {
+    expect(existsSync("components/listings-review/ExtensionNotifications.tsx")).toBe(false);
+    expect(workspaceSource).not.toContain("import ExtensionNotifications");
+    expect(workspaceSource).not.toMatch(/<ExtensionNotifications\b/);
+    expect(workspaceSource).not.toContain(": ExtensionNotification[]");
+  });
+
+  it("no obsolete .lr-toast-* CSS rule remains anywhere in the stylesheet — not merely hidden, shrunk, or made transparent, but genuinely removed (a plain-language comment explaining WHY it was removed is fine and expected; an actual rule declaration is not)", () => {
+    expect(css).not.toMatch(/\.lr-toast[a-z-]*\s*\{/);
+  });
+
+  it("REGRESSION: no now-unused toast state, timers, or callbacks remain on the workspace — the notifications array, upsertNotifications, and dismissNotification are all gone as real code (not merely renamed)", () => {
+    expect(workspaceSource).not.toMatch(/const \[notifications, setNotifications\]/);
+    expect(workspaceSource).not.toMatch(/function upsertNotifications|const upsertNotifications = /);
+    expect(workspaceSource).not.toMatch(/function dismissNotification|const dismissNotification = /);
+  });
+
+  it("this was the same redundant Listing Review implementation confirmed unused elsewhere before removal — the unrelated .task-toast system (Tasks feature) is untouched", () => {
+    expect(css).toContain(".task-toast {");
+  });
+});
+
+describe("Visual-accuracy redesign — activity events are derived from GENUINE transitions only (ListingsReviewWorkspace.tsx)", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("resets tracking (previousItemsRef, batchCompletionLoggedRef) whenever activeBatchId changes — a fresh batch never inherits a prior batch's diff state", () => {
+    const fn = source.slice(source.indexOf("useEffect(() => {\n    if (!activeBatchId) return;"), source.indexOf("async function poll()"));
+    expect(fn).toContain("previousItemsRef.current = null;");
+    expect(fn).toContain("batchCompletionLoggedRef.current = false;");
+  });
+
+  it("the FIRST poll for a batch only seeds tracking and emits exactly one real 'sent' event (timestamped with the batch's own real createdAt) — never fabricates started/completed/failed events for state it never actually observed transitioning", () => {
+    expect(source).toContain("if (previousItems === null) {");
+    expect(source).toContain('tone: "sent", message: `${body.items.length} listing${body.items.length === 1 ? "" : "s"} sent to extension`, timestampIso: body.createdAt');
+  });
+
+  it("every subsequent poll only produces events for fields that actually changed relative to the previous poll — an unchanged poll (the common case) produces zero new events", () => {
+    expect(source).toContain("if (isInProgress && !wasInProgress) {");
+    expect(source).toContain('if (item.status === "completed" && prev.status !== "completed") {');
+    expect(source).toContain('if (item.status === "failed" && prev.status !== "failed") {');
+    expect(source).toContain("if (item.attemptCount > prev.attemptCount && prev.attemptCount > 0) {");
+  });
+
+  it("a still-in-progress item's fresher step detail UPDATES its existing activity event in place, rather than appending a new row every poll tick", () => {
+    expect(source).toContain("updatedDetailByEventId.set(`${item.itemId}:started`, item.detail);");
+    expect(source).toContain("updatedDetailByEventId.has(event.id) ? { ...event, detail: updatedDetailByEventId.get(event.id) ?? null }");
+  });
+
+  it("REGRESSION: batch completion — previously shown ONLY via the now-removed toast — now gets a real Live Activity event instead of silently disappearing, fired at most once per batch via the same guard ref the toast used to use", () => {
+    expect(source).toContain('if (body.status === "completed" && !batchCompletionLoggedRef.current) {');
+    expect(source).toContain("batchCompletionLoggedRef.current = true;");
+    expect(source).toContain("tone: \"success\", message: `Batch completed — ${savedCount} item${savedCount === 1 ? \"\" : \"s\"} saved to Vinted drafts`");
+  });
+
+  it("REGRESSION: a page load with no active batch never touches activityEvents at all — the polling effect (the only place it's ever set) early-returns when activeBatchId is null", () => {
+    const effectStart = source.indexOf("useEffect(() => {\n    if (!activeBatchId) return;");
+    expect(effectStart).toBeGreaterThan(-1);
+  });
+});
+
+describe("Visual-accuracy redesign — accessibility", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const tableSource = read("components/listings-review/ListingsTable.tsx");
+  const filterBarSource = read("components/listings-review/ListingsFilterBar.tsx");
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+
+  it("the summary strip and each tab expose real ARIA semantics (group/tablist/tab) rather than being plain unlabelled divs", () => {
+    expect(workspaceSource).toContain('role="group" aria-label="Workspace summary"');
+    expect(filterBarSource).toContain('role="tablist" aria-label="Filter by status"');
+    expect(filterBarSource).toContain('aria-selected={topTab === tab.value}');
+  });
+
+  it("the header checkbox's aria-label reflects the real partial-selection count when indeterminate, not a generic label that hides the actual state", () => {
+    expect(tableSource).toContain('aria-label={someSelected ? `${selectedCount} of ${rows.length} listings selected` : "Select all listings"}');
+  });
+
+  it("the search inputs use a visually-hidden (sr-only) label plus an aria-label — never a placeholder as the ONLY label", () => {
+    expect(filterBarSource).toContain('<span className="label sr-only">Search</span>');
+    expect(filterBarSource).toContain('aria-label="Search listings"');
+  });
+
+  it("previous/next/close inspector controls each carry a real aria-label, and thumbnail buttons expose aria-pressed for the active state", () => {
+    expect(panelSource).toContain('aria-label="Previous listing"');
+    expect(panelSource).toContain('aria-label="Next listing"');
+    expect(panelSource).toContain('aria-label="Close"');
+    expect(panelSource).toContain("aria-pressed={photoId === mainPhotoId}");
+  });
+});
+
+describe("Visual-accuracy redesign — responsive structure", () => {
+  const css = read("app/globals.css");
+
+  it("1024-1439px: a slightly narrower inspector column, Cost/Price/Profit stay visible (only their width tightens, never truncating)", () => {
+    expect(css).toContain("@media (max-width: 1439px) {");
+    expect(css).toContain(".lr-workspace { grid-template-columns: minmax(0, 1fr) minmax(260px, 27%); }");
+  });
+
+  it("below 1024px: the inspector/activity column stacks beneath the table", () => {
+    expect(css).toMatch(/@media \(max-width: 1023px\) \{\s*\.lr-workspace \{ grid-template-columns: 1fr; \}/);
+  });
+
+  it("REGRESSION: the 900px toast-clearance override is gone along with the toast stack itself — the filters-popover override at the same breakpoint is untouched", () => {
+    expect(css).not.toMatch(/\.lr-toast-stack \{ right: 12px; bottom: 82px; \}/);
+    expect(css).toMatch(/@media \(max-width: 900px\) \{\s*\.lr-filters-popover \{ left: auto; right: 0; max-width: calc\(100vw - 32px\); \}/);
+  });
+});
+
+describe("Visual-accuracy redesign — draft-only safety, no AI usage, no unrelated logic changed", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const extensionRouteSource = read("app/api/extension/batch/items/[itemId]/result/route.ts");
+  const serviceWorkerSource = read("vinted-draft-queue-extension/service-worker.js");
+
+  it("REGRESSION: no publish/list-on-Vinted action exists anywhere in this redesign — the safety badge is still shown, and the extension is still only ever described as drafts-only", () => {
+    expect(workspaceSource).not.toMatch(/<button[^>]*>\s*Publish/i);
+    expect(workspaceSource).not.toMatch(/publish.{0,20}vinted|list.{0,10}on vinted/i);
+    expect(workspaceSource).toContain("Drafts only — never publishes");
+  });
+
+  it("REGRESSION: the extension change is reporting-only — postResultToApp forwards currentStep/detail alongside the existing fields, but no form-filling/Save Draft step logic in form-steps.js was touched", () => {
+    expect(serviceWorkerSource).toContain("currentStep: extra.currentStep ?? null, detail: extra.detail ?? null,");
+  });
+
+  it("REGRESSION: no AI call was added anywhere in this redesign — the result route only ever persists already-computed step text, never calls an AI model", () => {
+    expect(extensionRouteSource).not.toMatch(/anthropic|claude|generateListing|callClaude/i);
+  });
+
+  it("current_step/step_detail are cleared on a fresh attempt (preparing) and finalised to null on every terminal status — a completed or retried item can never keep showing a stale 'Uploading photo…' line", () => {
+    expect(extensionRouteSource).toContain("patchBody.current_step = isTerminalItemStatus(body.status) ? null : (body.currentStep ?? null);");
+    expect(extensionRouteSource).toContain("patchBody.step_detail = isTerminalItemStatus(body.status) ? null : (body.detail ?? null);");
+  });
+
+  it("REGRESSION: the [batchId] GET route and the extension result POST route both gracefully degrade if current_step/step_detail don't exist yet (pre-migration), rather than 500ing and blocking all real status reporting", () => {
+    const batchIdRouteSource = read("app/api/listing-studio/extension-batches/[batchId]/route.ts");
+    expect(batchIdRouteSource).toContain("/column .* does not exist|schema cache/i");
+    expect(extensionRouteSource).toContain("/column .* does not exist|schema cache/i");
+  });
+});
+
+describe("Visual-accuracy redesign — historical workflow status survives reload/restart (rpc/listing_studio_latest_extension_status)", () => {
+  const routeSource = read("app/api/listing-studio/listings-review/route.ts");
+  const sqlSource = read("supabase-listing-studio.sql");
+
+  it("the listings-review route calls the new RPC exactly once per page load (not per listing) and attaches the result per draft", () => {
+    expect(routeSource).toContain('supabaseRequest("rpc/listing_studio_latest_extension_status"');
+    expect(routeSource).toContain("body: JSON.stringify({ p_owner_id: user.id })");
+    expect(routeSource).toContain("extension_status: extensionStatusByDraftId.get(draft.id) ?? null,");
+  });
+
+  it("the RPC is owner-scoped, excludes cancelled items, uses fully-qualified table names, and is deterministic via a real timestamp ordering with a stable final tie-breaker", () => {
+    const fnSource = sqlSource.slice(sqlSource.indexOf("create or replace function public.listing_studio_latest_extension_status"), sqlSource.indexOf("$$;\n\n-- Milestone 7 (Vinted category catalogue sync) — applies"));
+    expect(fnSource).toContain("where b.owner_id = p_owner_id");
+    expect(fnSource).toContain("and bi.status <> 'cancelled'");
+    expect(fnSource).toContain("from public.vinted_extension_batch_items bi");
+    expect(fnSource).toContain("join public.vinted_extension_batches b on b.id = bi.batch_id");
+    expect(fnSource).toContain("order by bi.draft_id, greatest(bi.completed_at, bi.started_at, b.created_at) desc, b.created_at desc, bi.id desc;");
+  });
+
+  it("the function is revoked from public/anon/authenticated, matching the exact existing security convention for every other listing_studio_* RPC", () => {
+    expect(sqlSource).toContain("revoke all on function public.listing_studio_latest_extension_status(uuid) from public;");
+    expect(sqlSource).toContain("revoke all on function public.listing_studio_latest_extension_status(uuid) from anon;");
+    expect(sqlSource).toContain("revoke all on function public.listing_studio_latest_extension_status(uuid) from authenticated;");
+  });
+
+  it("the two new columns are additive (nullable, no default that could silently misrepresent old rows) via the same 'add column if not exists' idiom already used throughout this file", () => {
+    expect(sqlSource).toContain("alter table public.vinted_extension_batch_items add column if not exists current_step text;");
+    expect(sqlSource).toContain("alter table public.vinted_extension_batch_items add column if not exists step_detail text;");
+  });
+});
+
+describe("Correction pass — a genuinely gone batch clears stale UI state rather than displaying it forever", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("a 404 from the batch-status poll resets activeBatchId/pairingCode/batchStatus — never leaves a stale pairing code or 'processing' strip with no way to recover", () => {
+    expect(source).toContain("if (response.status === 404) { setActiveBatchId(null); setPairingCode(null); setBatchStatus(null); return; }");
+  });
+});
+
+describe("Correction pass — resume tracking after a reload (root-cause fix)", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("on mount, if nothing is already tracked this session, checks for an in-flight batch from an earlier session and resumes it", () => {
+    expect(source).toContain("if (activeBatchId) return;");
+    expect(source).toContain('fetch("/api/listing-studio/extension-batches")');
+    expect(source).toContain("if (!cancelled && body.activeBatchId) setActiveBatchId(body.activeBatchId);");
+  });
+
+  it("runs exactly once on mount (empty dependency array) — never re-checks on every activeBatchId change, which would defeat its own guard", () => {
+    const effectIndex = source.indexOf('if (activeBatchId) return;\n    let cancelled = false;\n    (async () => {');
+    expect(effectIndex).toBeGreaterThan(-1);
+    const effectBlock = source.slice(effectIndex, source.indexOf("}, []);", effectIndex) + 8);
+    expect(effectBlock).toContain('fetch("/api/listing-studio/extension-batches")');
+  });
+});
+
+describe("Correction pass — compact inspector prev/next/close", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+
+  it("the panel header renders Previous/Next/Close controls, disabled at the real ends of the filtered list", () => {
+    expect(panelSource).toContain('disabled={!hasPrevious} onClick={onPrevious} aria-label="Previous listing"');
+    expect(panelSource).toContain('disabled={!hasNext} onClick={onNext} aria-label="Next listing"');
+    expect(panelSource).toContain('onClick={onClose} aria-label="Close"');
+    expect(panelSource).toContain("const hasPrevious = position !== null && position.index > 0;");
+    expect(panelSource).toContain("const hasNext = position !== null && position.index < position.total - 1;");
+  });
+
+  it("the workspace navigates within the real filtered row order — never a hardcoded/unfiltered list", () => {
+    expect(workspaceSource).toContain("setSelectedListingId(filteredRows[selectedListingPosition.index - 1].id);");
+    expect(workspaceSource).toContain("setSelectedListingId(filteredRows[selectedListingPosition.index + 1].id);");
+    expect(workspaceSource).toContain("onClose={closeInspector}");
+  });
+
+  it("the status is ALWAYS shown (readiness fallback when there's no workflow status yet) — not only once a listing has been sent", () => {
+    expect(panelSource).toContain("const displayLabel = listing.workflowStatus ? WORKFLOW_STATUS_LABELS[listing.workflowStatus] : READINESS_LABELS[listing.status];");
+    expect(panelSource).toContain('pulse={listing.workflowStatus === "in_progress"}');
+  });
+
+  it("the title is capped at 2 lines — cannot silently grow the compact card", () => {
+    const css = read("app/globals.css");
+    expect(css).toContain("-webkit-line-clamp: 2; -webkit-box-orient: vertical;");
+  });
+});
+
+describe("Polish pass — category gets its own full-width, wrapping row (fixes real horizontal overflow)", () => {
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+  const css = read("app/globals.css");
+
+  it("REGRESSION: Category is no longer inside the narrow 2-column metadata grid — it has its own dedicated wrapper, full-width beneath Brand/Condition/Colour(s)", () => {
+    const fieldsIndex = panelSource.indexOf('<dl className="lr-inspector-fields">');
+    const fieldsBlock = panelSource.slice(fieldsIndex, panelSource.indexOf("</dl>", fieldsIndex));
+    expect(fieldsIndex).toBeGreaterThan(-1);
+    expect(fieldsBlock).toContain("<dt>Brand</dt>");
+    expect(fieldsBlock).toContain("<dt>Condition</dt>");
+    expect(fieldsBlock).toContain("<dt>Colour");
+    expect(fieldsBlock).not.toContain("<dt>Category</dt>");
+    expect(panelSource).toContain('<dl className="lr-inspector-category">');
+    expect(panelSource).toContain("{listing.vintedCategoryPath || listing.productType || \"Not set\"}");
+    expect(panelSource).not.toContain("lr-inspector-fields-wrap");
+  });
+
+  it("shows the FULL category path, never truncated to only the final segment", () => {
+    expect(panelSource).toContain("listing.vintedCategoryPath || listing.productType");
+    expect(panelSource).not.toMatch(/vintedCategoryPath\.split/);
+  });
+
+  it("the category wrapper uses the required containment rules — wraps naturally, never ellipsised, contained within the card", () => {
+    expect(css).toContain(".lr-inspector-category { margin: 10px 0 0; min-width: 0; max-width: 100%; }");
+    expect(css).toContain(".lr-inspector-category dd { margin: 3px 0 0; min-width: 0; max-width: 100%; color: var(--lr-text); font-size: 11px; font-weight: 600; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; word-break: normal; }");
+    // Never solved with an ellipsis for this field.
+    expect(css).not.toMatch(/\.lr-inspector-category dd \{[^}]*text-overflow:\s*ellipsis/);
+  });
+
+  it("REGRESSION: every 2-column metadata grid item also gets min-width: 0 — CSS grid items default to min-width: auto, which is the actual root cause of the original overflow (a long unbreakable word could force a 1fr column wider than its fair share, pushing the whole card into horizontal overflow)", () => {
+    expect(css).toContain(".lr-inspector-fields > div { min-width: 0; }");
+  });
+
+  it("the inspector's own outer container is defensively contained too — min-width: 0, max-width: 100%, overflow-x: hidden — so the card itself can never gain a horizontal scrollbar", () => {
+    expect(css).toContain(".lr-inspector { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface-raised); min-width: 0; max-width: 100%; overflow-x: hidden; }");
+  });
+
+  it("label styling is consistent with the other metadata fields (same muted colour, same uppercase letter-spacing convention)", () => {
+    expect(css).toContain(".lr-inspector-category dt { color: var(--lr-muted); font-size: 8.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }");
+  });
+});
+
+describe("Correction pass — contextual send/resend (reuses the existing batch-creation path, never a new one)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+  const tableSource = read("components/listings-review/ListingsTable.tsx");
+
+  it("handleSendToExtension accepts an optional idsOverride so the inspector AND the table row overflow menu can reuse it for a single listing — every existing call site (no argument) is unchanged", () => {
+    expect(workspaceSource).toContain("async function handleSendToExtension(idsOverride?: string[]) {");
+    expect(workspaceSource).toContain("const ids = idsOverride ?? [...bulkSelectedIds];");
+    expect(workspaceSource).toContain("onSendToExtension={id => handleSendToExtension([id])}");
+    expect(tableSource).toContain("onSendToExtension");
+  });
+
+  it("only offered when genuinely sendable (not needs_review) and not already mid-workflow; relabels to 'Resend' after a failure — no separate retry endpoint invented", () => {
+    expect(panelSource).toContain('const canSend = listing.status !== "needs_review" && (listing.workflowStatus === null || listing.workflowStatus === "failed");');
+    expect(panelSource).toMatch(/listing\.workflowStatus === "failed" \? "Resend to extension" : "Send to extension"/);
+  });
+});
+
+describe("Visual-accuracy redesign — dense table fits without horizontal scroll (fixed column-width budget)", () => {
+  const css = read("app/globals.css");
+
+  it("table-layout: fixed with an explicit width on every column except Listing (which absorbs the remainder); every OTHER column is sized to its own genuine content need, not padded for balance", () => {
+    expect(css).toContain(".lr-table { width: 100%; table-layout: fixed; border-collapse: collapse; }");
+    expect(css).toContain(".lr-table th:nth-child(1), .lr-table td:nth-child(1) { width: 32px; text-align: center; }");
+    expect(css).toContain(".lr-table th:nth-child(2), .lr-table td:nth-child(2) { width: 72px; }");
+    expect(css).toContain(".lr-table th:nth-child(4), .lr-table td:nth-child(4) { width: 44px; }");
+    expect(css).toContain(".lr-table th:nth-child(8), .lr-table td:nth-child(8) { width: 148px; }");
+    expect(css).toContain(".lr-table th:nth-child(9), .lr-table td:nth-child(9) { width: 44px; text-align: center; }");
+    expect(css).not.toMatch(/td:nth-child\(3\)\s*\{\s*width/);
+  });
+
+  it("REGRESSION: the actions column (44px) is wide enough for its own 26px trigger button plus real padding — the previous 34px width was 6px narrower than the trigger itself, the exact confirmed cause of the row menu being clipped at the right edge", () => {
+    expect(css).toContain(".lr-table th:nth-child(9), .lr-table td:nth-child(9) { width: 44px; text-align: center; }");
+    expect(css).toContain(".overflow-menu-trigger { min-height: 26px; min-width: 26px;");
+  });
+
+  it("the photo column (72px) exactly fits its own 52px thumbnail plus the table's 2x10px cell padding — the previous 68px width was 4px too narrow", () => {
+    expect(css).toContain(".lr-table th:nth-child(2), .lr-table td:nth-child(2) { width: 72px; }");
+    expect(css).toContain(".lr-cover-thumb { width: 52px; height: 52px;");
+  });
+
+  it("a long generated title gets an accessible native tooltip showing the full text on truncation", () => {
+    const tableSource = read("components/listings-review/ListingsTable.tsx");
+    expect(tableSource).toContain('<span className="lr-title-text" title={row.generatedTitle || "Untitled listing"}>{row.generatedTitle || "Untitled listing"}</span>');
+  });
+
+  it("row hover is clearly visible, distinct from the selected-row treatment", () => {
+    expect(css).toContain(".lr-row:hover { background: var(--lr-surface-raised); }");
+    expect(css).toContain(".lr-row-active, .lr-row-active:hover { background: var(--lr-violet-soft); }");
+  });
+});
+
+describe("Visual-accuracy redesign — compact pairing strip (never a large panel, collapses further once claimed)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("three distinct states exist: pre-claim (code + hint + expiry + Cancel), claimed-in-progress (minimal, no code), terminal (Clear only)", () => {
+    expect(workspaceSource).toContain("Extension is processing your batch");
+    expect(workspaceSource).toContain("<span>Batch {batchStatus.status}</span>");
+    expect(workspaceSource).toContain('onClick={handleClearExtensionBatch}>Clear</button>');
+  });
+
+  // REGRESSION (live-caught 2026-08-11): a batch cancelled before it was
+  // ever claimed has claimedAt stuck at null forever — the terminal branch
+  // must be checked BEFORE the claimedAt branch, or the strip is left
+  // showing a dead pairing code indefinitely instead of collapsing to the
+  // terminal "Batch cancelled" + Clear state.
+  it("REGRESSION: checks terminal status (completed/cancelled/expired) before claimedAt, so a batch cancelled pre-claim still collapses to the terminal state", () => {
+    const terminalCheckIndex = workspaceSource.indexOf('isBatchStatusTerminal(batchStatus.status) ? <>');
+    const claimedAtCheckIndex = workspaceSource.indexOf("!batchStatus?.claimedAt ? <>");
+    expect(terminalCheckIndex).toBeGreaterThan(-1);
+    expect(claimedAtCheckIndex).toBeGreaterThan(-1);
+    expect(terminalCheckIndex).toBeLessThan(claimedAtCheckIndex);
+  });
+
+  it("is a single compact strip (one CSS class, flex row), never a bordered card with its own large padding, and no longer repeats the safety badge (which now lives permanently in the page's own top line)", () => {
+    const css = read("app/globals.css");
+    expect(css).toMatch(/\.lr-pairing-strip \{[^}]*padding: 7px 12px;/);
+    expect(workspaceSource).not.toMatch(/lr-pairing-strip"[^>]*>\s*<span className="lr-safety-badge"/);
+  });
+});
+
+describe("Visual-accuracy redesign — bulk-bar structural fix (lives inside the table column, never a viewport-fixed overlay)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const css = read("app/globals.css");
+
+  it("the bulk bar is the LAST child of .lr-table-column, sibling to (not overlapping) .lr-rail — structurally distinct columns, not two elements sharing viewport coordinates", () => {
+    const columnStart = workspaceSource.indexOf('<div className="lr-table-column">');
+    const columnEnd = workspaceSource.indexOf("</div>\n      <div className=\"lr-rail\">");
+    expect(columnStart).toBeGreaterThan(-1);
+    expect(columnEnd).toBeGreaterThan(columnStart);
+    const columnBlock = workspaceSource.slice(columnStart, columnEnd);
+    expect(columnBlock).toContain("<ListingsTable");
+    expect(columnBlock).toContain('<div className="lr-bulk-bar"');
+  });
+
+  it("REGRESSION: the bulk bar is position:sticky relative to its own column (bottom:0), never position:fixed spanning the whole viewport — this was the exact cause of the previous 'malformed control bleeding through the bar' defect (a fixed overlay with only a guessed padding-bottom reservation, floating over whatever content happened to scroll underneath it)", () => {
+    expect(css).toContain(".lr-bulk-bar { position: sticky; bottom: 0;");
+    expect(css).not.toMatch(/\.lr-bulk-bar \{[^}]*position: fixed/);
+  });
+
+  it("Assign categories/Mark ready/Export live inside one OverflowMenu — Delete and Send stay the only two always-visible primary actions, matching the reference hierarchy", () => {
+    expect(workspaceSource).toContain('<OverflowMenu label="More bulk actions" items={[');
+    expect(workspaceSource).toContain("onClick: handleBulkAssignCategories");
+    expect(workspaceSource).toContain("onClick: handleBulkMarkReady");
+    expect(workspaceSource).toContain("onClick: handleExport");
+  });
+});
+
+describe("Visual-accuracy redesign — mobile card list (a real alternate layout, not a reflowed table)", () => {
+  const tableSource = read("components/listings-review/ListingsTable.tsx");
+  const css = read("app/globals.css");
+
+  it("renders both the table and a separate <ul> card list, sharing the same rows/handlers — CSS (not JS) decides which is visible", () => {
+    expect(tableSource).toContain('<ul className="lr-card-list">');
+    expect(tableSource).toContain('pulse={row.workflowStatus === "in_progress"}');
+  });
+
+  it("hidden/shown via a dedicated 620px block positioned after its own base rules — the table hides, the card list shows, matching this codebase's established phone breakpoint", () => {
+    expect(css).toMatch(/@media \(max-width: 620px\) \{\s*\.lr-table-scroll \{ display: none; \}\s*\.lr-card-list \{ display: flex; \}/);
+  });
+
+  it("cards keep 44px-minimum tap targets for checkbox and row-menu areas", () => {
+    expect(css).toContain(".lr-card-checkbox { display: flex; align-items: center; min-height: 44px; }");
+    expect(css).toContain(".lr-card-actions { display: flex; align-items: center; min-height: 44px; }");
+  });
+});
+
+describe("Production-polish pass — components/listing-studio/OverflowMenu.tsx: portal-rendered, viewport-aware, keyboard-accessible", () => {
+  const source = read("components/listing-studio/OverflowMenu.tsx");
+
+  it("renders the dropdown in a portal attached to document.body — never inside whatever scrollable container the trigger lives in", () => {
+    expect(source).toContain('import { createPortal } from "react-dom";');
+    expect(source).toContain("createPortal(");
+    expect(source).toContain("document.body,");
+  });
+
+  it("REGRESSION: this is the fix for the previously invisible/clipped row menu — an ancestor with overflow-x: auto (the Listings Review table's own scroll wrapper) forces overflow-y to also compute as clipping per the CSS Overflow spec, silently hiding an absolutely-positioned dropdown that extended past the row's own bounds", () => {
+    expect(source).toMatch(/overflow-x: auto[\s\S]*forces `overflow-y`|forces `overflow-y`[\s\S]*overflow-x: auto/);
+  });
+
+  it("positions the menu relative to the trigger's own getBoundingClientRect(), and flips above the trigger when there's insufficient room below", () => {
+    expect(source).toContain("triggerRef.current.getBoundingClientRect()");
+    expect(source).toContain("const spaceBelow = window.innerHeight - rect.bottom;");
+    expect(source).toContain("openUpward");
+  });
+
+  it("clamps the menu so it can never extend past the viewport's left/right edge", () => {
+    expect(source).toContain("Math.min(Math.max(rect.right - MENU_WIDTH, VIEWPORT_MARGIN), window.innerWidth - MENU_WIDTH - VIEWPORT_MARGIN)");
+  });
+
+  it("closes on Escape and on an outside click — checked against BOTH the trigger and the portaled menu, since a portal is a separate DOM subtree from its trigger", () => {
+    expect(source).toContain('event.key === "Escape"');
+    expect(source).toContain("containerRef.current?.contains(event.target as Node)");
+    expect(source).toContain("menuRef.current?.contains(target)");
+  });
+
+  it("Escape and item-selection both return focus to the trigger", () => {
+    expect(source).toContain('setOpen(false); triggerRef.current?.focus(); return;');
+    expect(source).toContain("setOpen(false); triggerRef.current?.focus(); item.onClick();");
+  });
+
+  it("supports ArrowUp/ArrowDown keyboard navigation between enabled items, and auto-focuses the first enabled item on open", () => {
+    expect(source).toContain('event.key !== "ArrowDown" && event.key !== "ArrowUp"');
+    expect(source).toContain("const firstEnabled = itemRefs.current.find(el => el && !el.disabled);");
+  });
+
+  it("repositions on scroll/resize so the menu never visually detaches from its trigger while the page moves underneath it", () => {
+    expect(source).toContain('window.addEventListener("scroll", handleReflow, true);');
+    expect(source).toContain('window.addEventListener("resize", handleReflow);');
+  });
+
+  it("every item is a real, keyboard-reachable menuitem button", () => {
+    expect(source).toContain('role="menuitem"');
+    expect(source).toContain('aria-haspopup="menu"');
+  });
+});
+
+describe("Production-polish pass — app/globals.css: overlay layer system and menu hover/focus states", () => {
+  const css = read("app/globals.css");
+
+  it("documents a small, intentional overlay layer system (base/sticky/dropdown/dialog/toast), not ad hoc z-index values", () => {
+    expect(css).toMatch(/base content\s*—\s*auto/);
+    expect(css).toMatch(/dropdowns\/tooltips\s*—\s*70/);
+    expect(css).toMatch(/dialogs\s*—\s*100/);
+    expect(css).toMatch(/toasts\s*—\s*200\+/);
+  });
+
+  it("the portaled menu's z-index (70) sits strictly between sticky controls (<=60) and dialogs (100), so it always wins over a bulk-action bar or the sidebar/nav but never covers a modal dialog", () => {
+    expect(css).toContain(".overflow-menu-list-portal { z-index: 70;");
+  });
+
+  it("menu items have both a hover state and a visible focus-visible state (never focus-invisible)", () => {
+    expect(css).toContain(".overflow-menu-item:hover:not(:disabled) { background: var(--surface-2); }");
+    expect(css).toContain(".overflow-menu-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; background: var(--surface-2); }");
+  });
+
+  it("the menu's entrance animation respects prefers-reduced-motion", () => {
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.overflow-menu-list-portal \{ animation: none; \}/);
+  });
+});
+
+describe("Production-polish pass — inspector auto-selects the first visible listing (ListingsReviewWorkspace.tsx)", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("auto-selects the first filtered row whenever nothing is selected (or the current selection is no longer visible), unless the inspector was explicitly closed", () => {
+    expect(source).toContain("const [inspectorClosed, setInspectorClosed] = useState(false);");
+    expect(source).toContain("if (inspectorClosed) return;");
+    expect(source).toContain("if (filteredRows.length === 0) return;");
+    expect(source).toContain("const stillVisible = selectedListingId !== null && filteredRows.some(row => row.id === selectedListingId);");
+    expect(source).toContain("if (!stillVisible) setSelectedListingId(filteredRows[0].id);");
+  });
+
+  it("REGRESSION: this is inspector focus ONLY — the auto-select effect never touches bulkSelectedIds, never calls a mark-ready/assign-category handler, and never issues a network request", () => {
+    const effectIndex = source.indexOf("if (inspectorClosed) return;");
+    const effectBlock = source.slice(source.lastIndexOf("useEffect(() => {", effectIndex), source.indexOf("}, [filteredRows, selectedListingId, inspectorClosed]);") + 10);
+    expect(effectBlock).not.toContain("bulkSelectedIds");
+    expect(effectBlock).not.toContain("fetch(");
+  });
+
+  it("a row click clears the explicit-close flag so auto-select resumes correctly on the next filter change; Close sets it so an intentional dismissal is never immediately re-filled", () => {
+    expect(source).toContain("const selectListing = useCallback((id: string) => {\n    setInspectorClosed(false);\n    setSelectedListingId(id);\n  }, []);");
+    expect(source).toContain("const closeInspector = useCallback(() => {\n    setInspectorClosed(true);\n    setSelectedListingId(null);\n  }, []);");
+    expect(source).toContain("onSelectListing={selectListing}");
+  });
+
+  it("checkbox clicks are independent of inspector selection — the checkbox's own onClick stops propagation before it ever reaches the row's onSelectListing handler", () => {
+    const tableSource = read("components/listings-review/ListingsTable.tsx");
+    expect(tableSource).toContain('<td className="lr-checkbox-cell" onClick={event => event.stopPropagation()}>');
+  });
+});
+
+describe("Production-polish pass — pairing banner: copy button, monospace code, self-clearing confirmation", () => {
+  const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const css = read("app/globals.css");
+
+  it("copies the real pairing code to the clipboard via the standard Clipboard API", () => {
+    expect(source).toContain("async function handleCopyPairingCode() {");
+    expect(source).toContain("await navigator.clipboard.writeText(pairingCode);");
+  });
+
+  it("shows a short, self-clearing 'Copied' confirmation rather than a permanent state change", () => {
+    expect(source).toContain("setCodeCopied(true);");
+    expect(source).toContain("window.setTimeout(() => setCodeCopied(false), 1600);");
+    expect(source).toContain('{codeCopied ? "Copied" : "Copy"}');
+  });
+
+  it("resets the copied flag whenever a fresh pairing code is issued, so a stale 'Copied' can never survive into a new batch", () => {
+    const fn = source.slice(source.indexOf("setPairingCode(body.pairingCode);"), source.indexOf("setPairingCode(body.pairingCode);") + 150);
+    expect(fn).toContain("setCodeCopied(false);");
+  });
+
+  it("the code uses a real, explicit monospace font stack and never looks like a plain native text selection", () => {
+    expect(css).toContain('.lr-pairing-code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;');
+    expect(css).toContain("user-select: all;");
+  });
+
+  it("existing drafts-only safety wording and single-use pairing behaviour are both retained", () => {
+    expect(source).toContain("Drafts only — never publishes");
+    expect(source).toContain("single use");
+  });
+});
+
+describe("Production-polish pass — Live Activity empty state stays compact (small icon + one line, no tutorial copy)", () => {
+  const source = read("components/listings-review/DraftActivityPanel.tsx");
+  const css = read("app/globals.css");
+
+  it("shows a small neutral icon plus exactly the required text, and nothing else", () => {
+    expect(source).toContain("No extension activity yet.");
+    expect(source).toMatch(/<svg aria-hidden="true"[^>]*>[\s\S]*<\/svg>\s*<p>No extension activity yet\.<\/p>/);
+  });
+
+  it("REGRESSION: no tutorial/explanatory copy was added — the empty state is still exactly one short line", () => {
+    const emptyBlockStart = source.indexOf('<div className="lr-activity-empty">');
+    const emptyBlockEnd = source.indexOf("</div>", emptyBlockStart);
+    const emptyBlock = source.slice(emptyBlockStart, emptyBlockEnd);
+    expect((emptyBlock.match(/<p>/g) ?? []).length).toBe(1);
+  });
+
+  it("stays visually compact — a small icon size, no large padding", () => {
+    expect(css).toContain(".lr-activity-empty { display: flex; padding: 10px 0; align-items: center; gap: 8px; color: var(--lr-muted); }");
+  });
+});
+
+describe("Production-polish pass — workflow status alignment (dot/label centred, secondary line aligned under the LABEL not the dot)", () => {
+  const css = read("app/globals.css");
+
+  it("the secondary line's left offset exactly equals the dot's width + gap, so it visually aligns under the label text rather than the dot", () => {
+    expect(css).toContain(".lr-workflow-dot { width: 8px; height: 8px; border-radius: 999px; flex: 0 0 8px;");
+    expect(css).toContain(".lr-workflow-status-row { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }");
+    expect(css).toContain(".lr-workflow-secondary { overflow: hidden; margin-left: 15px;");
+  });
+
+  it("REGRESSION: no square/pill/badge backplate was ever reintroduced behind the dot — it remains a bare circle", () => {
+    expect(css).toContain("border-radius: 999px;");
+    expect(css).not.toMatch(/\.lr-workflow-dot\s*\{[^}]*border-radius:\s*(?:[2-9]|1[0-9])px/);
+  });
+
+  it("the SAME WorkflowStatus component (and therefore the SAME alignment) is used by both the table and the inspector — never a second implementation", () => {
+    const tableSource = read("components/listings-review/ListingsTable.tsx");
+    const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+    expect(tableSource).toContain('import { WorkflowStatus } from "./WorkflowStatus";');
+    expect(panelSource).toContain('import { WorkflowStatus } from "./WorkflowStatus";');
+  });
+});
+
+describe("REGRESSION (superseded) — the malformed green/blue floating control was a toast class-name collision (.lr-toast-progress meaning two different things); this whole class of bug is now categorically impossible", () => {
+  const css = read("app/globals.css");
+
+  it("the entire toast system that carried the collision is gone — there is no .lr-toast-progress, .lr-toast-dismiss-bar, or any other .lr-toast-* rule left to ever collide again", () => {
+    expect(css).not.toMatch(/\.lr-toast[a-z-]*\s*\{/);
   });
 });

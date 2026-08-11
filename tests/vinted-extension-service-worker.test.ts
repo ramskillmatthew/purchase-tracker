@@ -2145,3 +2145,64 @@ describe("service worker — ITEM_STEP_PROGRESS carries currentStep/lastComplete
     expect(item.lastCompletedStep).toBe("SET_MATERIALS"); // preserved from the earlier progress report — shows exactly how far it got
   });
 });
+
+// ============================================================================
+// Live investigation follow-up (Listings Review final-item workflow-status
+// bug) — root cause: postResultToApp() built and fired its fetch() to the
+// app's result endpoint but never awaited or returned that promise, so
+// reportItemResult()'s own `await postResultToApp(...)` resolved as soon as
+// the fetch was merely STARTED, not once it actually landed. The
+// chrome.runtime.onMessage listener (this file's `dispatch()` helper mirrors
+// its real resolve-via-sendResponse contract) is what Chrome uses to decide
+// the service worker is still doing necessary work; once sendResponse fires,
+// Chrome is free to tear the worker down at any time. For every item except
+// the last in a batch, the NEXT item's own processing (new tab navigation,
+// new messages) keeps the worker alive long enough for the previous item's
+// stray fetch to finish in the background anyway. The LAST item has no such
+// follow-up activity — nothing else references the worker afterward — so its
+// fetch can be (and, per the live bug report, consistently is) cut off
+// before the app's database is ever updated, even though the Vinted draft
+// itself was already created successfully by the content script. The fix:
+// postResultToApp must actually await its own fetch before resolving, so the
+// message response (and therefore Chrome's keep-alive signal) is never
+// released until the report has genuinely landed.
+// ============================================================================
+describe("service worker — final item's result report is awaited, not fire-and-forget (Listings Review final-item sync bug)", () => {
+  it("REGRESSION: the ITEM_RESULT message response does not resolve until the report fetch to the app has actually settled", async () => {
+    const { chromeMock, messageListeners } = createChromeMock({
+      initialState: seededRunningState(), sendMessageHandler: () => ({ response: {} }),
+    });
+    await loadWorker(chromeMock);
+
+    let resolveFetch: (value: Response) => void = () => {};
+    let fetchCalled = false;
+    const fetchPromise = new Promise<Response>(resolve => { resolveFetch = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("/result")) { fetchCalled = true; return fetchPromise; }
+      return new Response(null, { status: 204 });
+    }));
+
+    let dispatchSettled = false;
+    const dispatchPromise = dispatch(messageListeners, {
+      type: CONTENT_TO_WORKER.ITEM_RESULT, itemId: "item-1", status: "completed", vintedDraftId: "999",
+    }).then(result => { dispatchSettled = true; return result; });
+
+    // Wait for everything that doesn't depend on the still-pending fetch to
+    // settle first (state updates, the async storage-backed settings
+    // lookup, request construction) — exactly what a fire-and-forget
+    // fetch() would let happen before wrongly resolving the message
+    // response.
+    await vi.waitFor(() => expect(fetchCalled).toBe(true));
+    // The critical assertion: with the bug present, the message response
+    // (and thus the signal Chrome uses to keep the service worker alive)
+    // resolves BEFORE the network request to the app has settled — which is
+    // exactly what lets Chrome tear the worker down mid-request for a final
+    // item with no follow-up activity. It must still be pending here.
+    expect(dispatchSettled).toBe(false);
+
+    resolveFetch(new Response(null, { status: 204 }));
+    const result: any = await dispatchPromise;
+    expect(dispatchSettled).toBe(true);
+    expect(result.state.batch.items[0].status).toBe("completed");
+  });
+});

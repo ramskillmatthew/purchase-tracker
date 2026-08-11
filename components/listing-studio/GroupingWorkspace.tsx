@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import UploadDropzone from "./UploadDropzone";
 import UploadQueue from "./UploadQueue";
-import ProductGroupCard, { type GeneratedListingSummary } from "./ProductGroupCard";
+import ProductGroupCard, { computeStatus, STATUS_LABELS, type CardStatus, type GeneratedListingSummary } from "./ProductGroupCard";
 import EditListingFieldsDialog, { type ListingFieldsDraft } from "./EditListingFieldsDialog";
 import PreviewListingDialog from "./PreviewListingDialog";
 import MovePhotosDialog, { type MovableGroup } from "./MovePhotosDialog";
 import MergeGroupsDialog, { type MergeableGroup } from "./MergeGroupsDialog";
 import DeleteGroupDialog, { type DeleteGroupMode } from "./DeleteGroupDialog";
 import ClearWorkspaceDialog from "./ClearWorkspaceDialog";
+import WorkflowSteps from "./WorkflowSteps";
 import TaskToast from "@/components/TaskToast";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { UploadItem } from "./upload-types";
@@ -130,6 +131,10 @@ export default function GroupingWorkspace() {
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploadNotice, setUploadNotice] = useState("");
   const [uploadSuccessMessage, setUploadSuccessMessage] = useState("");
+  // Visual redesign — client-side only, narrows the already-loaded `drafts`
+  // array for display; never a new fetch, never sent to the server.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<CardStatus | "all">("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [moveDialogGroupId, setMoveDialogGroupId] = useState<string | null>(null);
@@ -164,6 +169,30 @@ export default function GroupingWorkspace() {
   const [editFieldsError, setEditFieldsError] = useState("");
   // Milestone 4 UX fix — read-only full preview, distinct from Edit fields.
   const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);
+  // Visual redesign (compact/expandable product cards) — display-only,
+  // never persisted: which single card currently shows its full photo
+  // grid. Safe to switch freely between groups since every real piece of
+  // state (images, selection, etc.) already lives in THIS component, never
+  // inside the card itself — collapsing/expanding a card can never lose
+  // data. Only one expanded at a time, per the redesign spec.
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  // Visual redesign (per-card generation status) — display-only tracking
+  // layered onto the EXISTING handleGenerateListings loop below, purely
+  // additive: never changes its request order, retries, error handling, or
+  // API payloads/results. currentlyGeneratingGroupId is set/cleared around
+  // each already-sequential fetch; generationFailedGroupIds is reset at the
+  // start of each run and gains one id per already-existing failure branch.
+  const [currentlyGeneratingGroupId, setCurrentlyGeneratingGroupId] = useState<string | null>(null);
+  const [generationFailedGroupIds, setGenerationFailedGroupIds] = useState<Set<string>>(new Set());
+
+  // Visual redesign — the upload-success banner is a temporary notification,
+  // not a permanent status line: it clears itself a few seconds after being
+  // set, on top of the three existing places that already set/clear it.
+  useEffect(() => {
+    if (!uploadSuccessMessage) return;
+    const timer = setTimeout(() => setUploadSuccessMessage(""), 4000);
+    return () => clearTimeout(timer);
+  }, [uploadSuccessMessage]);
 
   const uploadItemsRef = useRef<UploadItem[]>([]);
   useEffect(() => { uploadItemsRef.current = uploadItems; }, [uploadItems]);
@@ -851,18 +880,25 @@ export default function GroupingWorkspace() {
     setGeneratingListings(true);
     setGenerateListingsError(null);
     setGenerateListingsProgress({ done: 0, total: eligibleListingGroups.length });
+    // Visual redesign — display-only, reset for this run; never read by any
+    // request below, so it cannot affect what actually happens.
+    setGenerationFailedGroupIds(new Set());
 
     let failureCount = 0;
     let anySucceeded = false;
     for (const group of eligibleListingGroups) {
+      setCurrentlyGeneratingGroupId(group.id); // display-only — the fetch below is unchanged
       try {
         const response = await fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" });
-        if (response.ok) anySucceeded = true; else failureCount += 1;
+        if (response.ok) anySucceeded = true;
+        else { failureCount += 1; setGenerationFailedGroupIds(current => new Set(current).add(group.id)); }
       } catch {
         failureCount += 1;
+        setGenerationFailedGroupIds(current => new Set(current).add(group.id));
       }
       setGenerateListingsProgress(current => current && { ...current, done: current.done + 1 });
     }
+    setCurrentlyGeneratingGroupId(null);
 
     if (anySucceeded) await loadWorkspace();
     if (failureCount > 0) {
@@ -1002,53 +1038,120 @@ export default function GroupingWorkspace() {
   const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;
   const generateListingsDisabled = generatingListings || autoGroupRunning || clearingWorkspace || uploadsActive;
 
+  // Visual redesign — every value below is derived from state already
+  // computed above; no new fetch, no new persisted concept. Photos
+  // uploaded, real product groups (never Unsorted), groups still eligible
+  // to generate, and groups already generated — the same four values the
+  // old stat-card grid showed, now surfaced as one inline toolbar line.
+  const productGroupsCount = drafts.filter(draft => draft.title !== "Unsorted").length;
+  const orderedProductDrafts = drafts.filter(draft => draft.title !== "Unsorted");
+  // Client-side only (no new fetch): narrows the already-loaded product
+  // queue by name/brand/model/generated title, and by the exact same
+  // status a row's own badge already shows — reuses computeStatus (the one
+  // existing source of truth for status) rather than re-deriving it.
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleProductDrafts = orderedProductDrafts.filter(draft => {
+    if (normalizedSearch) {
+      const haystack = [draft.title, draft.brand, draft.model, draft.generated_title].filter(Boolean).join(" ").toLowerCase();
+      if (!haystack.includes(normalizedSearch)) return false;
+    }
+    if (statusFilter !== "all") {
+      const draftStatus = computeStatus(false, listingsByDraftId.get(draft.id) ?? null, draft.id === currentlyGeneratingGroupId, generationFailedGroupIds.has(draft.id), draft.vinted_category_id);
+      if (draftStatus !== statusFilter) return false;
+    }
+    return true;
+  });
+  const handleToggleExpand = useCallback((draftId: string) => {
+    setExpandedGroupId(current => (current === draftId ? null : draftId));
+  }, []);
+
+  // Shared by the Unsorted row and every real product row — keeps the two
+  // render sites (Unsorted is never part of the searchable/filterable
+  // product list) from duplicating this large, identical prop list.
+  function renderGroupCard(draft: WorkspaceDraft) {
+    return <ProductGroupCard
+      key={draft.id}
+      group={draft}
+      photos={photosByGroupMap.get(draft.id) ?? EMPTY_PHOTOS}
+      selectedIds={selectedIds}
+      onToggleSelect={toggleSelect}
+      onSelectAll={handleSelectAllInGroup}
+      onClearSelection={handleClearSelectionInGroup}
+      onSelectRange={handleSelectRange}
+      onRename={handleRename}
+      onReorder={handleReorder}
+      onSetCover={handleSetCover}
+      onRemovePhoto={handleRemovePhoto}
+      onMoveSelected={groupId => { setMoveDialogMode("move"); setMoveDialogGroupId(groupId); }}
+      onSplitSelected={groupId => { setMoveDialogMode("split"); setMoveDialogGroupId(groupId); }}
+      onMerge={groupId => setMergeDialogGroupId(groupId)}
+      onDelete={handleDeleteGroup}
+      saveState={saveState}
+      autoEdit={draft.id === autoEditGroupId}
+      onAutoEditConsumed={handleAutoEditConsumed}
+      listing={listingsByDraftId.get(draft.id) ?? null}
+      onEditFields={setEditFieldsGroupId}
+      onPreviewListing={setPreviewGroupId}
+      expanded={draft.id === expandedGroupId}
+      onToggleExpand={handleToggleExpand}
+      isGenerating={draft.id === currentlyGeneratingGroupId}
+      hasFailedGeneration={generationFailedGroupIds.has(draft.id)}
+    />;
+  }
+
   return <div className="listing-studio-create">
-    <UploadDropzone onFilesSelected={handleFilesSelected} />
-    {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
-    <UploadQueue items={uploadItems} onRetry={handleRetryUpload} onRemove={handleRemoveUploadItem} />
+    <WorkflowSteps
+      hasPhotos={images.length > 0}
+      needsGrouping={unsortedPhotoCount > 0}
+      hasEligibleGroups={eligibleListingGroups.length > 0}
+      hasGeneratedDrafts={readyCount > 0}
+    />
 
-    {uploadSuccessMessage && <div className="listing-upload-success" role="status">
-      <strong>{uploadSuccessMessage}</strong>
-      <span>Select photos and split them into product groups.</span>
-    </div>}
-
-    {loadError && <div className="home-error">{loadError}</div>}
-
-    {!loading && !hasAnyData && <p className="listing-empty-explanation">Upload photos first. They will be placed into an Unsorted group so you can divide them into products.</p>}
+    {!hasAnyData && <>
+      <UploadDropzone onFilesSelected={handleFilesSelected} />
+      {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
+      <UploadQueue items={uploadItems} onRetry={handleRetryUpload} onRemove={handleRemoveUploadItem} />
+      {loadError && <div className="home-error">{loadError}</div>}
+      {!loading && <div className="listing-empty-workspace" role="status">No photos in this batch</div>}
+    </>}
 
     {hasAnyData && <>
-      <div className="listing-studio-summary-line" role="status">
-        <span>{images.length} photo{images.length === 1 ? "" : "s"} uploaded</span>
-        <span aria-hidden="true">·</span>
-        <span>{drafts.length} product group{drafts.length === 1 ? "" : "s"}</span>
-        <span aria-hidden="true">·</span>
-        <span>{readyCount} draft{readyCount === 1 ? "" : "s"} generated</span>
+      <UploadDropzone onFilesSelected={handleFilesSelected} compact />
+      {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
+      <UploadQueue items={uploadItems} onRetry={handleRetryUpload} onRemove={handleRemoveUploadItem} />
+
+      {uploadSuccessMessage && <div className="listing-upload-success" role="status">
+        <strong>{uploadSuccessMessage}</strong>
+      </div>}
+
+      {loadError && <div className="home-error">{loadError}</div>}
+
+      <div className="listing-batch-toolbar">
+        <strong className="listing-batch-toolbar-counts">
+          {images.length} photo{images.length === 1 ? "" : "s"} · {productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {eligibleListingGroups.length} ready to generate · {readyCount} draft{readyCount === 1 ? "" : "s"} generated
+        </strong>
+        <div className="listing-batch-toolbar-controls">
+          <label className="field listing-batch-search">
+            <span className="label sr-only">Search</span>
+            <input
+              className="input"
+              type="search"
+              placeholder="Search by name, brand, or model"
+              value={searchQuery}
+              onChange={event => setSearchQuery(event.target.value)}
+              aria-label="Search product groups"
+            />
+          </label>
+          <label className="field listing-batch-status-filter">
+            <span className="label sr-only">Status</span>
+            <select className="input" value={statusFilter} onChange={event => setStatusFilter(event.target.value as CardStatus | "all")} aria-label="Filter by status">
+              <option value="all">All statuses</option>
+              {(Object.keys(STATUS_LABELS) as CardStatus[]).map(value => <option key={value} value={value}>{STATUS_LABELS[value]}</option>)}
+            </select>
+          </label>
+        </div>
       </div>
 
-      <div className="product-groups-toolbar">
-        <button type="button" className="button-secondary" onClick={handleAutoGroupProducts} disabled={autoGroupRunning || unsortedPhotoCount === 0} title={unsortedPhotoCount === 0 ? "No photos in Unsorted to group" : undefined}>
-          {autoGroupRunning ? "Grouping…" : "Auto-group products"}
-        </button>
-        <button
-          type="button"
-          className="button-secondary"
-          onClick={handleGenerateListings}
-          disabled={generateListingsDisabled || eligibleListingGroups.length === 0}
-          title={eligibleListingGroups.length === 0 ? "No product groups to generate listings for" : undefined}
-        >
-          {generatingListings ? "Generating…" : "Generate Listings"}
-        </button>
-        <button type="button" className="button-secondary" onClick={handleCreateGroup}>+ New product</button>
-        <button
-          type="button"
-          className="button-danger listing-clear-all"
-          onClick={() => setClearWorkspaceDialogOpen(true)}
-          disabled={clearWorkspaceDisabled}
-          title={clearWorkspaceDisabled ? "Wait for the current upload or grouping run to finish" : undefined}
-        >
-          Clear all
-        </button>
-      </div>
       <p className="auto-group-order-hint">For best results, keep each product&rsquo;s photos together in upload order.</p>
 
       {clearWorkspaceError && !clearingWorkspace && <div className="auto-group-error" role="alert">
@@ -1121,31 +1224,64 @@ export default function GroupingWorkspace() {
         </div>)}
       </div>}
 
-      <div className="product-groups-list">
-        {drafts.map(draft => <ProductGroupCard
-          key={draft.id}
-          group={draft}
-          photos={photosByGroupMap.get(draft.id) ?? EMPTY_PHOTOS}
-          selectedIds={selectedIds}
-          onToggleSelect={toggleSelect}
-          onSelectAll={handleSelectAllInGroup}
-          onClearSelection={handleClearSelectionInGroup}
-          onSelectRange={handleSelectRange}
-          onRename={handleRename}
-          onReorder={handleReorder}
-          onSetCover={handleSetCover}
-          onRemovePhoto={handleRemovePhoto}
-          onMoveSelected={groupId => { setMoveDialogMode("move"); setMoveDialogGroupId(groupId); }}
-          onSplitSelected={groupId => { setMoveDialogMode("split"); setMoveDialogGroupId(groupId); }}
-          onMerge={groupId => setMergeDialogGroupId(groupId)}
-          onDelete={handleDeleteGroup}
-          saveState={saveState}
-          autoEdit={draft.id === autoEditGroupId}
-          onAutoEditConsumed={handleAutoEditConsumed}
-          listing={listingsByDraftId.get(draft.id) ?? null}
-          onEditFields={setEditFieldsGroupId}
-          onPreviewListing={setPreviewGroupId}
-        />)}
+      {/* Unsorted is a distinct inbox queue, never part of the searchable/
+          filterable product list below — and per explicit instruction, it
+          renders nothing at all once it has no photos left, not even a
+          collapsed empty row. */}
+      {unsortedPhotoCount > 0 && unsortedDraft && <div className="product-groups-list listing-unsorted-section">
+        {renderGroupCard(unsortedDraft)}
+      </div>}
+
+      {orderedProductDrafts.length > 0 && <>
+        <div className="listing-list-header listing-row-grid">
+          <span className="listing-list-header-cell listing-list-header-main">Product group</span>
+          <span className="listing-list-header-cell listing-list-header-photos">Photos</span>
+          <span className="listing-list-header-cell listing-list-header-status">Status</span>
+          <span className="listing-list-header-cell listing-list-header-actions">Actions</span>
+        </div>
+        <div className="product-groups-list">
+          {visibleProductDrafts.length === 0
+            ? <p className="listing-no-matches" role="status">No products match your search or filter.</p>
+            : visibleProductDrafts.map(draft => renderGroupCard(draft))}
+        </div>
+      </>}
+
+      <div className="listing-sticky-bar" role="toolbar" aria-label="Listing Studio actions">
+        <div className="listing-sticky-bar-selection" role="status">
+          {selectedIds.size > 0
+            ? <>
+                <strong>{selectedIds.size} photo{selectedIds.size === 1 ? "" : "s"} selected</strong>
+                <button type="button" className="button-secondary" onClick={() => setSelectedIds(new Set())}>Clear selection</button>
+              </>
+            : <strong>{productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {images.length} photo{images.length === 1 ? "" : "s"}</strong>}
+        </div>
+        <div className="listing-sticky-bar-actions">
+          <button type="button" className="button-secondary" onClick={handleCreateGroup}>+ New product</button>
+          <button type="button" className="button-secondary" onClick={handleAutoGroupProducts} disabled={autoGroupRunning || unsortedPhotoCount === 0} title={unsortedPhotoCount === 0 ? "No photos in Unsorted to group" : undefined}>
+            {autoGroupRunning ? "Grouping…" : "Auto-group"}
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={handleGenerateListings}
+            disabled={generateListingsDisabled || eligibleListingGroups.length === 0}
+            title={eligibleListingGroups.length === 0 ? "No product groups to generate listings for" : undefined}
+          >
+            {generatingListings ? "Generating…" : "Generate listings"}
+          </button>
+          {/* Visually separated from the constructive actions above (own
+              margin, destructive red styling) — never grouped into the same
+              cluster as Auto-group/Generate/New product. */}
+          <button
+            type="button"
+            className="button-danger listing-clear-all listing-sticky-bar-danger"
+            onClick={() => setClearWorkspaceDialogOpen(true)}
+            disabled={clearWorkspaceDisabled}
+            title={clearWorkspaceDisabled ? "Wait for the current upload or grouping run to finish" : undefined}
+          >
+            Clear all
+          </button>
+        </div>
       </div>
     </>}
 

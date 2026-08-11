@@ -1213,6 +1213,60 @@ begin
 end;
 $$;
 
+-- Listings Review redesign — the single most-recent extension-batch-item
+-- row per draft, across EVERY batch the owner has ever sent (not just the
+-- currently-open one), so per-row workflow status and the Drafts/Sent
+-- summary counts stay correct after a page reload, a browser restart, or
+-- opening the app on another device. Read-only, owner-scoped (RLS is
+-- irrelevant here since this is only ever invoked via the service-role
+-- key, same as every other function in this file — see the revoke block
+-- below), every table reference fully qualified with `public.` so the
+-- query can never be redirected by a caller-controlled search_path.
+-- "Most recent" = greatest(completed_at, started_at, batch.created_at) —
+-- a real timestamp always exists on at least the batch row, so this never
+-- falls back to an arbitrary tiebreak except in the vanishingly rare case
+-- of an exact timestamp collision, where batch.created_at then item.id
+-- give a final, still-deterministic order. Cancelled items are excluded
+-- (a cancelled attempt never happened, from a review perspective) so a
+-- draft's last REAL attempt is always what surfaces.
+create or replace function public.listing_studio_latest_extension_status(p_owner_id uuid)
+returns table (
+  draft_id uuid,
+  batch_id uuid,
+  batch_status text,
+  item_status text,
+  queue_position integer,
+  error_code text,
+  error_message text,
+  vinted_draft_id text,
+  started_at timestamptz,
+  completed_at timestamptz,
+  current_step text,
+  step_detail text
+)
+language sql
+stable
+as $$
+  select distinct on (bi.draft_id)
+    bi.draft_id,
+    b.id as batch_id,
+    b.status as batch_status,
+    bi.status as item_status,
+    bi.queue_position,
+    bi.error_code,
+    bi.error_message,
+    bi.vinted_draft_id,
+    bi.started_at,
+    bi.completed_at,
+    bi.current_step,
+    bi.step_detail
+  from public.vinted_extension_batch_items bi
+  join public.vinted_extension_batches b on b.id = bi.batch_id
+  where b.owner_id = p_owner_id
+    and bi.status <> 'cancelled'
+  order by bi.draft_id, greatest(bi.completed_at, bi.started_at, b.created_at) desc, b.created_at desc, bi.id desc;
+$$;
+
 -- Milestone 7 (Vinted category catalogue sync) — applies one fetched,
 -- flattened, already-Zod-validated catalogue snapshot atomically. A
 -- concurrent refresh for the same market fails fast
@@ -1434,6 +1488,7 @@ revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from
 revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from public;
 revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from public;
 revoke all on function public.listing_studio_clear_workspace(uuid) from public;
+revoke all on function public.listing_studio_latest_extension_status(uuid) from public;
 revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from public;
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
@@ -1444,6 +1499,7 @@ do $$ begin
     revoke all on function public.listing_studio_delete_group(uuid, uuid, text) from anon;
     revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from anon;
     revoke all on function public.listing_studio_clear_workspace(uuid) from anon;
+    revoke all on function public.listing_studio_latest_extension_status(uuid) from anon;
     revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from anon;
   end if;
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
@@ -1454,6 +1510,7 @@ do $$ begin
     revoke all on function public.listing_studio_merge_groups(uuid, uuid, uuid) from authenticated;
     revoke all on function public.listing_studio_apply_boundary_session(uuid, uuid, jsonb) from authenticated;
     revoke all on function public.listing_studio_clear_workspace(uuid) from authenticated;
+    revoke all on function public.listing_studio_latest_extension_status(uuid) from authenticated;
     revoke all on function public.vinted_categories_apply_refresh(text, text, jsonb, text, integer, boolean, text, timestamptz) from authenticated;
   end if;
 end $$;
@@ -1553,6 +1610,18 @@ create index if not exists vinted_extension_batch_items_batch_idx
 
 alter table public.vinted_extension_batch_items enable row level security;
 revoke all on public.vinted_extension_batch_items from anon, authenticated;
+
+-- Listings Review redesign follow-up — forwarded from the extension's own
+-- already-computed local step tracking (form-steps.js's report(status,
+-- {currentStep, detail})), which previously never left the extension.
+-- Free text only (a step name / a short human-readable line), same
+-- trust level as error_code/error_message above — never a token, URL, or
+-- secret. Cleared back to null whenever a fresh attempt starts
+-- (status -> 'preparing') and finalised to null on completion/failure —
+-- see app/api/extension/batch/items/[itemId]/result/route.ts — so a
+-- completed or retried item never shows a stale "Uploading photo…" line.
+alter table public.vinted_extension_batch_items add column if not exists current_step text;
+alter table public.vinted_extension_batch_items add column if not exists step_detail text;
 
 -- Milestone 7 (Chrome extension draft queue) follow-up: vinted_draft_created_at
 -- (added by the ZIP-export migration above, alongside vinted_exported_at/

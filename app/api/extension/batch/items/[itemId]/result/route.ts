@@ -76,8 +76,29 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
     patchBody.error_message = body.status === "failed" ? (body.errorMessage ?? null) : null;
     if (body.status === "completed" && body.vintedDraftId) patchBody.vinted_draft_id = body.vintedDraftId;
 
+    // Listings Review redesign — a fresh attempt (including a retry, which
+    // re-reports "preparing") always replaces any stale step detail from a
+    // previous attempt; a terminal status (completed/failed/cancelled)
+    // always finalises it to null, so a finished or retried item can never
+    // keep showing a lingering "Uploading photo…" line.
+    patchBody.current_step = isTerminalItemStatus(body.status) ? null : (body.currentStep ?? null);
+    patchBody.step_detail = isTerminalItemStatus(body.status) ? null : (body.detail ?? null);
+
+    // current_step/step_detail only exist once the migration in
+    // supabase-listing-studio.sql has been run — until then, drop those
+    // two fields and retry rather than failing the whole result report
+    // (and therefore the item's real status) with a confusing 500.
     await supabaseRequest(`vinted_extension_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}`, {
       method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify(patchBody),
+    }).catch(async error => {
+      if (error instanceof Error && "status" in error && (error as Error & { status: number }).status === 400 && /column .* does not exist|schema cache/i.test(error.message)) {
+        const { current_step: _currentStep, step_detail: _stepDetail, ...fallbackBody } = patchBody;
+        await supabaseRequest(`vinted_extension_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}`, {
+          method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify(fallbackBody),
+        });
+        return;
+      }
+      throw error;
     });
 
     // Only ever set once Vinted has authoritatively confirmed a draft

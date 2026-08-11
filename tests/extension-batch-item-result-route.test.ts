@@ -173,3 +173,47 @@ describe("POST /api/extension/batch/items/[itemId]/result", () => {
     expect(JSON.stringify(body)).not.toContain("db exploded");
   });
 });
+
+describe("POST /api/extension/batch/items/[itemId]/result — Listings Review redesign: currentStep/detail", () => {
+  it("persists currentStep/detail on a 'filling' report", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "filling", currentStep: "SET_PRICE", detail: "Entering price" }, token), params());
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[0] as string).startsWith(`vinted_extension_batch_items?id=eq.${ITEM_ID}`));
+    const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(body.current_step).toBe("SET_PRICE");
+    expect(body.step_detail).toBe("Entering price");
+  });
+
+  it("a fresh attempt ('preparing', including a retry) clears any stale step detail from a previous attempt when the report doesn't include fresh values", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "preparing" }, token), params());
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[0] as string).startsWith(`vinted_extension_batch_items?id=eq.${ITEM_ID}`));
+    const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(body.current_step).toBeNull();
+    expect(body.step_detail).toBeNull();
+  });
+
+  it("REGRESSION: a completed item never keeps a stale step-detail line, even if the final report happened to include one", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "completed", vintedDraftId: "987654", currentStep: "SAVE_DRAFT", detail: "Saving…" }, token), params());
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[0] as string).startsWith(`vinted_extension_batch_items?id=eq.${ITEM_ID}`));
+    const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(body.current_step).toBeNull();
+    expect(body.step_detail).toBeNull();
+  });
+
+  it("REGRESSION: a failed item never keeps a stale step-detail line either", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "failed", errorCode: "SET_PRICE", errorMessage: "timed out", currentStep: "SET_PRICE", detail: "Entering price" }, token), params());
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[0] as string).startsWith(`vinted_extension_batch_items?id=eq.${ITEM_ID}`));
+    const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(body.current_step).toBeNull();
+    expect(body.step_detail).toBeNull();
+  });
+
+  it("rejects a currentStep/detail that exceeds the schema's max length, same strict-schema convention as every other field here", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    const response = await itemResultRoute(await requestWith({ status: "filling", detail: "x".repeat(500) }, token), params());
+    expect(response.status).toBe(400);
+  });
+});

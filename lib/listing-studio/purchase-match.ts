@@ -154,3 +154,25 @@ export function describePurchaseMatch(match: SkuPurchaseMatch): string {
     case "matched": return match.purchasePricePence !== null ? `You paid: ${formatPenceAsGBP(match.purchasePricePence)}` : "Purchase price unavailable";
   }
 }
+
+/**
+ * Listings Review redesign — the Cost column. Only a single, unambiguous
+ * "matched" outcome with a real recorded price counts as a known cost;
+ * "not_found"/"duplicate"/"missing_sku" are all genuinely ambiguous (no
+ * purchase, more than one candidate, or no SKU to match at all) and must
+ * never be guessed at — the table/detail panel render "—" for null, never
+ * a misleading number.
+ */
+export function computeCostPence(match: SkuPurchaseMatch): number | null {
+  return match.status === "matched" ? match.purchasePricePence : null;
+}
+
+/**
+ * Profit = selling price − cost, in pence. Null whenever either side is
+ * unknown — never partially computed, never a marketplace-fee deduction
+ * (no such calculation exists anywhere in this codebase to reuse, and none
+ * is added here).
+ */
+export function computeProfitPence(costPence: number | null, sellingPricePence: number | null): number | null {
+  return costPence !== null && sellingPricePence !== null ? sellingPricePence - costPence : null;
+}

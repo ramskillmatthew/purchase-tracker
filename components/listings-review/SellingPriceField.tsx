@@ -67,11 +67,11 @@ export default function SellingPriceField({ listingId, sellingPricePence, onSave
     }
   }
 
-  return <div className="listings-review-selling-price">
+  return <div className="lr-selling-price">
     <label className="field">
       <span className="label">Vinted selling price</span>
-      <div className="listings-review-selling-price-row">
-        <span className="listings-review-selling-price-prefix" aria-hidden="true">£</span>
+      <div className="lr-selling-price-row">
+        <span className="lr-selling-price-prefix" aria-hidden="true">£</span>
         <input
           className="input"
           type="number"
@@ -88,7 +88,7 @@ export default function SellingPriceField({ listingId, sellingPricePence, onSave
         </button>
       </div>
     </label>
-    {status === "saved" && <p className="listings-review-selling-price-status listings-review-selling-price-saved" role="status">Saved</p>}
-    {status === "error" && <p className="listings-review-selling-price-status listings-review-selling-price-error" role="alert">{errorMessage || "Save failed"}</p>}
+    {status === "saved" && <p className="lr-selling-price-status lr-selling-price-saved" role="status">Saved</p>}
+    {status === "error" && <p className="lr-selling-price-status lr-selling-price-error" role="alert">{errorMessage || "Save failed"}</p>}
   </div>;
 }
