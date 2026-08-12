@@ -862,15 +862,35 @@ async function checkSavedDraftAgain(itemId) {
 
 // ---- App API calls -----------------------------------------------------------
 
+// Multi-batch support — a best-effort, purely cosmetic label so the app
+// can show which browser window a batch is running in when more than one
+// extension instance is paired at once (e.g. "Batch 1 · Chrome" / "Batch 2
+// · Brave"). Never used as a security boundary — see this route's own
+// call site and lib/listing-studio/extension-batch-schema.ts's comment on
+// claimRequestSchema. Brave deliberately keeps its userAgent identical to
+// Chrome's for compatibility, so the standard, safe feature-detection way
+// to tell them apart is the navigator.brave.isBrave() API Brave itself
+// exposes for exactly this purpose — never user-agent sniffing for Brave.
+async function detectBrowserLabel() {
+  try {
+    if (navigator.brave && typeof navigator.brave.isBrave === "function" && await navigator.brave.isBrave()) return "Brave";
+  } catch { /* not Brave, or the API is unavailable — fall through to UA sniffing */ }
+  const ua = navigator.userAgent || "";
+  if (/edg\//i.test(ua)) return "Edge";
+  if (/opr\//i.test(ua)) return "Opera";
+  return "Chrome"; // this extension only ever runs in a Chromium-based browser
+}
+
 async function claimBatch(pairingCode) {
   if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app." };
   const { appBaseUrl } = await getSettings();
   const manifest = chrome.runtime.getManifest();
+  const browserLabel = await detectBrowserLabel();
   let response;
   try {
     response = await fetch(`${appBaseUrl}/api/extension/claim`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairingCode, extensionId: chrome.runtime.id, extensionVersion: manifest.version }),
+      body: JSON.stringify({ pairingCode, extensionId: chrome.runtime.id, extensionVersion: manifest.version, browserLabel }),
     });
   } catch {
     return { error: "Could not reach the app. Check the app URL in settings and that it is running." };
@@ -958,13 +978,38 @@ async function postResultToApp(itemId, status, extra = {}) {
   // has genuinely landed (or definitively failed) — same request, same
   // body, same best-effort error handling, just no longer detached from
   // the promise chain that keeps this worker alive.
-  await fetch(`${appBaseUrl}/api/extension/batch/items/${itemId}/result`, {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.pairing.batchToken}` },
-    body: JSON.stringify({
-      status, errorCode: extra.errorCode ?? null, errorMessage: extra.errorMessage ?? null, vintedDraftId: extra.vintedDraftId ?? null,
-      currentStep: extra.currentStep ?? null, detail: extra.detail ?? null,
-    }),
-  }).catch(() => {});
+  // Multi-batch support — this batch's own pairing is scoped to it alone
+  // (see claimBatch), so a 409 here means the OWNER cancelled specifically
+  // THIS batch from the app (see the item-result route's own
+  // status-in-(cancelled,completed,expired) check) — never a signal about
+  // any other batch this owner may have running in another browser/tab.
+  // Previously this response's status was never even checked, so the
+  // service worker kept dispatching PROCESS_ITEM to a batch the app had
+  // already stopped tracking: the extension would grind through its
+  // remaining queued items against a Vinted tab, form-fill and save real
+  // drafts, and then have every one of those results silently swallowed
+  // (the `.catch(() => {})` below only ever caught network-level
+  // failures, not a well-formed 4xx/5xx). Checking response.ok and
+  // reacting to 409 specifically stops that: remaining QUEUED items are
+  // cancelled locally (mirroring the user's own "Cancel remaining"
+  // action) and the queue stops driving itself forward, so triggerTick's
+  // own `!state.batch.running` guard takes it from here.
+  let response;
+  try {
+    response = await fetch(`${appBaseUrl}/api/extension/batch/items/${itemId}/result`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.pairing.batchToken}` },
+      body: JSON.stringify({
+        status, errorCode: extra.errorCode ?? null, errorMessage: extra.errorMessage ?? null, vintedDraftId: extra.vintedDraftId ?? null,
+        currentStep: extra.currentStep ?? null, detail: extra.detail ?? null,
+      }),
+    });
+  } catch {
+    return; // network-level failure — unchanged best-effort behaviour
+  }
+  if (response.status === 409) {
+    console.warn("Vinted Draft Queue: batch is no longer active in the app — stopping remaining items for this batch.");
+    await updateState(s => QueueState.applyCancelRemaining(s));
+  }
 }
 
 async function reportItemResult(itemId, status, extra = {}) {

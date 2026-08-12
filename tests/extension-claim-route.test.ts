@@ -128,6 +128,20 @@ describe("POST /api/extension/claim", () => {
     expect(response.status).toBe(400);
   });
 
+  it("multi-batch: forwards an optional browserLabel (e.g. 'Chrome'/'Brave') onto the claiming PATCH — purely cosmetic, never a security boundary", async () => {
+    await claimRoute(requestWith({ pairingCode: CODE, browserLabel: "Brave" }));
+    const claimPatch = supabaseRequest.mock.calls.find(c => (c[0] as string).includes("status=eq.pending_claim") && (c[1] as RequestInit)?.method === "PATCH");
+    expect(claimPatch).toBeDefined();
+    expect(JSON.parse((claimPatch![1] as RequestInit).body as string).browser_label).toBe("Brave");
+  });
+
+  it("omitting browserLabel stores null rather than failing the claim", async () => {
+    const response = await claimRoute(requestWith({ pairingCode: CODE }));
+    expect(response.status).toBe(200);
+    const claimPatch = supabaseRequest.mock.calls.find(c => (c[0] as string).includes("status=eq.pending_claim") && (c[1] as RequestInit)?.method === "PATCH");
+    expect(JSON.parse((claimPatch![1] as RequestInit).body as string).browser_label).toBeNull();
+  });
+
   it("rejects when the IP-based rate limit is already reached", async () => {
     supabaseRequest.mockImplementation(async (path: string) => {
       if (path.startsWith("assistant_rate_limits?")) return new Response(JSON.stringify(Array.from({ length: 20 }, (_, i) => ({ id: `r${i}` }))), { status: 200 });

@@ -11,13 +11,24 @@ export type ActivityEventTone = "sent" | "queue" | "progress" | "success" | "fai
 // `detail` is only ever present on a still-in-progress "progress" event
 // and is UPDATED in place as fresher step detail arrives, never appended
 // as a new row.
+//
+// Multi-batch support — every event now carries its own immutable
+// `batchId` (never the reusable display number alone) plus the display
+// label/browser attribution already resolved by the parent at the moment
+// the event was created, so a later-reused "Batch 1" number can never
+// retroactively relabel an older event that belongs to a different batch.
 export type ActivityEvent = {
   id: string;
+  batchId: string;
+  batchLabel: string;
+  browserLabel?: string | null;
   tone: ActivityEventTone;
   message: string;
   detail?: string | null;
   timestampIso: string;
 };
+
+export type ActivityBatchFilter = { batchId: string; label: string };
 
 const TONE_LABELS: Record<ActivityEventTone, string> = {
   sent: "Sent", queue: "Queued", progress: "In progress", success: "Success", failure: "Failed",
@@ -33,20 +44,34 @@ const COLLAPSED_VISIBLE_COUNT = 6;
 
 /**
  * Small, presentational right-rail panel beneath the inspector (reference
- * image 4) — every event it renders was already derived and capped by the
- * parent (never fetches or computes anything itself). "View all" only
- * toggles between the capped slice and the full in-memory `events` array
- * already held by the parent — there is no second, larger backing store;
- * nothing here is persisted. No Retry action is rendered anywhere in this
- * panel: the existing recourse for a failed item (resend, via the table
- * row/inspector overflow menu) is unchanged and still available.
+ * image 4) — every event it renders was already derived, filtered (by
+ * batch), and capped by the parent (never fetches or computes anything
+ * itself). "View all" only toggles between the capped slice and the full
+ * already-filtered `events` array the parent hands in — there is no
+ * second, larger backing store; nothing here is persisted. No Retry action
+ * is rendered anywhere in this panel: the existing recourse for a failed
+ * item (resend, via the table row/inspector overflow menu) is unchanged
+ * and still available.
+ *
+ * Multi-batch support — still exactly ONE panel (never one per batch).
+ * `filters` lists every batch whose activity isn't dismissed, in display
+ * order; `events` is already scoped to `selectedFilter` by the parent.
+ * The "Dismiss … activity" action only ever appears once a specific batch
+ * (not "All") is selected, and only ever affects that one batch's own
+ * activity — never the batch's processing, never its box, never any other
+ * batch's events.
  */
-function DraftActivityPanel({ events, isLive }: {
+function DraftActivityPanel({ events, isLive, filters, selectedFilter, onSelectFilter, onDismissActivity }: {
   events: ActivityEvent[];
   isLive: boolean;
+  filters: ActivityBatchFilter[];
+  selectedFilter: string;
+  onSelectFilter: (filter: string) => void;
+  onDismissActivity: (batchId: string) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const visibleEvents = showAll ? events : events.slice(0, COLLAPSED_VISIBLE_COUNT);
+  const selectedFilterLabel = filters.find(f => f.batchId === selectedFilter)?.label ?? "batch";
 
   return <section className="lr-activity-panel" aria-label="Live activity">
     <div className="lr-activity-header">
@@ -55,6 +80,15 @@ function DraftActivityPanel({ events, isLive }: {
         {showAll ? "Show less" : "View all"}
       </button>}
     </div>
+
+    {filters.length > 0 && <div className="lr-activity-filters" role="tablist" aria-label="Filter activity by batch">
+      <button type="button" role="tab" aria-selected={selectedFilter === "all"} className={`lr-activity-filter-btn${selectedFilter === "all" ? " active" : ""}`} onClick={() => onSelectFilter("all")}>All</button>
+      {filters.map(f => <button key={f.batchId} type="button" role="tab" aria-selected={selectedFilter === f.batchId} className={`lr-activity-filter-btn${selectedFilter === f.batchId ? " active" : ""}`} onClick={() => onSelectFilter(f.batchId)}>{f.label}</button>)}
+    </div>}
+
+    {selectedFilter !== "all" && filters.some(f => f.batchId === selectedFilter) && <button type="button" className="lr-activity-dismiss-batch" onClick={() => onDismissActivity(selectedFilter)}>
+      Dismiss {selectedFilterLabel} activity
+    </button>}
 
     {events.length === 0
       ? <div className="lr-activity-empty">
@@ -66,6 +100,7 @@ function DraftActivityPanel({ events, isLive }: {
             <time className="lr-activity-time" dateTime={event.timestampIso}>{formatShortTimestamp(event.timestampIso)}</time>
             <i aria-hidden="true" className={`lr-activity-dot lr-activity-dot-${event.tone}`} />
             <div className="lr-activity-row-body">
+              <span className="lr-activity-batch-tag">{event.batchLabel}{event.browserLabel ? ` · ${event.browserLabel}` : ""}</span>
               <span className="lr-activity-message">
                 <span className="sr-only">{TONE_LABELS[event.tone]}: </span>
                 {event.message}

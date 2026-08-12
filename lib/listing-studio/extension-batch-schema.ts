@@ -124,8 +124,15 @@ export const itemResultRequestSchema = z.object({
 }).strict();
 export type ItemResultRequest = z.infer<typeof itemResultRequestSchema>;
 
+// Multi-batch support — a best-effort, safely-reportable display label
+// only (e.g. "Chrome", "Brave", "Edge") — NEVER a security/identity
+// boundary (that's the batch-scoped token alone, see
+// extension-batch-tokens.ts). Purely cosmetic: which browser window a
+// batch box/activity row is attributed to in the UI when more than one
+// extension instance is paired across different batches at once.
 export const claimRequestSchema = z.object({
   pairingCode: z.string().min(4).max(32),
   extensionId: z.string().max(100).optional(),
   extensionVersion: z.string().max(50).optional(),
+  browserLabel: z.string().max(40).optional(),
 }).strict();

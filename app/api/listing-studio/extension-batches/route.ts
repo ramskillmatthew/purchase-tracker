@@ -46,22 +46,43 @@ type RejectedListing = { draftId: string; sku: string | null; reasons: string[] 
  * previously lived only in this component's own React state, so a batch
  * created in an earlier page load was completely invisible to a fresh
  * mount — no polling, no activity, no live workflow status, even while
- * the extension was genuinely still processing it. This returns the
- * owner's own most recent batch that is still genuinely in flight (not
- * completed/cancelled/expired, and not past its real expiry — a
- * 'pending_claim'/'claimed'/'in_progress' row whose expires_at has
- * already passed is treated as gone, never resurrected), so the client
- * can resume tracking it on mount. Read-only, owner-scoped, no photo I/O.
+ * the extension was genuinely still processing it. This returns EVERY
+ * one of the owner's batches that is still genuinely visible in the grid
+ * — either still in flight (not completed/cancelled/expired, and not
+ * past its real expiry — a 'pending_claim'/'claimed'/'in_progress' row
+ * whose expires_at has already passed is treated as gone, never
+ * resurrected) or terminal but not yet dismissed (box_dismissed_at is
+ * still null) — so the client can resume tracking/displaying all of them
+ * on mount. Multi-batch: never narrows to "the" active batch, since more
+ * than one may legitimately be in flight at once. Read-only,
+ * owner-scoped, no photo I/O.
  */
 export async function GET() {
   try {
     const user = await requireOwner();
-    const batches = await supabaseRequestAll<{ id: string; status: string; expires_at: string }>(
-      `vinted_extension_batches?owner_id=eq.${user.id}&status=in.(pending_claim,claimed,in_progress)&select=id,status,expires_at&order=created_at.desc`,
+    const batches = await supabaseRequestAll<{ id: string; status: string; expires_at: string; display_number: number }>(
+      `vinted_extension_batches?owner_id=eq.${user.id}&box_dismissed_at=is.null`
+      + `&select=id,status,expires_at,display_number&order=created_at.desc`,
     );
-    const active = batches.find(batch => new Date(batch.expires_at).getTime() > Date.now()) ?? null;
-    return NextResponse.json({ activeBatchId: active?.id ?? null });
-  } catch (error) { return safeApiError(error, "Could not check for an active batch."); }
+    const visible = batches.filter(batch => {
+      const isLive = batch.status === "pending_claim" || batch.status === "claimed" || batch.status === "in_progress";
+      return isLive ? new Date(batch.expires_at).getTime() > Date.now() : true;
+    });
+    return NextResponse.json({
+      batchIds: visible.map(batch => ({ batchId: batch.id, displayNumber: batch.display_number })),
+    });
+  } catch (error) { return safeApiError(error, "Could not check for active batches."); }
+}
+
+// Only a recognized, expected conflict from
+// rpc/listing_studio_create_extension_batch is ever reported back as a
+// clean 409/validation-style response. Anything else (a missing
+// migration/function, malformed input, a database outage, a permission
+// problem) is genuinely unexpected and must fail the request safely and
+// visibly via safeApiError below, never silently absorbed here — same
+// discipline as lib/purchase-import/rpc-errors.ts's own classifyRpcError.
+function isDraftAlreadyActiveConflict(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("DRAFT_ALREADY_IN_ACTIVE_BATCH");
 }
 
 /**
@@ -75,6 +96,18 @@ export async function GET() {
  * fails a fresh server-side Ready re-check, the WHOLE request is rejected
  * with the specific reasons and NO batch is created — never a batch that
  * silently contains fewer items than the owner selected.
+ *
+ * Multi-batch support — creating this batch never touches, cancels, or
+ * supersedes any other batch: there is no "one active batch per owner"
+ * check anywhere in this route or the RPC it calls. The only thing that
+ * can reject creation (besides normal readiness) is a SPECIFIC selected
+ * draft already sitting in a different batch that is itself still live —
+ * checked and enforced atomically inside
+ * rpc/listing_studio_create_extension_batch (see supabase-listing-studio.sql),
+ * which also allocates this batch's reusable "Batch N" display number in
+ * the same atomic step. Two concurrent calls to this route (even for the
+ * same owner) can never both succeed for an overlapping draft set, and can
+ * never allocate the same display number — see that RPC's own comment.
  */
 export async function POST(request: Request) {
   try {
@@ -129,27 +162,30 @@ export async function POST(request: Request) {
 
     const pairingCode = generatePairingCode();
     const pairingCodeHash = hashPairingCode(pairingCode);
-    const nowIso = new Date().toISOString();
     const expiresAtIso = new Date(Date.now() + EXTENSION_BATCH_EXPIRY_SECONDS * 1000).toISOString();
 
-    const batchResponse = await supabaseRequest("vinted_extension_batches", {
-      method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        owner_id: user.id, pairing_code_hash: pairingCodeHash, status: "pending_claim",
-        listing_count: foundIds.length, created_at: nowIso, expires_at: expiresAtIso,
-      }),
-    });
-    const [batch] = await batchResponse.json() as { id: string }[];
-
-    await supabaseRequest("vinted_extension_batch_items", {
-      method: "POST", headers: { Prefer: "return=minimal" },
-      body: JSON.stringify(foundIds.map((draftId, index) => ({
-        batch_id: batch.id, draft_id: draftId, queue_position: index, status: "queued",
-      }))),
-    });
+    let created: { batch_id: string; display_number: number };
+    try {
+      const rpcResponse = await supabaseRequest("rpc/listing_studio_create_extension_batch", {
+        method: "POST",
+        body: JSON.stringify({
+          p_owner_id: user.id, p_pairing_code_hash: pairingCodeHash, p_expires_at: expiresAtIso, p_draft_ids: foundIds,
+        }),
+      });
+      const [row] = await rpcResponse.json() as { batch_id: string; display_number: number }[];
+      created = row;
+    } catch (error) {
+      if (isDraftAlreadyActiveConflict(error)) {
+        return NextResponse.json({
+          error: "One or more selected listings are already part of another active batch. Wait for that batch to finish, or choose different listings.",
+          rejected: [],
+        }, { status: 409 });
+      }
+      throw error;
+    }
 
     return NextResponse.json({
-      batchId: batch.id, pairingCode, expiresAt: expiresAtIso, listingCount: foundIds.length,
+      batchId: created.batch_id, displayNumber: created.display_number, pairingCode, expiresAt: expiresAtIso, listingCount: foundIds.length,
     });
   } catch (error) { return safeApiError(error, "Could not create a Chrome extension batch."); }
 }

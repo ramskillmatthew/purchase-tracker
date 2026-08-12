@@ -1630,3 +1630,209 @@ alter table public.vinted_extension_batch_items add column if not exists step_de
 -- Vinted has authoritatively confirmed the draft — never during export
 -- (export never sets it — see that section's own comment) and never
 -- merely because a batch item's status reached 'saving'.
+
+-- ============================================================================
+-- Multi-batch support — the single-batch restriction was never a database
+-- constraint (every extension-facing route already resolves its batch from
+-- the caller's own batch-scoped JWT, never "the owner's current batch" —
+-- see lib/listing-studio/extension-batch-tokens.ts). It was entirely a
+-- client-side limitation (one scalar activeBatchId in
+-- ListingsReviewWorkspace.tsx). This section adds the small amount of real
+-- schema this feature genuinely needs: a reusable display-number slot and
+-- two independent soft-dismiss timestamps, plus one new RPC that makes
+-- "check for a draft already in another live batch, allocate the next
+-- sequential-within-this-run display number, and insert the batch + its
+-- items" one atomic operation instead of the two sequential, unguarded
+-- REST inserts the create route used before.
+--
+-- Follow-up correction (live-caught): display_number allocation was
+-- originally "lowest free gap" (generate_series minus the occupied set).
+-- That is wrong for this feature's actual requirement — numbering must
+-- never move backwards within an active run, only ever resetting to 1
+-- once every box-visible batch is gone. It was replaced with a strictly
+-- sequential max(display_number)+1 (see the RPC's own comment on that
+-- line) specifically because gap-filling let long-abandoned, never-
+-- dismissed historical rows (box_dismissed_at still null) permanently
+-- squat on low numbers, making a brand-new batch jump to whatever gap
+-- happened to be free instead of continuing the run.
+-- ============================================================================
+
+-- browser_label: a best-effort, purely cosmetic display label the
+-- extension itself detects and reports at claim time (see
+-- lib/listing-studio/extension-batch-schema.ts's own comment on
+-- claimRequestSchema) — e.g. "Chrome"/"Brave"/"Edge". Never a security
+-- boundary (that remains the batch-scoped JWT alone) and never required —
+-- null simply means "not reported", and the UI falls back to showing just
+-- the batch's own display label with no browser attribution.
+alter table public.vinted_extension_batches add column if not exists browser_label text;
+
+-- display_number: the reusable "Batch N" UI slot (never the database
+-- identity — `id` remains that). Occupied for as long as box_dismissed_at
+-- is null, regardless of status (waiting/paired/processing/completed/
+-- failed/cancelled all keep their number). Nullable only so existing rows
+-- can be added without a default; every row gets a real value below.
+alter table public.vinted_extension_batches add column if not exists display_number integer;
+
+-- box_dismissed_at: when the batch's own box was dismissed via its ×
+-- control (terminal batches only — enforced in application code, not a
+-- constraint, matching how "only QUEUED items are cancelled" is enforced
+-- in app code elsewhere in this file). Non-null makes this batch's
+-- display_number available for reuse by a future batch, and excludes it
+-- from the batch-grid UI. Soft-dismiss only — the row itself, and every
+-- item under it, is never deleted or altered.
+alter table public.vinted_extension_batches add column if not exists box_dismissed_at timestamptz;
+
+-- activity_dismissed_at: independent of box_dismissed_at — hides this
+-- batch from the Live Activity panel (its filter button and its events
+-- under "All") without touching its batch box, its processing, or any
+-- stored result. A batch may have either, both, or neither dismissed.
+alter table public.vinted_extension_batches add column if not exists activity_dismissed_at timestamptz;
+
+-- Backfill for rows that already existed before this migration. The OLD
+-- single-batch UI's "Clear" button only ever reset client-side React
+-- state — it never wrote anything to this table — so without this
+-- backfill, every historical batch a user ever "cleared" would suddenly
+-- reappear as a live box the moment this ships. Only TERMINAL batches are
+-- backfilled as dismissed: a batch that is still genuinely non-terminal
+-- at migration time (the rare case of a batch actually in flight the
+-- moment this runs) is deliberately left un-dismissed, so it continues
+-- appearing exactly as it would have before this change, with a real
+-- display_number allocated to it below.
+update public.vinted_extension_batches
+  set box_dismissed_at = coalesce(completed_at, created_at), activity_dismissed_at = coalesce(completed_at, created_at)
+  where box_dismissed_at is null and status in ('completed', 'cancelled', 'expired');
+
+-- Any row still missing a display_number after the backfill above (every
+-- pre-migration terminal batch, now dismissed, never needs one; only a
+-- genuinely still-active pre-migration batch would reach here) gets one
+-- allocated per-owner, oldest first — matching "lowest available number,
+-- persisted, consistent across refreshes" for the one case where an
+-- owner could otherwise have more than one row needing a number at once.
+with numbered as (
+  select id, row_number() over (partition by owner_id order by created_at asc) as rn
+  from public.vinted_extension_batches
+  where display_number is null
+)
+update public.vinted_extension_batches b
+  set display_number = n.rn
+  from numbered n
+  where b.id = n.id;
+
+alter table public.vinted_extension_batches alter column display_number set not null;
+
+-- One allocated number per owner among the batches still occupying a slot
+-- (box_dismissed_at is null) — the same invariant the allocation RPC below
+-- maintains going forward. A plain (not partial) index would incorrectly
+-- forbid two DIFFERENT owners' batches from ever sharing the same number,
+-- or a dismissed batch's old number from ever being reused.
+create unique index if not exists vinted_extension_batches_owner_display_number_idx
+  on public.vinted_extension_batches (owner_id, display_number)
+  where box_dismissed_at is null;
+
+-- A draft may never sit in two batches that are BOTH still genuinely live
+-- at once. "Live" needs both the batch's own status AND this specific
+-- item's own status to be non-terminal (an item can be individually
+-- failed/cancelled while its batch as a whole is still in_progress with
+-- other items still running) — a condition spanning two tables' columns,
+-- which a plain index constraint can't express, so it's enforced inside
+-- the RPC below instead, guarded by a per-owner advisory lock so two
+-- concurrent creation attempts can never both pass the check.
+--
+-- Milestone: multi-batch support — replaces the two sequential, unguarded
+-- REST inserts (POST vinted_extension_batches, then POST
+-- vinted_extension_batch_items) the create route used before with one
+-- atomic call: check for a draft already in another live batch, allocate
+-- the lowest free display_number for this owner, and insert the batch and
+-- its items together. `pg_advisory_xact_lock` is keyed off the owner's own
+-- id (hashed to a bigint) and is transaction-scoped — released
+-- automatically when this function returns or raises — so it serializes
+-- every create-batch call for the SAME owner (including their very first
+-- batch ever, when there are no existing rows to lock) without blocking
+-- any other owner's calls, or any other kind of query, at all.
+create or replace function public.listing_studio_create_extension_batch(
+  p_owner_id uuid,
+  p_pairing_code_hash text,
+  p_expires_at timestamptz,
+  p_draft_ids uuid[]
+)
+returns table(batch_id uuid, display_number integer)
+language plpgsql
+as $$
+declare
+  v_batch_id uuid;
+  v_display_number integer;
+  v_conflicting_draft uuid;
+begin
+  if p_draft_ids is null or coalesce(array_length(p_draft_ids, 1), 0) = 0 then
+    raise exception 'NO_DRAFTS' using errcode = 'P0001';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext(p_owner_id::text));
+
+  select bi.draft_id into v_conflicting_draft
+  from public.vinted_extension_batch_items bi
+  join public.vinted_extension_batches b on b.id = bi.batch_id
+  where bi.draft_id = any(p_draft_ids)
+    and b.owner_id = p_owner_id
+    and b.status not in ('completed', 'cancelled', 'expired')
+    and bi.status not in ('completed', 'failed', 'cancelled')
+  limit 1;
+
+  if v_conflicting_draft is not null then
+    raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH' using errcode = 'P0002', detail = v_conflicting_draft::text;
+  end if;
+
+  -- Sequential-within-a-run numbering (NOT "lowest free gap"): the next
+  -- display_number is always ONE MORE than the highest number currently
+  -- occupied by a box-visible batch of this owner's — never backfilling a
+  -- gap left by an earlier dismissal. Numbering only ever resets to 1 once
+  -- NO box-visible batch remains for this owner (the aggregate's own
+  -- coalesce(..., 0) — an empty/null max — naturally yields 1). This is
+  -- deliberate, not an incidental side effect of the formula: within one
+  -- continuous run of concurrent/sequential batches, a display number must
+  -- never move backwards and reappear while a higher number is still
+  -- visible (see this migration's own follow-up comment on why the
+  -- earlier "lowest free gap" behaviour was wrong — historical
+  -- never-dismissed rows made a brand-new batch appear to jump straight
+  -- to an unrelated low gap number instead of continuing the run).
+  --
+  -- REGRESSION FIX (SQLSTATE 42702, "column reference display_number is
+  -- ambiguous"): this function's own RETURNS TABLE(batch_id uuid,
+  -- display_number integer) clause implicitly declares batch_id/
+  -- display_number as OUT parameters — i.e. plain PL/pgSQL variables in
+  -- scope for the ENTIRE function body, not just the final assignments
+  -- near the bottom. A bare, unqualified `display_number` inside a SQL
+  -- statement below is therefore ambiguous between that OUT parameter and
+  -- vinted_extension_batches.display_number, and Postgres refuses to
+  -- guess. Every reference to a real table's display_number column must
+  -- be qualified with an explicit table alias (ob below) to resolve
+  -- unambiguously to the COLUMN, never the OUT parameter — the OUT
+  -- parameter itself is only ever touched via plain `display_number :=
+  -- ...` assignment (see the bottom of this function), which is not a SQL
+  -- column reference and needs no qualification.
+  select coalesce(max(ob.display_number), 0) + 1 into v_display_number
+  from public.vinted_extension_batches ob
+  where ob.owner_id = p_owner_id and ob.box_dismissed_at is null;
+
+  insert into public.vinted_extension_batches (owner_id, pairing_code_hash, status, listing_count, created_at, expires_at, display_number)
+  values (p_owner_id, p_pairing_code_hash, 'pending_claim', array_length(p_draft_ids, 1), now(), p_expires_at, v_display_number)
+  returning id into v_batch_id;
+
+  insert into public.vinted_extension_batch_items (batch_id, draft_id, queue_position, status)
+  select v_batch_id, d, ord - 1, 'queued'
+  from unnest(p_draft_ids) with ordinality as t(d, ord);
+
+  batch_id := v_batch_id;
+  display_number := v_display_number;
+  return next;
+end;
+$$;
+
+-- Matches the existing table-level access pattern: the application only
+-- ever calls this via the service-role key, which is unaffected by these
+-- revokes. anon/authenticated are explicitly denied direct execution.
+revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from public;
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from anon; end if;
+  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from authenticated; end if;
+end $$;

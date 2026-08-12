@@ -115,9 +115,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
     // Batch-level completion: every item has reached a terminal status
     // (completed, failed, or cancelled) — success/failure detail lives on
     // the items themselves; this just means "nothing left to process".
+    //
+    // Race fix: the WHERE clause must exclude EVERY status this
+    // completion-detection PATCH shouldn't stomp on, not just
+    // "status=neq.completed". A batch can be concurrently cancelled by the
+    // owner (DELETE .../extension-batches/[batchId]) while this exact
+    // request is in flight; the old `status=neq.completed` clause still
+    // matched a freshly-cancelled row and would flip it back to
+    // "completed", silently erasing the cancellation. Restricting the
+    // match to the batch's own genuinely-still-open statuses makes this
+    // PATCH a no-op once cancellation (or an earlier completion) has
+    // already landed — whichever transition wins the race is the one that
+    // sticks, and it can never be overwritten by the loser.
     const allItems = await supabaseRequestAll<{ status: ExtensionBatchItemStatus }>(`vinted_extension_batch_items?batch_id=eq.${batchId}&select=status`);
     if (allItems.length > 0 && allItems.every(i => isTerminalItemStatus(i.status))) {
-      await supabaseRequest(`vinted_extension_batches?id=eq.${batchId}&status=neq.completed`, {
+      await supabaseRequest(`vinted_extension_batches?id=eq.${batchId}&status=in.(pending_claim,claimed,in_progress)`, {
         method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "completed", completed_at: nowIso }),
       }).catch(() => {});
     }

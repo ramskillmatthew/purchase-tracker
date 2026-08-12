@@ -177,10 +177,15 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
       expect(source).toContain("const filteredRows = useMemo(() => listingRows.filter(row => {");
     });
 
-    it("workflow status (and its secondary-line inputs) is layered on top of the base rows in its OWN memo (depends on batchStatus), so a 4s poll tick never re-runs the full base pipeline — only this small mapping", () => {
+    it("workflow status (and its secondary-line inputs) is layered on top of the base rows in its OWN memo (depends on liveItemByDraftId, itself derived from batchStatusById), so a 4s poll tick never re-runs the full base pipeline — only this small mapping", () => {
       expect(source).toContain("const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {");
-      expect(source).toContain("}), [baseListingRows, batchStatus]);");
-      expect(source).toContain("const queuePosition = liveItem ? liveItem.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;");
+      expect(source).toContain("}), [baseListingRows, liveItemByDraftId]);");
+      expect(source).toContain("const queuePosition = live ? live.item.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;");
+    });
+
+    it("multi-batch: liveItemByDraftId is its own memo keyed only on batchStatusById, so the per-draft live-status lookup is built once per poll cycle, not once per row", () => {
+      expect(source).toContain("const liveItemByDraftId = useMemo(() => {");
+      expect(source).toContain("}, [batchStatusById]);");
     });
 
     it("every handler passed down to a memoized child is itself useCallback'd (toggleQuickFilter, toggleBulkSelect, toggleSelectAll, openCarousel), so those children's memo() actually prevents unrelated re-renders", () => {
@@ -724,7 +729,7 @@ describe("app/api/listing-studio/listings-review/export/route.ts — Milestone 7
   });
 });
 
-describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extension' UI wiring", () => {
+describe("Milestone 7 (Chrome extension draft queue), extended for multi-batch support — 'Send to extension' UI wiring", () => {
   const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
   it("the button exists, calls handleSendToExtension, and is only rendered inside the bulk bar (bulkCount > 0), which now lives inside the table column", () => {
@@ -735,75 +740,95 @@ describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extensi
 
   it("enforces the 5-listing maximum (MAX_EXTENSION_BATCH_LISTINGS) both in the disabled condition and inside the handler itself", () => {
     expect(workspaceSource).toContain("import { MAX_EXTENSION_BATCH_LISTINGS } from \"@/lib/listing-studio/extension-batch-schema\"");
-    expect(workspaceSource).toMatch(/disabled=\{sendToExtensionRunning \|\| bulkCount > MAX_EXTENSION_BATCH_LISTINGS \|\| Boolean\(activeBatchId\)\}/);
+    expect(workspaceSource).toMatch(/disabled=\{sendToExtensionRunning \|\| bulkCount > MAX_EXTENSION_BATCH_LISTINGS\}/);
     expect(workspaceSource).toContain("if (ids.length > MAX_EXTENSION_BATCH_LISTINGS)");
   });
 
-  it("disables the button while a batch is already active (activeBatchId set) — prevents creating a second batch from the same selection", () => {
-    expect(workspaceSource).toMatch(/Boolean\(activeBatchId\)/);
+  it("REGRESSION (multi-batch support): the button is NEVER disabled by the existence of another batch — no Boolean(activeBatchId)-shaped condition, and no `const [activeBatchId, ...]` state, survives anywhere in this file, so a second (or third, or Nth) batch can always be sent without cancelling an existing one", () => {
+    expect(workspaceSource).not.toMatch(/Boolean\(activeBatchId\)/);
+    expect(workspaceSource).not.toMatch(/const \[activeBatchId,/);
   });
 
-  it("shows the pairing code and its real expiry (never a vague 'expires soon') once a batch is created", () => {
-    expect(workspaceSource).toContain("Pairing code:");
-    expect(workspaceSource).toContain("lr-pairing-code");
-    expect(workspaceSource).toContain("setPairingCode(body.pairingCode)");
-    expect(workspaceSource).toContain("formatRelativeMinutes(batchStatus.expiresAt)");
-    expect(workspaceSource).toContain("function formatRelativeMinutes(isoTimestamp: string): string {");
+  it("multi-batch: creating a batch adds its id to visibleBatchIds/batchMetaById/pairingCodeById — it never resets or replaces any other batch's entry in those maps", () => {
+    expect(workspaceSource).toContain("setVisibleBatchIds(current => new Set(current).add(batchId));");
+    expect(workspaceSource).toContain("setBatchMetaById(current => new Map(current).set(batchId, { displayNumber: body.displayNumber, browserLabel: null }));");
+    expect(workspaceSource).toContain("setPairingCodeById(current => new Map(current).set(batchId, body.pairingCode));");
   });
 
-  it("shows whether the extension has claimed the batch (claimedAt) distinctly from the pre-claim pairing-code view — the strip collapses further once claimed (no code/instruction needed anymore)", () => {
-    expect(workspaceSource).toContain("!batchStatus?.claimedAt");
-    expect(workspaceSource).toContain("Extension is processing your batch");
+  it("shows the pairing code and its real expiry (never a vague 'expires soon') once a batch is created — now rendered per-batch by ExtensionBatchGrid", () => {
+    const gridSource = read("components/listings-review/ExtensionBatchGrid.tsx");
+    expect(gridSource).toContain("Waiting for pairing");
+    expect(gridSource).toContain("lr-pairing-code");
+    expect(gridSource).toContain("formatRelativeMinutes(box.expiresAt)");
+    expect(gridSource).toContain("function formatRelativeMinutes(isoTimestamp: string): string {");
+  });
+
+  it("shows whether the extension has claimed a batch (claimed/in_progress) distinctly from the pre-claim pairing-code view, per box — ExtensionBatchGrid.tsx", () => {
+    const gridSource = read("components/listings-review/ExtensionBatchGrid.tsx");
+    expect(gridSource).toContain('box.status === "claimed" || box.status === "in_progress"');
+    expect(gridSource).toContain("Processing —");
   });
 
   it("displays live per-item progress via the table's own Workflow column and Live Activity — the old inline per-item queue list is gone, not duplicated", () => {
     expect(workspaceSource).not.toContain("batchStatus.items.map(item =>");
-    expect(workspaceSource).toContain("const liveItem = batchStatus?.items.find(item => item.draftId === row.id);");
+    expect(workspaceSource).toContain("const live = liveItemByDraftId.get(row.id);");
     expect(workspaceSource).toContain("item.errorMessage");
   });
 
-  it("polls the owner-authenticated batch-status endpoint (never the extension's bearer-token one) on a bounded cadence, and stops polling once the batch is terminal", () => {
-    expect(workspaceSource).toContain("fetch(`/api/listing-studio/extension-batches/${activeBatchId}`)");
+  it("polls the owner-authenticated batch-status endpoint (never the extension's bearer-token one) on a bounded cadence, in parallel for every tracked batch, and stops polling a batch once IT is terminal", () => {
+    expect(workspaceSource).toContain("fetch(`/api/listing-studio/extension-batches/${id}`)");
     expect(workspaceSource).toContain("timeoutId = setTimeout(poll, 4000);");
-    expect(workspaceSource).toContain("isBatchStatusTerminal(body.status)");
+    expect(workspaceSource).toContain("!isBatchStatusTerminal(known.status);");
     expect(workspaceSource).toContain("if (timeoutId !== undefined) clearTimeout(timeoutId);");
   });
 
-  // REGRESSION (Listings Review final-item workflow-status bug): the poll
-  // used to be a setInterval whose callback checked a `batchStatus` value
-  // read from the enclosing effect's closure — frozen at whatever it was
-  // when the effect first ran (always null), since the effect deliberately
-  // never re-runs on a batchStatus change. The intended "stop once
-  // terminal" check therefore never actually fired via that mechanism. The
-  // fix replaces the interval with a self-rescheduling poll that decides
-  // using the batch status it JUST fetched (`body.status`), never a value
-  // frozen in a stale closure, and only ever schedules the next poll AFTER
-  // that response has already been merged into state via setBatchStatus —
-  // so a batch can never be treated as reconciled in the UI, and polling
-  // can never stop, until every item's terminal state (including the final
-  // item's) has already been applied.
-  it("REGRESSION: decides whether to keep polling using the just-fetched response, not a value frozen in a stale closure — and only after that response has already been applied", () => {
+  // REGRESSION (Listings Review final-item workflow-status bug, generalised
+  // for multi-batch): the poll used to be a setInterval whose callback
+  // checked a `batchStatus` value read from the enclosing effect's closure
+  // — frozen at whatever it was when the effect first ran, since the
+  // effect deliberately never re-ran on a batchStatus change. The fix
+  // replaced the interval with a self-rescheduling poll that decides using
+  // the response it JUST fetched, never a value frozen in a stale closure.
+  // Generalised to multi-batch: every batch's own result is merged via
+  // applyBatchResult (setBatchStatusById) BEFORE the next cycle is ever
+  // scheduled, so no batch can be treated as reconciled in the UI, and
+  // polling can never stop for it, until its own terminal state has
+  // already been applied.
+  it("REGRESSION: every batch's result is applied to state before the next poll cycle is scheduled — never a value frozen in a stale closure", () => {
     expect(workspaceSource).not.toContain("setInterval(");
     expect(workspaceSource).not.toContain("clearInterval(");
     const pollFnStart = workspaceSource.indexOf("async function poll() {");
     const pollFnEnd = workspaceSource.indexOf("\n    poll();", pollFnStart);
     const pollFn = workspaceSource.slice(pollFnStart, pollFnEnd);
-    expect(pollFn).toContain("setBatchStatus(body);");
-    expect(pollFn).toContain("if (!cancelled && !isBatchStatusTerminal(body.status)) {");
-    // The authoritative merge must happen BEFORE the decision to keep
-    // polling — never the reverse, which could stop polling before the
-    // final item's terminal state (carried in that same response) was
-    // ever applied to local state.
-    expect(pollFn.indexOf("setBatchStatus(body);")).toBeLessThan(pollFn.indexOf("isBatchStatusTerminal(body.status)"));
+    expect(pollFn).toContain("applyBatchResult(result.id, result.body);");
+    expect(pollFn).toContain("if (!cancelled) timeoutId = setTimeout(poll, 4000);");
+    // The authoritative per-batch merge must happen BEFORE the next cycle
+    // is scheduled — never the reverse, which could schedule the next
+    // fetch before a just-arrived terminal state was ever applied.
+    expect(pollFn.indexOf("applyBatchResult(result.id, result.body);")).toBeLessThan(pollFn.lastIndexOf("timeoutId = setTimeout(poll, 4000);"));
   });
 
-  it("REGRESSION: a stale/out-of-order poll response can never overwrite a newer, already-applied one", () => {
+  it("REGRESSION: a stale/out-of-order poll CYCLE (one cycle = every tracked batch fetched in parallel) can never overwrite a newer, already-applied one", () => {
     expect(workspaceSource).toContain("shouldApplyBatchPollResponse(appliedSeq, seq)");
     expect(workspaceSource).toContain("appliedSeq = seq;");
   });
 
+  it("multi-batch: the poll loop only starts/stops based on whether ANY batch is visible (hasVisibleBatches) — it does not restart every time a single batch is added or removed while already running", () => {
+    expect(workspaceSource).toContain("const hasVisibleBatches = visibleBatchIds.size > 0;");
+    expect(workspaceSource).toContain("}, [hasVisibleBatches]);");
+    expect(workspaceSource).toContain("if (!hasVisibleBatches) return;");
+  });
+
+  it("a 404 for one batch during a poll cycle drops ONLY that batch from tracking — every other batch's own result in the same cycle is still applied normally", () => {
+    const pollFnStart = workspaceSource.indexOf("async function poll() {");
+    const pollFnEnd = workspaceSource.indexOf("\n    poll();", pollFnStart);
+    const pollFn = workspaceSource.slice(pollFnStart, pollFnEnd);
+    expect(pollFn).toContain("if (result.status === 404) {");
+    expect(pollFn).toContain("continue;");
+  });
+
   it("a rejected batch-creation request never clears the current selection, and shows the specific rejected listings", () => {
-    const fn = workspaceSource.slice(workspaceSource.indexOf("async function handleSendToExtension"), workspaceSource.indexOf("async function handleCancelExtensionBatch"));
+    const fn = workspaceSource.slice(workspaceSource.indexOf("async function handleSendToExtension"), workspaceSource.indexOf("const handleCancelBatch"));
     expect(fn).not.toContain("setBulkSelectedIds(new Set())");
     expect(workspaceSource).toContain("setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : [])");
   });
@@ -817,10 +842,10 @@ describe("Milestone 7 (Chrome extension draft queue) — 'Send to Chrome extensi
     expect(workspaceSource).toContain("body: JSON.stringify({ draftIds: ids })");
   });
 
-  it("allows cancelling the batch via the owner-authenticated cancel route, and clearing a finished batch resets local state", () => {
-    expect(workspaceSource).toContain("method: \"DELETE\"");
-    expect(workspaceSource).toContain("function handleClearExtensionBatch()");
-    expect(workspaceSource).toContain("setActiveBatchId(null)");
+  it("multi-batch: cancels a SPECIFIC batch via its immutable id (handleCancelBatch), and dismissing a terminal batch's box (handleDismissBatchBox) removes it from local box-grid state without touching its activity", () => {
+    expect(workspaceSource).toContain('await fetch(`/api/listing-studio/extension-batches/${batchId}`, { method: "DELETE" })');
+    expect(workspaceSource).toContain("const handleDismissBatchBox = useCallback(async (batchId: string) => {");
+    expect(workspaceSource).toContain('setVisibleBatchIds(current => { const next = new Set(current); next.delete(batchId); return next; });');
   });
 
   it("REGRESSION: the ZIP export feature (a separate, already-existing action) is untouched — both actions coexist in the same bulk bar", () => {
@@ -979,10 +1004,10 @@ describe("Polish pass — the bottom-right toast/notification system was removed
 describe("Visual-accuracy redesign — activity events are derived from GENUINE transitions only (ListingsReviewWorkspace.tsx)", () => {
   const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("resets tracking (previousItemsRef, batchCompletionLoggedRef) whenever activeBatchId changes — a fresh batch never inherits a prior batch's diff state", () => {
-    const fn = source.slice(source.indexOf("useEffect(() => {\n    if (!activeBatchId) return;"), source.indexOf("async function poll()"));
-    expect(fn).toContain("previousItemsRef.current = null;");
-    expect(fn).toContain("batchCompletionLoggedRef.current = false;");
+  it("multi-batch: tracking is per-batch (previousItemsByBatchRef keyed by batchId, completedBatchesLoggedRef a Set of batchIds) — a fresh batch's own first poll never inherits another batch's diff state, since a batch missing from the map is treated as 'no poll observed yet' for THAT batch only", () => {
+    expect(source).toContain("const previousItemsByBatchRef = useRef<Map<string, Map<string, ExtensionBatchItemStatusRow>>>(new Map());");
+    expect(source).toContain("const completedBatchesLoggedRef = useRef<Set<string>>(new Set());");
+    expect(source).toContain("const previousItems = previousItemsByBatchRef.current.get(batchId) ?? null;");
   });
 
   it("the FIRST poll for a batch only seeds tracking and emits exactly one real 'sent' event (timestamped with the batch's own real createdAt) — never fabricates started/completed/failed events for state it never actually observed transitioning", () => {
@@ -1002,15 +1027,22 @@ describe("Visual-accuracy redesign — activity events are derived from GENUINE 
     expect(source).toContain("updatedDetailByEventId.has(event.id) ? { ...event, detail: updatedDetailByEventId.get(event.id) ?? null }");
   });
 
-  it("REGRESSION: batch completion — previously shown ONLY via the now-removed toast — now gets a real Live Activity event instead of silently disappearing, fired at most once per batch via the same guard ref the toast used to use", () => {
-    expect(source).toContain('if (body.status === "completed" && !batchCompletionLoggedRef.current) {');
-    expect(source).toContain("batchCompletionLoggedRef.current = true;");
+  it("REGRESSION: batch completion — previously shown ONLY via the now-removed toast — now gets a real Live Activity event instead of silently disappearing, fired at most once PER BATCH via completedBatchesLoggedRef (a Set, not a single boolean — so completing Batch 1 can never suppress Batch 2's own completion event)", () => {
+    expect(source).toContain('if (body.status === "completed" && !completedBatchesLoggedRef.current.has(batchId)) {');
+    expect(source).toContain("completedBatchesLoggedRef.current.add(batchId);");
     expect(source).toContain("tone: \"success\", message: `Batch completed — ${savedCount} item${savedCount === 1 ? \"\" : \"s\"} saved to Vinted drafts`");
   });
 
-  it("REGRESSION: a page load with no active batch never touches activityEvents at all — the polling effect (the only place it's ever set) early-returns when activeBatchId is null", () => {
-    const effectStart = source.indexOf("useEffect(() => {\n    if (!activeBatchId) return;");
+  it("REGRESSION: a page load with no visible batch never touches activityEvents at all — the single owner-scoped polling effect (the only place it's ever set) early-returns when hasVisibleBatches is false", () => {
+    const effectStart = source.indexOf("useEffect(() => {\n    if (!hasVisibleBatches) return;");
     expect(effectStart).toBeGreaterThan(-1);
+  });
+
+  it("every synthesised event carries its own immutable batchId, plus the batchLabel/browserLabel resolved at the moment it was created — never re-derived later from a possibly-reused display number", () => {
+    expect(source).toContain('const batchLabel = `Batch ${displayNumber}`;');
+    expect(source).toContain("id: `${body.batchId}:sent`, batchId, batchLabel, browserLabel,");
+    expect(source).toContain("id: `${item.itemId}:completed`, batchId, batchLabel, browserLabel,");
+    expect(source).toContain("id: `${item.itemId}:failed`, batchId, batchLabel, browserLabel,");
   });
 });
 
@@ -1123,25 +1155,32 @@ describe("Visual-accuracy redesign — historical workflow status survives reloa
   });
 });
 
-describe("Correction pass — a genuinely gone batch clears stale UI state rather than displaying it forever", () => {
+describe("Correction pass, generalised for multi-batch — a genuinely gone batch clears ONLY its own stale UI state rather than displaying it forever", () => {
   const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("a 404 from the batch-status poll resets activeBatchId/pairingCode/batchStatus — never leaves a stale pairing code or 'processing' strip with no way to recover", () => {
-    expect(source).toContain("if (response.status === 404) { setActiveBatchId(null); setPairingCode(null); setBatchStatus(null); return; }");
+  it("a 404 for one batch during a poll cycle drops only that batch's id from visibleBatchIds/batchStatusById/pairingCodeById — every other tracked batch is left completely untouched, never leaving a stale pairing code or 'processing' box with no way to recover", () => {
+    const pollFnStart = source.indexOf("async function poll() {");
+    const pollFnEnd = source.indexOf("\n    poll();", pollFnStart);
+    const pollFn = source.slice(pollFnStart, pollFnEnd);
+    expect(pollFn).toContain("if (result.status === 404) {");
+    expect(pollFn).toContain("setVisibleBatchIds(current => { const next = new Set(current); next.delete(result.id); return next; });");
+    expect(pollFn).toContain("setBatchStatusById(current => { const next = new Map(current); next.delete(result.id); return next; });");
+    expect(pollFn).toContain("setPairingCodeById(current => { const next = new Map(current); next.delete(result.id); return next; });");
   });
 });
 
-describe("Correction pass — resume tracking after a reload (root-cause fix)", () => {
+describe("Correction pass, generalised for multi-batch — resume tracking after a reload (root-cause fix)", () => {
   const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("on mount, if nothing is already tracked this session, checks for an in-flight batch from an earlier session and resumes it", () => {
-    expect(source).toContain("if (activeBatchId) return;");
+  it("on mount, resumes EVERY visible batch from an earlier session (not just one) — populates visibleBatchIds and batchMetaById from every {batchId, displayNumber} entry the resume endpoint returns", () => {
     expect(source).toContain('fetch("/api/listing-studio/extension-batches")');
-    expect(source).toContain("if (!cancelled && body.activeBatchId) setActiveBatchId(body.activeBatchId);");
+    expect(source).toContain("const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[] };");
+    expect(source).toContain("for (const entry of body.batchIds) next.add(entry.batchId);");
+    expect(source).toContain("for (const entry of body.batchIds) if (!next.has(entry.batchId)) next.set(entry.batchId, { displayNumber: entry.displayNumber, browserLabel: null });");
   });
 
-  it("runs exactly once on mount (empty dependency array) — never re-checks on every activeBatchId change, which would defeat its own guard", () => {
-    const effectIndex = source.indexOf('if (activeBatchId) return;\n    let cancelled = false;\n    (async () => {');
+  it("runs exactly once on mount (empty dependency array) — a same-session batch creation (which only ever ADDS to visibleBatchIds, never clears it first) can never be clobbered by this effect running after it", () => {
+    const effectIndex = source.indexOf("useEffect(() => {\n    let cancelled = false;\n    (async () => {\n      try {\n        const response = await fetch(\"/api/listing-studio/extension-batches\");");
     expect(effectIndex).toBeGreaterThan(-1);
     const effectBlock = source.slice(effectIndex, source.indexOf("}, []);", effectIndex) + 8);
     expect(effectBlock).toContain('fetch("/api/listing-studio/extension-batches")');
@@ -1271,32 +1310,57 @@ describe("Visual-accuracy redesign — dense table fits without horizontal scrol
   });
 });
 
-describe("Visual-accuracy redesign — compact pairing strip (never a large panel, collapses further once claimed)", () => {
+describe("Multi-batch support — batch box grid replaces the old single compact pairing strip (components/listings-review/ExtensionBatchGrid.tsx)", () => {
   const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const gridSource = read("components/listings-review/ExtensionBatchGrid.tsx");
 
-  it("three distinct states exist: pre-claim (code + hint + expiry + Cancel), claimed-in-progress (minimal, no code), terminal (Clear only)", () => {
-    expect(workspaceSource).toContain("Extension is processing your batch");
-    expect(workspaceSource).toContain("<span>Batch {batchStatus.status}</span>");
-    expect(workspaceSource).toContain('onClick={handleClearExtensionBatch}>Clear</button>');
+  it("the workspace renders ONE ExtensionBatchGrid fed every visible batch's view model — never a per-batch strip repeated by hand in the workspace's own JSX", () => {
+    expect(workspaceSource).toContain("import ExtensionBatchGrid, { type BatchBoxViewModel } from \"./ExtensionBatchGrid\";");
+    expect(workspaceSource).toContain("<ExtensionBatchGrid");
+    expect(workspaceSource).toContain("batches={batchBoxViewModels}");
   });
 
-  // REGRESSION (live-caught 2026-08-11): a batch cancelled before it was
-  // ever claimed has claimedAt stuck at null forever — the terminal branch
-  // must be checked BEFORE the claimedAt branch, or the strip is left
-  // showing a dead pairing code indefinitely instead of collapsing to the
-  // terminal "Batch cancelled" + Clear state.
-  it("REGRESSION: checks terminal status (completed/cancelled/expired) before claimedAt, so a batch cancelled pre-claim still collapses to the terminal state", () => {
-    const terminalCheckIndex = workspaceSource.indexOf('isBatchStatusTerminal(batchStatus.status) ? <>');
-    const claimedAtCheckIndex = workspaceSource.indexOf("!batchStatus?.claimedAt ? <>");
-    expect(terminalCheckIndex).toBeGreaterThan(-1);
-    expect(claimedAtCheckIndex).toBeGreaterThan(-1);
-    expect(terminalCheckIndex).toBeLessThan(claimedAtCheckIndex);
+  it("each box has 4 distinct states: preparing (no poll yet), pre-claim (code + hint + expiry + Cancel), claimed-in-progress (minimal, no code), terminal (× dismiss + summary, no Cancel)", () => {
+    expect(gridSource).toContain("Preparing batch…");
+    expect(gridSource).toContain("Waiting for pairing");
+    expect(gridSource).toContain("Processing —");
+    expect(gridSource).toContain("terminalSummary(box)");
   });
 
-  it("is a single compact strip (one CSS class, flex row), never a bordered card with its own large padding, and no longer repeats the safety badge (which now lives permanently in the page's own top line)", () => {
+  // REGRESSION (live-caught 2026-08-11, still true per-box after the
+  // multi-batch rewrite): a batch cancelled before it was ever claimed has
+  // claimedAt stuck at null forever — terminal status must still decide
+  // the box's branch before "waiting for pairing"/"claimed", or a box
+  // would be left showing a dead pairing code indefinitely instead of
+  // collapsing to its terminal summary + × state.
+  it("REGRESSION: a box's terminal branch is independent of (checked ahead of) its pairing/claimed branches, so a batch cancelled pre-claim still renders its terminal summary, not a dead pairing code", () => {
+    expect(gridSource).toContain("const isTerminal = !isPending && isBatchStatusTerminal(box.status);");
+    const bodyIndex = gridSource.indexOf("return <div className={`lr-batch-box");
+    const isTerminalJsxIndex = gridSource.indexOf("{isTerminal && <p className=\"lr-batch-box-status\">{terminalSummary(box)}</p>}");
+    expect(bodyIndex).toBeGreaterThan(-1);
+    expect(isTerminalJsxIndex).toBeGreaterThan(bodyIndex);
+  });
+
+  it("terminal summaries are correctly pluralised and distinguish completed-with-failures from a clean completion, never collapsing both into the same generic wording", () => {
+    expect(gridSource).toContain('function pluralize(count: number, noun: string): string {');
+    expect(gridSource).toMatch(/if \(box\.failedCount === 0\) return `Completed — \$\{pluralize\(box\.completedCount, "listing"\)\} saved to Vinted drafts\.`;/);
+    expect(gridSource).toContain('return `Completed — ${box.completedCount} of ${box.listingCount} saved, ${pluralize(box.failedCount, "failed")}.`;');
+  });
+
+  it("boxes are laid out as a two-column grid (never pagination/arrows), collapsing to one column on narrow screens, using the same existing card/border/spacing/type language as every other card on this page — not a copy of unrelated navigation/summary-card styling", () => {
     const css = read("app/globals.css");
-    expect(css).toMatch(/\.lr-pairing-strip \{[^}]*padding: 7px 12px;/);
-    expect(workspaceSource).not.toMatch(/lr-pairing-strip"[^>]*>\s*<span className="lr-safety-badge"/);
+    expect(css).toContain(".lr-batch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }");
+    expect(css).toMatch(/@media \(max-width: 1023px\) \{[\s\S]*?\.lr-batch-grid \{ grid-template-columns: 1fr; \}/);
+    expect(css).toContain(".lr-batch-box { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface-raised);");
+  });
+
+  it("renders nothing at all once every batch has been dismissed — no empty grid element left behind, matching the old strip's own render-nothing-when-empty behaviour", () => {
+    expect(gridSource).toContain("if (batches.length === 0) return null;");
+  });
+
+  it("does not repeat the permanent safety badge, which now lives only in the page's own top line", () => {
+    expect(gridSource).not.toContain("Drafts only");
+    expect(workspaceSource).not.toMatch(/lr-batch-grid[^>]*>\s*<span className="lr-safety-badge"/);
   });
 });
 
@@ -1450,24 +1514,29 @@ describe("Production-polish pass — inspector auto-selects the first visible li
   });
 });
 
-describe("Production-polish pass — pairing banner: copy button, monospace code, self-clearing confirmation", () => {
+describe("Production-polish pass, extended for multi-batch — pairing display: copy button, monospace code, self-clearing confirmation, PER BATCH", () => {
   const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+  const gridSource = read("components/listings-review/ExtensionBatchGrid.tsx");
   const css = read("app/globals.css");
 
-  it("copies the real pairing code to the clipboard via the standard Clipboard API", () => {
-    expect(source).toContain("async function handleCopyPairingCode() {");
-    expect(source).toContain("await navigator.clipboard.writeText(pairingCode);");
+  it("copies a SPECIFIC batch's real pairing code to the clipboard via the standard Clipboard API, keyed by its immutable batch id", () => {
+    expect(source).toContain("const handleCopyPairingCode = useCallback(async (batchId: string) => {");
+    expect(source).toContain("const code = pairingCodeById.get(batchId);");
+    expect(source).toContain("await navigator.clipboard.writeText(code);");
   });
 
-  it("shows a short, self-clearing 'Copied' confirmation rather than a permanent state change", () => {
-    expect(source).toContain("setCodeCopied(true);");
-    expect(source).toContain("window.setTimeout(() => setCodeCopied(false), 1600);");
-    expect(source).toContain('{codeCopied ? "Copied" : "Copy"}');
+  it("shows a short, self-clearing 'Copied' confirmation scoped to only the batch whose Copy button was just clicked — copying Batch 1's code never shows 'Copied' on Batch 2's box", () => {
+    expect(source).toContain("setCodeCopiedBatchId(batchId);");
+    expect(source).toContain("window.setTimeout(() => setCodeCopiedBatchId(current => (current === batchId ? null : current)), 1600);");
+    expect(gridSource).toContain('{box.codeCopied ? "Copied" : "Copy"}');
   });
 
-  it("resets the copied flag whenever a fresh pairing code is issued, so a stale 'Copied' can never survive into a new batch", () => {
-    const fn = source.slice(source.indexOf("setPairingCode(body.pairingCode);"), source.indexOf("setPairingCode(body.pairingCode);") + 150);
-    expect(fn).toContain("setCodeCopied(false);");
+  it("each box computes its own codeCopied flag by comparing its own batchId against codeCopiedBatchId — never a single shared boolean that could show 'Copied' on the wrong box", () => {
+    expect(source).toContain("const codeCopied = codeCopiedBatchId === id;");
+  });
+
+  it("resets codeCopiedBatchId whenever a fresh batch is created, so a stale 'Copied' can never survive into a new batch", () => {
+    expect(source).toContain("setCodeCopiedBatchId(null);");
   });
 
   it("the code uses a real, explicit monospace font stack and never looks like a plain native text selection", () => {
@@ -1475,9 +1544,9 @@ describe("Production-polish pass — pairing banner: copy button, monospace code
     expect(css).toContain("user-select: all;");
   });
 
-  it("existing drafts-only safety wording and single-use pairing behaviour are both retained", () => {
+  it("existing drafts-only safety wording (page-level, permanent) and single-use pairing behaviour wording (per box, while waiting) are both retained", () => {
     expect(source).toContain("Drafts only — never publishes");
-    expect(source).toContain("single use");
+    expect(gridSource).toContain("single use");
   });
 });
 
@@ -1529,5 +1598,124 @@ describe("REGRESSION (superseded) — the malformed green/blue floating control 
 
   it("the entire toast system that carried the collision is gone — there is no .lr-toast-progress, .lr-toast-dismiss-bar, or any other .lr-toast-* rule left to ever collide again", () => {
     expect(css).not.toMatch(/\.lr-toast[a-z-]*\s*\{/);
+  });
+});
+
+describe("Multi-batch support — components/listings-review/ExtensionBatchGrid.tsx: per-box detail", () => {
+  const source = read("components/listings-review/ExtensionBatchGrid.tsx");
+
+  it("is memo()'d and takes only already-resolved view models — never fetches, polls, or holds its own batch state", () => {
+    expect(source).toContain("export default memo(ExtensionBatchGrid);");
+    expect(source).not.toMatch(/fetch\(/);
+    expect(source).not.toMatch(/useState|useEffect/);
+  });
+
+  it("shows the browser/client label as a small badge only when known — never a fabricated one when the batch hasn't been claimed yet", () => {
+    expect(source).toContain('{box.browserLabel && <span className="lr-batch-box-browser">{box.browserLabel}</span>}');
+  });
+
+  it("each box's header carries a real aria-label naming its own display number — screen readers can distinguish boxes without relying on visual position alone", () => {
+    expect(source).toContain('role="group" aria-label={`Batch ${box.displayNumber}`}');
+  });
+
+  it("the dismiss control is only rendered for a terminal box, carries a batch-specific aria-label, and calls onDismissBox with THIS box's own immutable batchId", () => {
+    expect(source).toContain('{isTerminal && <button type="button" className="lr-batch-box-dismiss" aria-label={`Dismiss Batch ${box.displayNumber} box`} onClick={() => onDismissBox(box.batchId)}>');
+  });
+
+  it("Cancel is offered in both the waiting-for-pairing and claimed/in-progress states, always scoped to this box's own batchId — never a generic cancel-current-batch action", () => {
+    const pairingCancel = source.slice(source.indexOf("isWaitingForPairing && <div"), source.indexOf("isClaimed && <div"));
+    const claimedCancel = source.slice(source.indexOf("isClaimed && <div"), source.indexOf("isTerminal && <p"));
+    expect(pairingCancel).toContain("onClick={() => onCancel(box.batchId)}>Cancel</button>");
+    expect(claimedCancel).toContain("onClick={() => onCancel(box.batchId)}>Cancel batch</button>");
+  });
+
+  it("Cancel is never offered once a box is terminal — a finished batch has nothing left to cancel", () => {
+    const terminalBlock = source.slice(source.indexOf('{isTerminal && <p className="lr-batch-box-status">'));
+    expect(terminalBlock).not.toContain("onCancel(box.batchId)");
+  });
+
+  it("a cancelled batch's terminal summary reports both what completed before cancelling AND what was left unfinished, never just one or the other", () => {
+    expect(source).toContain("const parts = [`${box.completedCount} completed before cancelling`];");
+    expect(source).toContain("if (unfinished > 0) parts.push(`${unfinished} not finished`);");
+  });
+
+  it("an expired (never-claimed) batch gets its own distinct terminal wording, not lumped in with cancelled", () => {
+    expect(source).toContain('if (box.status === "expired") return "Expired — this batch was never claimed by the extension.";');
+  });
+});
+
+describe("Multi-batch support — components/listings-review/DraftActivityPanel.tsx: All/Batch filters + per-batch dismiss", () => {
+  const source = read("components/listings-review/DraftActivityPanel.tsx");
+
+  it("accepts filters/selectedFilter/onSelectFilter/onDismissActivity as props — the panel itself only renders what the parent already computed, never deriving the batch list itself", () => {
+    expect(source).toContain("filters: ActivityBatchFilter[];");
+    expect(source).toContain("selectedFilter: string;");
+    expect(source).toContain("onSelectFilter: (filter: string) => void;");
+    expect(source).toContain("onDismissActivity: (batchId: string) => void;");
+  });
+
+  it("All is always the first filter button and is not itself part of the filters prop — selecting it never depends on any specific batchId existing", () => {
+    expect(source).toContain('onClick={() => onSelectFilter("all")}>All</button>');
+  });
+
+  it("renders one filter button per batch in filters, using the label the parent already resolved — never inventing its own label text from a raw batchId", () => {
+    expect(source).toContain("{filters.map(f => <button key={f.batchId}");
+    expect(source).toContain("onClick={() => onSelectFilter(f.batchId)}>{f.label}</button>");
+  });
+
+  it("the filter row is entirely absent when there are no batches yet — never an empty All-only row with nothing to filter", () => {
+    expect(source).toContain('{filters.length > 0 && <div className="lr-activity-filters"');
+  });
+
+  it("the Dismiss-activity action only appears when a real, still-listed batch filter is selected — never for All, and never for a filter that's already been removed from the list", () => {
+    expect(source).toContain('{selectedFilter !== "all" && filters.some(f => f.batchId === selectedFilter) && <button type="button" className="lr-activity-dismiss-batch" onClick={() => onDismissActivity(selectedFilter)}>');
+  });
+
+  it("every event row is attributed with its own batch label (and browser label when known) — never presented as anonymous/unattributed activity", () => {
+    expect(source).toContain('<span className="lr-activity-batch-tag">{event.batchLabel}{event.browserLabel ? ` · ${event.browserLabel}` : ""}</span>');
+  });
+
+  it("filter buttons use role=tab/aria-selected — a real, accessible tab-like control, not an unlabelled clickable div", () => {
+    expect(source).toContain('role="tablist" aria-label="Filter activity by batch"');
+    expect(source).toContain('role="tab" aria-selected={selectedFilter === "all"}');
+  });
+});
+
+describe("Multi-batch support, follow-up correction — box dismissal now ALSO dismisses that same batch's activity (one-directional coupling, prevents duplicate Live Activity labels); activity-alone dismissal remains fully independent of the box", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("handleDismissBatchBox touches box-grid state (visibleBatchIds/batchStatusById/pairingCodeById) AND activity state (activityDismissedBatchIds/activityFilter) — a terminal box's × now dismisses its own activity too, so its display number can never be reallocated while its old activity is still visible under the same label", () => {
+    const start = workspaceSource.indexOf("const handleDismissBatchBox = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start) + 8);
+    expect(fn).toContain('action: "dismiss_box"');
+    expect(fn).toContain("setActivityDismissedBatchIds(current => new Set(current).add(batchId));");
+    expect(fn).toContain('setActivityFilter(current => (current === batchId ? "all" : current));');
+  });
+
+  it("handleDismissBatchActivity only ever touches activity state (activityDismissedBatchIds/activityFilter) — it never touches visibleBatchIds/batchStatusById, so dismissing a batch's activity ALONE can never cancel or hide its box/processing", () => {
+    const start = workspaceSource.indexOf("const handleDismissBatchActivity = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start) + 8);
+    expect(fn).toContain('action: "dismiss_activity"');
+    expect(fn).not.toContain("setVisibleBatchIds");
+    expect(fn).not.toContain("setBatchStatusById");
+  });
+
+  it("dismissing activity (via either path) resets the selected filter back to All only when the just-dismissed batch was the one selected — dismissing an unselected batch's activity never disturbs the current filter", () => {
+    const matches = workspaceSource.match(/setActivityFilter\(current => \(current === batchId \? "all" : current\)\);/g) ?? [];
+    // Present in BOTH handlers now — handleDismissBatchActivity (its own
+    // original behaviour) and handleDismissBatchBox (the new coupling).
+    expect(matches.length).toBe(2);
+  });
+
+  it("a reused display number can never mix a new batch's activity with an old, dismissed batch's — activityDismissedBatchIds and every activity event are keyed by the immutable batchId, never by displayNumber", () => {
+    expect(workspaceSource).toContain("const [activityDismissedBatchIds, setActivityDismissedBatchIds] = useState<Set<string>>(new Set());");
+    expect(workspaceSource).not.toMatch(/activityDismissedBatchIds.*displayNumber/);
+  });
+
+  it("REGRESSION: dismissing a batch's box never deletes its history — handleDismissBatchBox's server call is a PATCH (soft dismiss), never a DELETE", () => {
+    const start = workspaceSource.indexOf("const handleDismissBatchBox = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start) + 8);
+    expect(fn).toContain('method: "PATCH"');
+    expect(fn).not.toContain('method: "DELETE"');
   });
 });

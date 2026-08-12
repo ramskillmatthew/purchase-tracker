@@ -1,15 +1,23 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 
+const BOX_DISMISSIBLE_STATUSES = new Set(["completed", "cancelled", "expired"]);
+
+const dismissRequestSchema = z.object({
+  action: z.enum(["dismiss_box", "dismiss_activity"]),
+}).strict();
+
 export const runtime = "nodejs";
 
 type BatchRow = {
-  id: string; status: string; listing_count: number;
+  id: string; status: string; listing_count: number; display_number: number;
   created_at: string; claimed_at: string | null; expires_at: string; completed_at: string | null;
-  extension_id: string | null; extension_version: string | null;
+  extension_id: string | null; extension_version: string | null; browser_label: string | null;
+  box_dismissed_at: string | null; activity_dismissed_at: string | null;
 };
 type ItemRow = {
   id: string; draft_id: string; queue_position: number; status: string; attempt_count: number;
@@ -36,7 +44,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ bat
 
     const batches = await supabaseRequestAll<BatchRow>(
       `vinted_extension_batches?id=eq.${batchId}&owner_id=eq.${user.id}`
-      + `&select=id,status,listing_count,created_at,claimed_at,expires_at,completed_at,extension_id,extension_version`,
+      + `&select=id,status,listing_count,display_number,created_at,claimed_at,expires_at,completed_at,extension_id,extension_version,browser_label,box_dismissed_at,activity_dismissed_at`,
     );
     const batch = batches[0];
     if (!batch) return NextResponse.json({ error: "Batch not found." }, { status: 404 });
@@ -67,9 +75,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ bat
     const titlesByDraftId = new Map(draftTitles.map(d => [d.id, d]));
 
     return NextResponse.json({
-      batchId: batch.id, status: batch.status, listingCount: batch.listing_count,
+      batchId: batch.id, status: batch.status, listingCount: batch.listing_count, displayNumber: batch.display_number,
       createdAt: batch.created_at, claimedAt: batch.claimed_at, expiresAt: batch.expires_at, completedAt: batch.completed_at,
-      extensionId: batch.extension_id, extensionVersion: batch.extension_version,
+      extensionId: batch.extension_id, extensionVersion: batch.extension_version, browserLabel: batch.browser_label,
+      boxDismissedAt: batch.box_dismissed_at, activityDismissedAt: batch.activity_dismissed_at,
       items: items.map(item => ({
         itemId: item.id, draftId: item.draft_id, queuePosition: item.queue_position, status: item.status,
         attemptCount: item.attempt_count, errorCode: item.error_code, errorMessage: item.error_message,
@@ -113,4 +122,79 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 
     return NextResponse.json({ batchId, status: "cancelled" });
   } catch (error) { return safeApiError(error, "Could not cancel this batch."); }
+}
+
+/**
+ * Multi-batch support — the "×" on a batch box (dismiss_box) and the
+ * "Dismiss Batch N activity" action in Live Activity (dismiss_activity)
+ * both ultimately set the existing box_dismissed_at/activity_dismissed_at
+ * columns added in supabase-listing-studio.sql. Neither ever deletes the
+ * batch, its items, or any draft/Vinted-draft data — both are purely
+ * "hide from this view" flags an owner can only ever set (never unset)
+ * via this route, which is exactly the same soft-dismiss convention
+ * already used elsewhere in this schema.
+ *
+ * dismiss_box is only permitted once the batch is genuinely terminal — a
+ * still-live batch's box can't be dismissed out from under it — and now
+ * ALSO sets activity_dismissed_at, in the SAME guarded UPDATE, i.e.
+ * genuinely atomically at the database level (single SQL statement, not
+ * two sequential requests). This is a deliberate follow-up correction:
+ * dismiss_box also frees this batch's display_number for reuse by a
+ * FUTURE batch (the partial unique index only counts rows where
+ * box_dismissed_at is null — see that index's own comment), and if its
+ * Live Activity entry survived independently, a later batch could be
+ * allocated the exact same display number while this batch's own old
+ * activity was still showing under that same "Batch N" label — two
+ * distinct immutable batches, one visible label, which is exactly the
+ * duplicate-button bug this closes. Dismissing the activity ALONE (via
+ * dismiss_activity, unchanged below) still never touches the box or
+ * cancels/affects processing in any way — that direction of independence
+ * is preserved; only "dismiss the box" now also dismisses that SAME
+ * batch's own activity, never the other way around.
+ *
+ * dismiss_activity has no status restriction — hiding a still-processing
+ * batch's Live Activity rows must never affect its processing, per the
+ * explicit requirement that activity-dismissal and batch
+ * cancellation/completion are unrelated.
+ *
+ * Both branches use a conditional PATCH guarded on the flag being the
+ * action's own primary gate (box_dismissed_at=is.null / activity_dismissed_at=is.null)
+ * so a retried or repeated dismiss call is naturally idempotent — a
+ * second call simply matches zero rows instead of erroring or
+ * double-writing.
+ */
+export async function PATCH(request: Request, { params }: { params: Promise<{ batchId: string }> }) {
+  try {
+    const user = await requireOwner();
+    const { batchId } = await params;
+    if (!uuidSchema.safeParse(batchId).success) return NextResponse.json({ error: "Invalid batch id." }, { status: 400 });
+    const { action } = dismissRequestSchema.parse(await request.json());
+
+    const batches = await supabaseRequestAll<{ id: string; status: string }>(
+      `vinted_extension_batches?id=eq.${batchId}&owner_id=eq.${user.id}&select=id,status`,
+    );
+    const batch = batches[0];
+    if (!batch) return NextResponse.json({ error: "Batch not found." }, { status: 404 });
+
+    if (action === "dismiss_box") {
+      if (!BOX_DISMISSIBLE_STATUSES.has(batch.status)) {
+        return NextResponse.json({ error: "This batch is still active and can't be dismissed yet." }, { status: 409 });
+      }
+      const nowIso = new Date().toISOString();
+      // Combined terminal-box dismissal: box_dismissed_at AND
+      // activity_dismissed_at are set together in this ONE conditional
+      // UPDATE — see this function's own doc comment above.
+      await supabaseRequest(`vinted_extension_batches?id=eq.${batchId}&owner_id=eq.${user.id}&box_dismissed_at=is.null`, {
+        method: "PATCH", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ box_dismissed_at: nowIso, activity_dismissed_at: nowIso }),
+      });
+    } else {
+      await supabaseRequest(`vinted_extension_batches?id=eq.${batchId}&owner_id=eq.${user.id}&activity_dismissed_at=is.null`, {
+        method: "PATCH", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ activity_dismissed_at: new Date().toISOString() }),
+      });
+    }
+
+    return NextResponse.json({ batchId, action });
+  } catch (error) { return safeApiError(error, "Could not update this batch."); }
 }

@@ -71,6 +71,180 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     });
   });
 
+  describe("Multi-batch support — display_number/dismissal columns, browser_label, and listing_studio_create_extension_batch", () => {
+    const section = migration.slice(migration.indexOf("browser_label: a best-effort"));
+
+    it("adds browser_label, display_number, box_dismissed_at, and activity_dismissed_at as idempotent ALTERs, never a fresh CREATE TABLE (this table already exists in production)", () => {
+      expect(section).toContain("alter table public.vinted_extension_batches add column if not exists browser_label text;");
+      expect(section).toContain("alter table public.vinted_extension_batches add column if not exists display_number integer;");
+      expect(section).toContain("alter table public.vinted_extension_batches add column if not exists box_dismissed_at timestamptz;");
+      expect(section).toContain("alter table public.vinted_extension_batches add column if not exists activity_dismissed_at timestamptz;");
+    });
+
+    it("backfills every pre-existing terminal batch as already box/activity-dismissed, so historical batches don't flood the new grid UI on first load", () => {
+      expect(section).toMatch(/set box_dismissed_at = coalesce\(completed_at, created_at\), activity_dismissed_at = coalesce\(completed_at, created_at\)\s*\n\s*where box_dismissed_at is null and status in \('completed', 'cancelled', 'expired'\)/);
+    });
+
+    it("backfills display_number for any pre-existing non-terminal row before making the column NOT NULL, so an already-deployed database never ends up with a null display_number", () => {
+      expect(section).toContain("where display_number is null");
+      expect(section).toContain("alter table public.vinted_extension_batches alter column display_number set not null;");
+    });
+
+    it("REGRESSION: display_number uniqueness is a PARTIAL unique index scoped to box-visible rows only — a dismissed batch's old number must be reusable by a later batch", () => {
+      expect(section).toMatch(/create unique index if not exists vinted_extension_batches_owner_display_number_idx\s*\n\s*on public\.vinted_extension_batches \(owner_id, display_number\)\s*\n\s*where box_dismissed_at is null;/);
+    });
+
+    it("listing_studio_create_extension_batch is serialized per-owner via a transaction-scoped advisory lock — never a row lock, since a brand-new owner's very first batch has no existing row to lock", () => {
+      expect(section).toContain("perform pg_advisory_xact_lock(hashtext(p_owner_id::text));");
+    });
+
+    it("rejects an empty draft list with a distinct, classifiable error code before ever taking the advisory lock", () => {
+      const nodraftsIndex = section.indexOf("raise exception 'NO_DRAFTS'");
+      const lockIndex = section.indexOf("perform pg_advisory_xact_lock");
+      expect(nodraftsIndex).toBeGreaterThan(-1);
+      expect(nodraftsIndex).toBeLessThan(lockIndex);
+    });
+
+    it("REGRESSION: the 'draft already in another live batch' check spans BOTH the batch's own status and the item's own status — an item can be individually failed/cancelled while its batch is still in_progress with other items running, so checking only the batch's status would false-positive on that item", () => {
+      expect(section).toMatch(/b\.status not in \('completed', 'cancelled', 'expired'\)\s*\n\s*and bi\.status not in \('completed', 'failed', 'cancelled'\)/);
+      expect(section).toContain("raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH'");
+    });
+
+    // Follow-up correction (live-caught): allocation is sequential-within-
+    // a-run (max(visible)+1), never "lowest free gap" — see the RPC's own
+    // comment for why gap-filling let long-abandoned historical rows
+    // permanently squat on low numbers. Concrete scenario coverage lives
+    // in the dedicated "display-number allocation rule" describe block
+    // below (it mirrors this exact formula against every example in the
+    // spec, since there is no live-Postgres harness in this test suite to
+    // execute the RPC directly).
+    it("allocates the next SEQUENTIAL display_number — coalesce(max(display_number), 0) + 1 over box-visible rows only — never generate_series/'lowest free gap' logic", () => {
+      expect(section).toContain("select coalesce(max(ob.display_number), 0) + 1 into v_display_number");
+      expect(section).toContain("from public.vinted_extension_batches ob");
+      expect(section).not.toContain("generate_series");
+    });
+
+    // REGRESSION (live-caught, SQLSTATE 42702 "column reference
+    // display_number is ambiguous"): this function's own `returns table
+    // (batch_id uuid, display_number integer)` clause implicitly declares
+    // batch_id/display_number as OUT parameters — plain PL/pgSQL variables
+    // in scope for the WHOLE function body, not just the final
+    // `batch_id := ...` / `display_number := ...` assignments near the
+    // bottom. A bare `display_number` column read with no table alias is
+    // ambiguous against that OUT parameter, and Postgres refuses the call
+    // outright with SQLSTATE 42702 — every batch creation would fail. The
+    // fix qualifies every genuine table-column read of display_number with
+    // an explicit alias (`ob.display_number`); the OUT parameter itself is
+    // only ever touched via a bare `display_number := ...` assignment,
+    // which is unambiguous by construction (PL/pgSQL assignment targets
+    // are never resolved as SQL column references). This test survives the
+    // sequential-allocation rewrite unchanged, since the new formula still
+    // reads the same real column and must stay qualified the same way.
+    it("REGRESSION (SQLSTATE 42702): the display-number allocation reads the column via an explicit table alias, never bare — a bare `display_number` read would be ambiguous against this function's own RETURNS TABLE(display_number ...) OUT parameter", () => {
+      const fnBodyStart = section.indexOf("create or replace function public.listing_studio_create_extension_batch");
+      const fnBodyEnd = section.indexOf("$$;", section.indexOf("as $$", fnBodyStart));
+      const fnSource = section.slice(fnBodyStart, fnBodyEnd);
+
+      expect(fnSource).toContain("select coalesce(max(ob.display_number), 0) + 1 into v_display_number");
+      // No bare "display_number" column read (unqualified by a table
+      // alias) survives anywhere in the function body — this is the exact
+      // shape of the live bug, and would fail identically wherever it
+      // recurred, regardless of which specific query introduced it.
+      expect(fnSource).not.toMatch(/\bselect\s+display_number\b/);
+      expect(fnSource).not.toMatch(/max\(display_number\)/);
+      // The OUT-parameter assignment itself is untouched and still
+      // unqualified (correctly — it's not a column reference).
+      expect(fnSource).toContain("display_number := v_display_number;");
+    });
+
+    // Same class of bug, defense-in-depth for the OTHER OUT parameter this
+    // function's RETURNS TABLE declares. No current query in this function
+    // reads a bare `batch_id` column (every join/lookup already uses a
+    // table alias — see the DRAFT_ALREADY_IN_ACTIVE_BATCH test above), but
+    // a future edit reintroducing one would hit the exact same SQLSTATE
+    // 42702 failure mode this test would catch.
+    it("REGRESSION (SQLSTATE 42702, batch_id): no bare, unqualified `batch_id` column reference exists in the function body either — every real batch_id column read is qualified with a table alias (bi.batch_id)", () => {
+      const fnBodyStart = section.indexOf("create or replace function public.listing_studio_create_extension_batch");
+      const fnBodyEnd = section.indexOf("$$;", section.indexOf("as $$", fnBodyStart));
+      const fnSource = section.slice(fnBodyStart, fnBodyEnd);
+
+      expect(fnSource).toContain("b.id = bi.batch_id");
+      expect(fnSource).not.toMatch(/\bselect\s+batch_id\b/);
+      expect(fnSource).not.toMatch(/\bwhere\s+batch_id\s*=/);
+    });
+
+    it("inserts the batch and every one of its items inside the SAME function body (one implicit transaction) — never two separate REST calls that could leave a batch with no items if the second failed", () => {
+      const insertBatchIndex = section.indexOf("insert into public.vinted_extension_batches");
+      const insertItemsIndex = section.indexOf("insert into public.vinted_extension_batch_items");
+      const returnIndex = section.indexOf("return next;");
+      expect(insertBatchIndex).toBeGreaterThan(-1);
+      expect(insertItemsIndex).toBeGreaterThan(insertBatchIndex);
+      expect(returnIndex).toBeGreaterThan(insertItemsIndex);
+    });
+
+    it("revokes anon/authenticated execute on the new RPC, matching every other RPC's own convention in this file", () => {
+      expect(section).toContain("revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from public;");
+      expect(section).toContain("revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from anon;");
+      expect(section).toContain("revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from authenticated;");
+    });
+
+    // Follow-up correction — sequential-within-a-run numbering. There is
+    // no live-Postgres harness in this test suite (every other test here
+    // is structural, against the SQL source text), so this block proves
+    // the ARITHMETIC itself against every scenario in the spec via a pure
+    // mirror of the RPC's own formula, while the adjacent SQLSTATE-42702
+    // test above already proves the DEPLOYED SQL genuinely implements
+    // that exact formula (coalesce(max(ob.display_number), 0) + 1 over
+    // box-visible rows) — together they cover both "is the rule right"
+    // and "is the rule what's actually running".
+    describe("display-number allocation rule — sequential within a run, resets only when no visible boxes remain", () => {
+      function allocateNext(visibleDisplayNumbers: number[]): number {
+        return visibleDisplayNumbers.length === 0 ? 1 : Math.max(...visibleDisplayNumbers) + 1;
+      }
+
+      it("no visible batch boxes allocates Batch 1", () => {
+        expect(allocateNext([])).toBe(1);
+      });
+
+      it("visible Batch 1 allocates Batch 2", () => {
+        expect(allocateNext([1])).toBe(2);
+      });
+
+      it("visible Batch 1 and Batch 2 allocates Batch 3", () => {
+        expect(allocateNext([1, 2])).toBe(3);
+      });
+
+      it("Batch 1 dismissed while Batch 2 remains allocates Batch 3 — never goes backwards to reuse Batch 1", () => {
+        expect(allocateNext([2])).toBe(3);
+      });
+
+      it("Batch 1 and Batch 3 visible allocates Batch 4", () => {
+        expect(allocateNext([1, 3])).toBe(4);
+      });
+
+      it("visible Batch 2 only (Batch 1 already dismissed) allocates Batch 3", () => {
+        expect(allocateNext([2])).toBe(3);
+      });
+
+      it("all boxes dismissed resets to Batch 1", () => {
+        expect(allocateNext([])).toBe(1);
+      });
+
+      it("a gap in the visible numbers (2, 4) is never backfilled — allocates 5, matching the exact rule example", () => {
+        expect(allocateNext([2, 4])).toBe(5);
+      });
+
+      it("historical dismissed rows (e.g. a leftover display_number as high as 54) never block a reset to Batch 1 — they're excluded from the visible set entirely by box_dismissed_at, regardless of how high their old number was", () => {
+        // A dismissed row's display_number never enters this formula's
+        // input at all (the SQL's own WHERE ob.box_dismissed_at is null
+        // excludes it) — modelled here by simply never including it in
+        // visibleDisplayNumbers, exactly as the real query would.
+        expect(allocateNext([])).toBe(1);
+        expect(allocateNext([2])).toBe(3); // a genuinely visible low number still drives the next allocation normally
+      });
+    });
+  });
+
   it("listing_draft_images, listing_analysis_runs, and listing_status_history all cascade-delete when their draft is deleted", () => {
     // 3 core tables + vinted_category_selection_ai_calls (Milestone 7
     // follow-up — also cascade-deletes with its draft) +

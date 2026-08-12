@@ -178,12 +178,14 @@ describe("Listings Review final-item sync bug — ordering, idempotency, and sta
 });
 
 describe("Listings Review final-item sync bug — draft IDs stay associated with the correct listing (never array-index/off-by-one)", () => {
-  it("the live-item lookup keys by draftId equality, never by array position — proven directly against the component source", () => {
+  it("the live-item lookup keys by draftId equality, never by array position — proven directly against the component source (multi-batch: now built once, across every tracked batch, into a Map keyed by draftId — liveItemByDraftId — instead of a per-row .find() scan, but the key is still draftId equality)", () => {
     const source = readFileSync("components/listings-review/ListingsReviewWorkspace.tsx", "utf8");
-    expect(source).toContain("const liveItem = batchStatus?.items.find(item => item.draftId === row.id);");
-    // Never indexes into items[] by position (which would silently
-    // misattribute results if the server ever reordered them).
-    expect(source).not.toMatch(/batchStatus\.items\[[^\]]*\]/);
+    expect(source).toContain("const existing = map.get(item.draftId);");
+    expect(source).toContain("map.set(item.draftId, { item, batch });");
+    expect(source).toContain("const live = liveItemByDraftId.get(row.id);");
+    // Never indexes into a batch's items[] by position (which would
+    // silently misattribute results if the server ever reordered them).
+    expect(source).not.toMatch(/\.items\[[^\]]*\]/);
   });
 
   it("a shuffled items array still resolves each row to its own, correct draft id and status", () => {

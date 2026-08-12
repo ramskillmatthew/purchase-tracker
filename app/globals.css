@@ -1526,11 +1526,27 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 
 .lr-export-rejected { margin: 6px 0 0; padding-left: 18px; font-size: 10px; }
 
-/* Compact contextual pairing strip — one line, never a large card;
-   collapses to even less once the extension has claimed the batch. The
-   permanent safety badge now lives in .lr-topline, so this never repeats
-   it. */
-.lr-pairing-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 7px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface-raised); color: var(--lr-muted); font-size: 10.5px; }
+/* Multi-batch support — replaces the old single-line pairing strip with a
+   two-column grid of independent batch boxes. Each box reuses the exact
+   card/border/spacing/type language already established by every other
+   card on this page (.lr-kpi, .lr-activity-panel) — never a copy of the
+   concept image's own unrelated navigation/summary-card styling. Renders
+   nothing (no grid element at all) once no batch is visible, exactly like
+   the old strip. */
+.lr-batch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lr-batch-box { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--lr-surface-raised); color: var(--lr-muted); font-size: 10.5px; }
+.lr-batch-box-terminal { background: var(--lr-surface); }
+.lr-batch-box-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lr-batch-box-title { display: flex; align-items: center; gap: 6px; color: var(--lr-text); font-size: 11px; font-weight: 700; }
+.lr-batch-box-browser { padding: 1px 7px; border-radius: 999px; background: var(--lr-violet-soft); color: var(--lr-violet); font-size: 9px; font-weight: 700; }
+.lr-batch-box-dismiss { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--lr-muted); font-size: 14px; line-height: 1; }
+.lr-batch-box-dismiss:hover { color: var(--lr-text); background: var(--lr-surface); }
+.lr-batch-box-body { display: flex; flex-direction: column; gap: 6px; }
+.lr-batch-box-status { margin: 0; color: var(--lr-text); font-size: 10.5px; }
+.lr-batch-box-hint { margin: 0; color: var(--lr-muted); font-size: 9.5px; }
+.lr-batch-box-current-item { overflow: hidden; margin: 0; color: var(--lr-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.lr-batch-box-pairing { display: flex; align-items: center; gap: 8px; }
+.lr-batch-box-cancel { align-self: flex-start; min-height: 24px; padding: 0 10px; font-size: 9.5px; }
 /* Proper monospace treatment (explicit font stack, not just relying on
    the browser's own <code> default) plus a deliberate, code-chip-looking
    background/border — never a plain highlighted-text appearance that
@@ -1538,11 +1554,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-pairing-code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 4px; background: var(--lr-surface); border: 1px solid var(--lr-border); color: var(--lr-text); user-select: all; }
 .lr-pairing-copy { min-height: 22px; padding: 0 8px; border: 1px solid var(--lr-border); border-radius: 5px; color: var(--lr-muted); background: var(--lr-surface); font-size: 9.5px; font-weight: 700; }
 .lr-pairing-copy:hover { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-text) 25%, var(--lr-border)); }
-.lr-pairing-hint { flex: 1 1 auto; min-width: 160px; }
 .lr-pairing-expiry { color: var(--lr-muted); font-size: 9.5px; white-space: nowrap; }
-.lr-pairing-cancel { margin-left: auto; min-height: 26px; padding: 0 10px; font-size: 9.5px; }
-.lr-pairing-clear { margin-left: auto; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10px; font-weight: 700; }
-.lr-pairing-clear:hover { text-decoration: underline; }
 
 .lr-bulk-message { padding: 9px 14px; border: 1px solid var(--lr-border); border-radius: 8px; color: var(--lr-text); background: var(--lr-surface-raised); font-size: 11px; }
 .lr-empty-explanation { max-width: 520px; margin: 12px 0 0; color: var(--lr-muted); font-size: 11px; line-height: 1.6; }
@@ -1754,6 +1766,19 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-activity-view-all { flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10.5px; font-weight: 700; }
 .lr-activity-view-all:hover { text-decoration: underline; }
 
+/* Multi-batch support — the "All | Batch 1 | Batch 2 | …" filter row and
+   the compact per-batch "Dismiss … activity" action. The row scrolls
+   horizontally on its own (never expanding the panel/page) once there are
+   enough batch buttons to overflow it — matching this file's established
+   "wide content gets its own overflow-x container" convention. */
+.lr-activity-filters { display: flex; overflow-x: auto; flex: 0 0 auto; gap: 4px; scrollbar-width: thin; }
+.lr-activity-filter-btn { flex: 0 0 auto; padding: 3px 9px; border: 1px solid var(--lr-border); border-radius: 999px; color: var(--lr-muted); background: var(--lr-surface); font-size: 9.5px; font-weight: 650; white-space: nowrap; }
+.lr-activity-filter-btn:hover { color: var(--lr-text); }
+.lr-activity-filter-btn.active { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-violet) 40%, var(--lr-border)); background: var(--lr-violet-soft); }
+.lr-activity-dismiss-batch { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10px; font-weight: 700; }
+.lr-activity-dismiss-batch:hover { text-decoration: underline; }
+.lr-activity-batch-tag { color: var(--lr-muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+
 /* Polish pass — the bottom-right toast stack (.lr-toast-*) was removed
    entirely from Listings Review: every event it ever showed (draft
    started/in-progress detail, item drafted, draft failed, batch
@@ -1798,6 +1823,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 @media (max-width: 1023px) {
   .lr-workspace { grid-template-columns: 1fr; }
   .lr-inspector { position: static; }
+  .lr-batch-grid { grid-template-columns: 1fr; }
 }
 
 /* Positioned after every base rule above (equal-specificity CSS resolves

@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ListingsFilterBar, { type TopTab } from "./ListingsFilterBar";
 import ListingsTable, { type ListingTableRow } from "./ListingsTable";
 import ListingDetailsPanel, { type ListingDetails } from "./ListingDetailsPanel";
-import DraftActivityPanel, { type ActivityEvent } from "./DraftActivityPanel";
+import DraftActivityPanel, { type ActivityEvent, type ActivityBatchFilter } from "./DraftActivityPanel";
+import ExtensionBatchGrid, { type BatchBoxViewModel } from "./ExtensionBatchGrid";
 import PhotoCarouselDialog from "./PhotoCarouselDialog";
 import EditListingFieldsDialog, { type ListingFieldsDraft } from "@/components/listing-studio/EditListingFieldsDialog";
 import PreviewListingDialog from "@/components/listing-studio/PreviewListingDialog";
@@ -34,9 +35,10 @@ type ExtensionBatchItemStatusRow = {
   generatedTitle: string | null; sku: string | null;
 };
 type ExtensionBatchStatus = {
-  batchId: string; status: string; listingCount: number;
+  batchId: string; status: string; listingCount: number; displayNumber: number;
   createdAt: string; claimedAt: string | null; expiresAt: string; completedAt: string | null;
-  extensionId: string | null; extensionVersion: string | null;
+  extensionId: string | null; extensionVersion: string | null; browserLabel: string | null;
+  boxDismissedAt: string | null; activityDismissedAt: string | null;
   items: ExtensionBatchItemStatusRow[];
 };
 
@@ -105,15 +107,6 @@ async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item
     while ((next = queue.shift())) await task(next);
   });
   await Promise.all(workers);
-}
-
-// Listings Review redesign — the real pairing-code expiry, shown in the
-// compact pairing strip. Never a vague "expires soon" once a real
-// timestamp is available.
-function formatRelativeMinutes(isoTimestamp: string): string {
-  const minutes = Math.round((new Date(isoTimestamp).getTime() - Date.now()) / 60000);
-  if (minutes <= 0) return "any moment now";
-  return `in ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 /**
@@ -194,25 +187,50 @@ export default function ListingsReviewWorkspace() {
   const [exportError, setExportError] = useState("");
   const [exportRejected, setExportRejected] = useState<RejectedExportListing[]>([]);
 
-  // Milestone 7 (Chrome extension draft queue) — "Send to Chrome
-  // extension" creates a short-lived, single-use pairing batch server-side
-  // (app/api/listing-studio/extension-batches/route.ts) and then polls its
-  // status (a separate, owner-authenticated endpoint — never the bearer-
-  // token one the extension itself uses) so this panel shows live
-  // progress without the app ever talking to Vinted or the extension
-  // directly. activeBatchId is the only thing that needs to survive a
-  // re-render; everything else is re-derived from the latest poll.
+  // Milestone 7 (Chrome extension draft queue), extended for multi-batch
+  // support — "Send to extension" creates a short-lived, single-use
+  // pairing batch server-side (app/api/listing-studio/extension-batches/
+  // route.ts) and then polls its status (a separate, owner-authenticated
+  // endpoint — never the bearer-token one the extension itself uses) so
+  // this panel shows live progress without the app ever talking to Vinted
+  // or the extension directly.
+  //
+  // Multi-batch support — replaces the old single activeBatchId/
+  // pairingCode/batchStatus scalars with per-batch maps, all keyed by the
+  // batch's own immutable database id (NEVER its reusable display
+  // number). Every batch is independent: creating, polling, cancelling, or
+  // dismissing one never reads or writes any other batch's entry.
   const [sendToExtensionRunning, setSendToExtensionRunning] = useState(false);
   const [sendToExtensionError, setSendToExtensionError] = useState("");
   const [sendToExtensionRejected, setSendToExtensionRejected] = useState<RejectedExportListing[]>([]);
-  const [pairingCode, setPairingCode] = useState<string | null>(null);
-  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
-  const [batchStatus, setBatchStatus] = useState<ExtensionBatchStatus | null>(null);
+  // visibleBatchIds — every batch currently shown in the box grid (i.e.
+  // its box hasn't been dismissed). Membership here is the ONLY thing that
+  // controls whether a batch is still being polled.
+  const [visibleBatchIds, setVisibleBatchIds] = useState<Set<string>>(new Set());
+  // batchMetaById — append-only for the whole page session (dismissing a
+  // box never removes an entry): the immutable batchId -> its reusable
+  // display number and (once known) browser label. This is what lets Live
+  // Activity keep attributing old events to the correct batch even after
+  // that batch's own box has been dismissed — box-dismissal and
+  // activity-dismissal are fully independent (see the requirements this
+  // feature was built against).
+  const [batchMetaById, setBatchMetaById] = useState<Map<string, { displayNumber: number; browserLabel: string | null }>>(new Map());
+  // batchStatusById — the latest poll result for every currently-visible
+  // batch; removed only when that batch's box is dismissed (a resumed-but-
+  // not-yet-polled, or just-created-but-not-yet-polled, batch is present in
+  // visibleBatchIds without yet having an entry here — rendered as a brief
+  // "Preparing…" box rather than an empty gap in the grid).
+  const [batchStatusById, setBatchStatusById] = useState<Map<string, ExtensionBatchStatus>>(new Map());
+  // pairingCodeById — a pairing code is only ever known in plaintext once,
+  // in this exact response, to the session that just created the batch
+  // (see extension-batches/route.ts's own comment) — never re-fetched, so
+  // a batch resumed from an earlier page load simply has no entry here and
+  // its box shows "Waiting for the extension to claim this batch…" with no
+  // literal code, same graceful degradation the single-batch version had.
+  const [pairingCodeById, setPairingCodeById] = useState<Map<string, string>>(new Map());
   // Production-polish pass — a short, self-clearing "Copied" confirmation
-  // for the pairing-code copy button. Purely cosmetic local state, reset
-  // whenever a fresh code is issued so a stale "Copied" can never survive
-  // into a new batch.
-  const [codeCopied, setCodeCopied] = useState(false);
+  // for whichever batch's pairing-code copy button was just clicked.
+  const [codeCopiedBatchId, setCodeCopiedBatchId] = useState<string | null>(null);
 
   // Listings Review redesign — a session-only projection, never persisted
   // (see DraftActivityPanel.tsx's own comment): one real event per genuine
@@ -227,14 +245,38 @@ export default function ListingsReviewWorkspace() {
   // for the removed component. Batch completion, which the toast used to
   // be the ONLY place showing, now gets its own real activity event
   // instead of silently disappearing.
+  //
+  // Multi-batch support — every event now also carries the batchId it
+  // belongs to (see DraftActivityPanel.tsx's own comment on ActivityEvent).
+  // activityDismissedBatchIds is the independent "hide this batch's
+  // activity" flag (persisted server-side as activity_dismissed_at, seeded
+  // from it on resume/poll so a dismissal survives a page refresh even
+  // though the events array itself is session-only); activityFilter is the
+  // currently-selected Live Activity filter ("all" or one immutable
+  // batchId).
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
-  // previousItemsRef holds the PRIOR poll's items for the currently active
-  // batch, keyed by itemId — null means "no poll observed yet for this
-  // batch", which deliberately suppresses event synthesis on the very
-  // first poll (we can't tell what changed relative to a snapshot we've
-  // never seen, so nothing is fabricated — see the polling effect below).
-  const previousItemsRef = useRef<Map<string, ExtensionBatchItemStatusRow> | null>(null);
-  const batchCompletionLoggedRef = useRef(false);
+  const [activityDismissedBatchIds, setActivityDismissedBatchIds] = useState<Set<string>>(new Set());
+  const [activityFilter, setActivityFilter] = useState<string>("all");
+  // previousItemsByBatchRef holds the PRIOR poll's items PER BATCH, keyed
+  // by batchId then itemId — a batch missing from this map means "no poll
+  // observed yet for this batch", which deliberately suppresses event
+  // synthesis on that batch's very first poll (we can't tell what changed
+  // relative to a snapshot we've never seen, so nothing is fabricated —
+  // see the polling effect below). completedBatchesLoggedRef is the
+  // per-batch equivalent of the old single batchCompletionLoggedRef.
+  const previousItemsByBatchRef = useRef<Map<string, Map<string, ExtensionBatchItemStatusRow>>>(new Map());
+  const completedBatchesLoggedRef = useRef<Set<string>>(new Set());
+  // Mirrors of the two membership sets above, kept in sync via effects
+  // just below, so the single perpetual poll loop (which intentionally
+  // never restarts just because a batch was added/removed — see that
+  // effect's own comment) always reads the CURRENT membership rather than
+  // whatever it happened to close over when it last (re)started.
+  const visibleBatchIdsRef = useRef<Set<string>>(new Set());
+  const batchStatusByIdRef = useRef<Map<string, ExtensionBatchStatus>>(new Map());
+  const batchMetaByIdRef = useRef<Map<string, { displayNumber: number; browserLabel: string | null }>>(new Map());
+  useEffect(() => { visibleBatchIdsRef.current = visibleBatchIds; }, [visibleBatchIds]);
+  useEffect(() => { batchStatusByIdRef.current = batchStatusById; }, [batchStatusById]);
+  useEffect(() => { batchMetaByIdRef.current = batchMetaById; }, [batchMetaById]);
 
   const loadListings = useCallback(async () => {
     try {
@@ -252,25 +294,37 @@ export default function ListingsReviewWorkspace() {
   }, []);
   useEffect(() => { loadListings(); }, [loadListings]);
 
-  // Listings Review redesign — root-cause fix: resume tracking a batch
-  // that's still genuinely in flight from an EARLIER page load (the
-  // extension keeps working regardless of whether this tab is open).
-  // Runs once, only when nothing is already being tracked in this session
-  // — never overrides an activeBatchId this session itself just set via
-  // handleSendToExtension.
+  // Listings Review redesign — root-cause fix: resume tracking every
+  // batch that's still genuinely visible (in flight, or terminal but not
+  // yet dismissed) from an EARLIER page load (the extension keeps working
+  // regardless of whether this tab is open). Runs once, on mount.
+  //
+  // Multi-batch support — resumes ALL of them, not just one; never
+  // overrides a batch this session itself already knows about via
+  // handleSendToExtension (a fresh POST always adds its new id, it never
+  // clears visibleBatchIds first, so there's nothing here for this effect
+  // to clobber even if it runs after a same-session creation).
   useEffect(() => {
-    if (activeBatchId) return;
     let cancelled = false;
     (async () => {
       try {
         const response = await fetch("/api/listing-studio/extension-batches");
         if (!response.ok || cancelled) return;
-        const body = await response.json() as { activeBatchId: string | null };
-        if (!cancelled && body.activeBatchId) setActiveBatchId(body.activeBatchId);
+        const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[] };
+        if (cancelled || body.batchIds.length === 0) return;
+        setVisibleBatchIds(current => {
+          const next = new Set(current);
+          for (const entry of body.batchIds) next.add(entry.batchId);
+          return next;
+        });
+        setBatchMetaById(current => {
+          const next = new Map(current);
+          for (const entry of body.batchIds) if (!next.has(entry.batchId)) next.set(entry.batchId, { displayNumber: entry.displayNumber, browserLabel: null });
+          return next;
+        });
       } catch { /* best-effort — the page still works without resuming */ }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately runs once on mount only; re-checking on every activeBatchId change (including the ones this effect itself causes) would defeat the "only resume when nothing is already tracked" guard.
   }, []);
 
   // One lookup built once per images change, rather than every listing
@@ -324,17 +378,43 @@ export default function ListingsReviewWorkspace() {
     };
   }), [drafts, photoIdsByDraftId]);
 
+  // Multi-batch support — one draft can appear in AT MOST one genuinely
+  // live (non-terminal) batch at a time (enforced atomically server-side
+  // by rpc/listing_studio_create_extension_batch), but its item can still
+  // be present in an OLDER, now-terminal batch this session is still
+  // displaying (its box not yet dismissed) if the draft was resent after
+  // that earlier attempt finished. A live batch's item always wins over a
+  // terminal one; among same-terminality candidates (which in practice
+  // only ever means two terminal ones), the more recently created batch
+  // wins — the freshest real attempt, never a stale one.
+  const liveItemByDraftId = useMemo(() => {
+    const map = new Map<string, { item: ExtensionBatchItemStatusRow; batch: ExtensionBatchStatus }>();
+    for (const batch of batchStatusById.values()) {
+      for (const item of batch.items) {
+        const existing = map.get(item.draftId);
+        if (!existing) { map.set(item.draftId, { item, batch }); continue; }
+        const existingLive = !isBatchStatusTerminal(existing.batch.status);
+        const candidateLive = !isBatchStatusTerminal(batch.status);
+        if (candidateLive && !existingLive) { map.set(item.draftId, { item, batch }); continue; }
+        if (candidateLive === existingLive && new Date(batch.createdAt).getTime() > new Date(existing.batch.createdAt).getTime()) {
+          map.set(item.draftId, { item, batch });
+        }
+      }
+    }
+    return map;
+  }, [batchStatusById]);
+
   // Layers real-time workflow status on top of the base rows: the LIVE
-  // active-batch item for this draft wins when present (freshest —
-  // updates every 4s poll), otherwise the page-load historical aggregate
+  // batch item for this draft wins when present (freshest — updates every
+  // 4s poll), otherwise the page-load historical aggregate
   // (extensionStatusSnapshot) is used, so status stays correct even after
-  // the active batch is cleared or on a page that never had one this
-  // session. Only this small mapping re-runs on a poll tick, never the
-  // full baseListingRows pipeline above.
+  // every batch this session knew about is dismissed, or on a page that
+  // never had one this session. Only this small mapping re-runs on a poll
+  // tick, never the full baseListingRows pipeline above.
   const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {
-    const liveItem = batchStatus?.items.find(item => item.draftId === row.id);
-    const workflowStatus = liveItem
-      ? computeExtensionWorkflowStatus(liveItem.status, batchStatus!.status)
+    const live = liveItemByDraftId.get(row.id);
+    const workflowStatus = live
+      ? computeExtensionWorkflowStatus(live.item.status, live.batch.status)
       : row.extensionStatusSnapshot
         ? computeExtensionWorkflowStatus(row.extensionStatusSnapshot.item_status, row.extensionStatusSnapshot.batch_status)
         : null;
@@ -343,13 +423,13 @@ export default function ListingsReviewWorkspace() {
     // fields a truthful secondary line needs (position/step/detail/draft
     // id/error). One source of truth (computeWorkflowSecondaryLine) reads
     // these identically in the table and the inspector.
-    const queuePosition = liveItem ? liveItem.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;
-    const currentStep = liveItem ? liveItem.currentStep : row.extensionStatusSnapshot?.current_step ?? null;
-    const detail = liveItem ? liveItem.detail : row.extensionStatusSnapshot?.step_detail ?? null;
-    const vintedDraftId = liveItem ? liveItem.vintedDraftId : row.extensionStatusSnapshot?.vinted_draft_id ?? null;
-    const errorMessage = liveItem ? liveItem.errorMessage : row.extensionStatusSnapshot?.error_message ?? null;
+    const queuePosition = live ? live.item.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;
+    const currentStep = live ? live.item.currentStep : row.extensionStatusSnapshot?.current_step ?? null;
+    const detail = live ? live.item.detail : row.extensionStatusSnapshot?.step_detail ?? null;
+    const vintedDraftId = live ? live.item.vintedDraftId : row.extensionStatusSnapshot?.vinted_draft_id ?? null;
+    const errorMessage = live ? live.item.errorMessage : row.extensionStatusSnapshot?.error_message ?? null;
     return { ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage };
-  }), [baseListingRows, batchStatus]);
+  }), [baseListingRows, liveItemByDraftId]);
 
   const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);
 
@@ -686,11 +766,13 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
-  // Milestone 7 (Chrome extension draft queue) — "Send to Chrome
-  // extension". This only ever CREATES the batch and shows the pairing
+  // Milestone 7 (Chrome extension draft queue), extended for multi-batch
+  // support — "Send to extension" always creates a NEW, fully independent
+  // batch; it never checks for (let alone cancels) any other batch already
+  // in flight. This only ever CREATES the batch and shows the pairing
   // code; nothing about form-filling or Vinted itself happens here — that
   // is entirely the extension's own job, running in the user's normal
-  // Chrome profile, once they enter the code. Never clears the current
+  // browser profile, once they enter the code. Never clears the current
   // selection on failure, same reasoning as handleExport above.
   // Listings Review redesign — idsOverride lets the inspector's contextual
   // "Send to extension"/"Resend to extension" button reuse this EXACT
@@ -718,10 +800,11 @@ export default function ListingsReviewWorkspace() {
         setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : []);
         return;
       }
-      setPairingCode(body.pairingCode);
-      setActiveBatchId(body.batchId);
-      setBatchStatus(null);
-      setCodeCopied(false);
+      const batchId: string = body.batchId;
+      setVisibleBatchIds(current => new Set(current).add(batchId));
+      setBatchMetaById(current => new Map(current).set(batchId, { displayNumber: body.displayNumber, browserLabel: null }));
+      setPairingCodeById(current => new Map(current).set(batchId, body.pairingCode));
+      setCodeCopiedBatchId(null);
     } catch {
       setSendToExtensionError("Network error — could not send these listings to the extension. Your selection has been kept.");
     } finally {
@@ -729,100 +812,131 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
-  async function handleCancelExtensionBatch() {
-    if (!activeBatchId) return;
-    await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`, { method: "DELETE" }).catch(() => {});
-  }
+  // Multi-batch support — requires the exact immutable batch id; cancels
+  // ONLY that one batch. Leaves every other batch's state completely
+  // untouched — there is no "cancel the user's current batch" concept
+  // anywhere in this file anymore.
+  const handleCancelBatch = useCallback(async (batchId: string) => {
+    await fetch(`/api/listing-studio/extension-batches/${batchId}`, { method: "DELETE" }).catch(() => {});
+  }, []);
 
-  // Production-polish pass — copies the real pairing code to the
-  // clipboard; the short "Copied" confirmation self-clears so it can never
-  // linger and be mistaken for a permanent label.
-  async function handleCopyPairingCode() {
-    if (!pairingCode) return;
+  // Production-polish pass — copies one specific batch's real pairing code
+  // to the clipboard; the short "Copied" confirmation self-clears so it
+  // can never linger and be mistaken for a permanent label.
+  const handleCopyPairingCode = useCallback(async (batchId: string) => {
+    const code = pairingCodeById.get(batchId);
+    if (!code) return;
     try {
-      await navigator.clipboard.writeText(pairingCode);
-      setCodeCopied(true);
-      window.setTimeout(() => setCodeCopied(false), 1600);
+      await navigator.clipboard.writeText(code);
+      setCodeCopiedBatchId(batchId);
+      window.setTimeout(() => setCodeCopiedBatchId(current => (current === batchId ? null : current)), 1600);
     } catch { /* clipboard access denied — the code remains visible/selectable regardless */ }
-  }
+  }, [pairingCodeById]);
 
-  function handleClearExtensionBatch() {
-    setPairingCode(null);
-    setActiveBatchId(null);
-    setBatchStatus(null);
-    setBulkSelectedIds(new Set());
-  }
+  // Multi-batch support — the "×" on a batch box. Only ever offered once a
+  // batch is genuinely terminal (see ExtensionBatchGrid.tsx) — dismisses
+  // that batch's box (server-side, via box_dismissed_at) and drops it from
+  // local box-grid state; its history/results are never deleted.
+  //
+  // Follow-up correction (combined terminal dismissal) — this now ALSO
+  // dismisses that SAME batch's Live Activity (activityDismissedBatchIds
+  // + resetting the selected filter back to "All" if it was selected),
+  // mirroring the server's own combined box_dismissed_at +
+  // activity_dismissed_at UPDATE (see that route's own comment). This is
+  // required so a display number can never be reallocated to a brand-new
+  // batch while its OLD activity is still visible under the same "Batch
+  // N" label — the exact duplicate-filter-button bug this closes.
+  // Dismissing activity ALONE (handleDismissBatchActivity, below) still
+  // never touches the box — only this direction is now coupled.
+  const handleDismissBatchBox = useCallback(async (batchId: string) => {
+    setVisibleBatchIds(current => { const next = new Set(current); next.delete(batchId); return next; });
+    setBatchStatusById(current => { const next = new Map(current); next.delete(batchId); return next; });
+    setPairingCodeById(current => { const next = new Map(current); next.delete(batchId); return next; });
+    setActivityDismissedBatchIds(current => new Set(current).add(batchId));
+    setActivityFilter(current => (current === batchId ? "all" : current));
+    await fetch(`/api/listing-studio/extension-batches/${batchId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_box" }),
+    }).catch(() => {});
+  }, []);
 
-  // Bounded polling (a lightweight progress mechanism, not a persistent
-  // connection) — matches this app's existing architecture, which has no
-  // server-push channel anywhere. Stops itself once the batch reaches a
-  // terminal status, and is fully torn down on unmount.
+  // Multi-batch support — "Dismiss Batch N activity". Hides only this
+  // batch's own rows from Live Activity (both "All" and its own filter
+  // button disappear) and returns the selected filter to "All" if it was
+  // the one just dismissed — never cancels the batch, never touches its
+  // box, never deletes anything server-side (activity_dismissed_at is a
+  // soft flag, same convention as box_dismissed_at). Applied optimistically
+  // client-side (there's nothing to wait on — this is purely a display
+  // preference) and persisted best-effort so it survives a page refresh.
+  const handleDismissBatchActivity = useCallback((batchId: string) => {
+    setActivityDismissedBatchIds(current => new Set(current).add(batchId));
+    setActivityFilter(current => (current === batchId ? "all" : current));
+    fetch(`/api/listing-studio/extension-batches/${batchId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_activity" }),
+    }).catch(() => {});
+  }, []);
+
+  // Multi-batch support — ONE owner-scoped poll loop drives every visible
+  // batch (never one timer/subscription per batch — see this feature's own
+  // "avoid per-batch timers" requirement). Each tick fetches every
+  // currently-tracked, not-yet-known-terminal batch's status in parallel,
+  // then applies each result independently: creating Batch 2 never resets
+  // or interferes with Batch 1's own polling, and a batch that reaches a
+  // terminal status simply stops being included in the NEXT tick's fetch
+  // set (its box stays visible with its last-known status until
+  // dismissed) — the per-batch equivalent of the old single-batch
+  // "stops itself once terminal" behaviour.
+  //
+  // The loop itself only starts/stops based on whether there is anything
+  // to poll at all (hasVisibleBatches) — it deliberately does NOT restart
+  // every time a batch is added or removed while already running (that
+  // would reset every other in-flight batch's own 4s cadence for no
+  // reason); instead it always reads the CURRENT membership via the refs
+  // mirrored just above on every tick.
   //
   // Listings Review redesign — this same poll tick also derives
-  // activityEvents/notifications by DIFFING the previous poll's items
-  // against the new ones (never a second fetch, never a second interval).
-  // Only a genuinely observed transition ever produces an event/
-  // notification: the FIRST poll for a freshly-started batch only seeds
-  // previousItemsRef (plus one real "sent" event, timestamped with the
-  // batch's own real createdAt) and never synthesizes anything else, since
-  // there is nothing yet to compare against — this is what keeps a page
-  // reload mid-batch, or simply the initial load, from fabricating a
-  // history it never actually observed. Every subsequent poll diffs
-  // real status/attemptCount/step changes only; an unchanged poll (the
-  // common case) produces zero new events and zero notifications.
+  // activityEvents by DIFFING each batch's previous poll items against its
+  // new ones (never a second fetch, never a second interval, never a
+  // second timer per batch). Only a genuinely observed transition ever
+  // produces an event: a batch's FIRST poll only seeds
+  // previousItemsByBatchRef for that batch (plus one real "sent" event,
+  // timestamped with the batch's own real createdAt) and never synthesizes
+  // anything else, since there is nothing yet to compare against — this is
+  // what keeps a page reload mid-batch, or simply the initial load, from
+  // fabricating a history it never actually observed.
+  const hasVisibleBatches = visibleBatchIds.size > 0;
   useEffect(() => {
-    if (!activeBatchId) return;
+    if (!hasVisibleBatches) return;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    // Final-item sync fix — a monotonic sequence number per poll request.
-    // The loop below is sequential by construction (the next poll is only
-    // ever scheduled after this one has been fully applied), so this only
-    // ever matters against some other, future source of an out-of-order
-    // response — never lets an older result overwrite a newer, already-
-    // applied one (see shouldApplyBatchPollResponse).
+    // Final-item sync fix — a monotonic sequence number per poll CYCLE
+    // (one cycle = one parallel fetch of every tracked batch). The loop
+    // below is sequential by construction (the next cycle is only ever
+    // scheduled after this one has been fully applied), so this only ever
+    // matters against some other, future source of an out-of-order
+    // response — never lets an older cycle's results overwrite a newer,
+    // already-applied one (see shouldApplyBatchPollResponse).
     let issuedSeq = 0;
     let appliedSeq = 0;
-    previousItemsRef.current = null;
-    batchCompletionLoggedRef.current = false;
 
-    async function poll() {
-      const seq = ++issuedSeq;
-      let body: ExtensionBatchStatus;
-      try {
-        const response = await fetch(`/api/listing-studio/extension-batches/${activeBatchId}`);
-        if (cancelled) return;
-        if (!response.ok) {
-          // Genuinely gone (404 — deleted, or a resumed batch that expired
-          // between the resume check and this poll) rather than a
-          // transient error: reset tracking instead of leaving stale
-          // pairing-code/status state displayed forever with no way for
-          // the UI to recover on its own.
-          if (response.status === 404) { setActiveBatchId(null); setPairingCode(null); setBatchStatus(null); return; }
-          // Any other failure (network blip, 5xx) is transient — keep
-          // polling on the same cadence rather than silently going quiet.
-          if (!cancelled) timeoutId = setTimeout(poll, 4000);
-          return;
-        }
-        body = await response.json() as ExtensionBatchStatus;
-      } catch {
-        if (!cancelled) timeoutId = setTimeout(poll, 4000); // transient — the next tick tries again
-        return;
-      }
-      if (cancelled) return;
-      if (!shouldApplyBatchPollResponse(appliedSeq, seq)) return;
-      appliedSeq = seq;
-      // Final-item sync fix — this is the ONE authoritative merge of every
-      // item's latest status into local state, unconditionally applied
-      // before anything below decides whether polling should continue. A
-      // batch can never be treated as reconciled in the UI until this line
-      // has run with the response that made it terminal — including the
-      // final item's own terminal state.
-      setBatchStatus(body);
+    function applyBatchResult(batchId: string, body: ExtensionBatchStatus) {
+      setBatchStatusById(current => new Map(current).set(batchId, body));
+      setBatchMetaById(current => {
+        const existing = current.get(batchId);
+        if (existing && existing.browserLabel === body.browserLabel && existing.displayNumber === body.displayNumber) return current;
+        const next = new Map(current);
+        next.set(batchId, { displayNumber: body.displayNumber, browserLabel: body.browserLabel });
+        return next;
+      });
+      if (body.activityDismissedAt) setActivityDismissedBatchIds(current => (current.has(batchId) ? current : new Set(current).add(batchId)));
 
-      const previousItems = previousItemsRef.current;
+      const displayNumber = batchMetaByIdRef.current.get(batchId)?.displayNumber ?? body.displayNumber;
+      const batchLabel = `Batch ${displayNumber}`;
+      const browserLabel = body.browserLabel;
+
+      const previousItems = previousItemsByBatchRef.current.get(batchId) ?? null;
       if (previousItems === null) {
         setActivityEvents(current => [
-          { id: `${body.batchId}:sent`, tone: "sent", message: `${body.items.length} listing${body.items.length === 1 ? "" : "s"} sent to extension`, timestampIso: body.createdAt },
+          { id: `${body.batchId}:sent`, batchId, batchLabel, browserLabel, tone: "sent", message: `${body.items.length} listing${body.items.length === 1 ? "" : "s"} sent to extension`, timestampIso: body.createdAt },
           ...current,
         ]);
       } else {
@@ -836,19 +950,19 @@ export default function ListingsReviewWorkspace() {
           const wasInProgress = prev.status === "preparing" || prev.status === "filling" || prev.status === "saving";
 
           if (isInProgress && !wasInProgress) {
-            newEvents.push({ id: `${item.itemId}:started`, tone: "progress", message: `${label} — draft started`, detail: item.detail, timestampIso: item.startedAt ?? new Date().toISOString() });
+            newEvents.push({ id: `${item.itemId}:started`, batchId, batchLabel, browserLabel, tone: "progress", message: `${label} — draft started`, detail: item.detail, timestampIso: item.startedAt ?? new Date().toISOString() });
           } else if (isInProgress && wasInProgress && (item.currentStep !== prev.currentStep || item.detail !== prev.detail)) {
             updatedDetailByEventId.set(`${item.itemId}:started`, item.detail);
           }
 
           if (item.status === "completed" && prev.status !== "completed") {
-            newEvents.push({ id: `${item.itemId}:completed`, tone: "success", message: `${label} saved successfully`, timestampIso: item.completedAt ?? new Date().toISOString() });
+            newEvents.push({ id: `${item.itemId}:completed`, batchId, batchLabel, browserLabel, tone: "success", message: `${label} saved successfully`, timestampIso: item.completedAt ?? new Date().toISOString() });
           }
           if (item.status === "failed" && prev.status !== "failed") {
-            newEvents.push({ id: `${item.itemId}:failed`, tone: "failure", message: `${label} — draft failed: ${item.errorMessage ?? "Unknown error"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
+            newEvents.push({ id: `${item.itemId}:failed`, batchId, batchLabel, browserLabel, tone: "failure", message: `${label} — draft failed: ${item.errorMessage ?? "Unknown error"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
           }
           if (item.attemptCount > prev.attemptCount && prev.attemptCount > 0) {
-            newEvents.push({ id: `${item.itemId}:retry-${item.attemptCount}`, tone: "progress", message: `${label} — retry started`, timestampIso: new Date().toISOString() });
+            newEvents.push({ id: `${item.itemId}:retry-${item.attemptCount}`, batchId, batchLabel, browserLabel, tone: "progress", message: `${label} — retry started`, timestampIso: new Date().toISOString() });
           }
         }
         if (newEvents.length > 0 || updatedDetailByEventId.size > 0) {
@@ -860,41 +974,72 @@ export default function ListingsReviewWorkspace() {
           });
         }
       }
-      previousItemsRef.current = new Map(body.items.map(item => [item.itemId, item]));
+      previousItemsByBatchRef.current.set(batchId, new Map(body.items.map(item => [item.itemId, item])));
 
       // Polish pass — batch completion used to be shown ONLY via the now-
       // removed toast; it now gets a real Live Activity event instead of
       // silently disappearing. Fires at most once per batch (guarded by
-      // the same ref the toast previously used), so re-polling an
+      // the per-batch completedBatchesLoggedRef set), so re-polling an
       // already-completed batch never re-adds it.
-      if (body.status === "completed" && !batchCompletionLoggedRef.current) {
-        batchCompletionLoggedRef.current = true;
+      if (body.status === "completed" && !completedBatchesLoggedRef.current.has(batchId)) {
+        completedBatchesLoggedRef.current.add(batchId);
         const savedCount = body.items.filter(item => item.status === "completed").length;
         setActivityEvents(current => [
-          { id: `${body.batchId}:batch-complete`, tone: "success", message: `Batch completed — ${savedCount} item${savedCount === 1 ? "" : "s"} saved to Vinted drafts`, timestampIso: body.completedAt ?? new Date().toISOString() },
+          { id: `${body.batchId}:batch-complete`, batchId, batchLabel, browserLabel, tone: "success", message: `Batch completed — ${savedCount} item${savedCount === 1 ? "" : "s"} saved to Vinted drafts`, timestampIso: body.completedAt ?? new Date().toISOString() },
           ...current,
         ]);
       }
+    }
 
-      // Final-item sync fix — replaces the old setInterval, which decided
-      // whether to skip a tick using a `batchStatus` value frozen in a
-      // stale closure (this effect intentionally never re-runs on a
-      // batchStatus change, so that value never updated) and therefore
-      // never actually stopped polling via that check. This decides using
-      // `body.status` — the response JUST applied above via setBatchStatus
-      // — so a batch can never be treated as reconciled in the UI, and
-      // polling can never stop, until every item's terminal state
-      // (including the final item's) has already been merged into local
-      // state. Sequential by construction: the next poll is only ever
-      // scheduled here, after this one has fully resolved and applied —
-      // never on a fixed clock regardless of the previous request's state.
-      if (!cancelled && !isBatchStatusTerminal(body.status)) {
-        timeoutId = setTimeout(poll, 4000);
+    async function poll() {
+      const seq = ++issuedSeq;
+      // Final-item sync fix, generalised — every batch not yet KNOWN to be
+      // terminal is polled again this cycle, including a batch this cycle
+      // hasn't yet reconciled a terminal response for. A batch already
+      // reflected as terminal in batchStatusByIdRef is skipped — its box
+      // keeps showing that last-applied status until dismissed.
+      const idsToPoll = [...visibleBatchIdsRef.current].filter(id => {
+        const known = batchStatusByIdRef.current.get(id);
+        return !known || !isBatchStatusTerminal(known.status);
+      });
+      if (idsToPoll.length === 0) { if (!cancelled) timeoutId = setTimeout(poll, 4000); return; }
+
+      const results = await Promise.all(idsToPoll.map(async id => {
+        try {
+          const response = await fetch(`/api/listing-studio/extension-batches/${id}`);
+          if (!response.ok) return { id, ok: false as const, status: response.status };
+          return { id, ok: true as const, body: await response.json() as ExtensionBatchStatus };
+        } catch { return { id, ok: false as const, status: 0 }; }
+      }));
+      if (cancelled) return;
+      if (!shouldApplyBatchPollResponse(appliedSeq, seq)) return;
+      appliedSeq = seq;
+
+      for (const result of results) {
+        if (!result.ok) {
+          // Genuinely gone (404 — deleted, or a resumed batch that expired
+          // between the resume check and this poll) rather than a
+          // transient error: drop ONLY that batch from tracking instead of
+          // leaving stale pairing-code/status state displayed forever with
+          // no way for the UI to recover on its own. Every other batch's
+          // own result this same cycle is applied normally regardless.
+          if (result.status === 404) {
+            setVisibleBatchIds(current => { const next = new Set(current); next.delete(result.id); return next; });
+            setBatchStatusById(current => { const next = new Map(current); next.delete(result.id); return next; });
+            setPairingCodeById(current => { const next = new Map(current); next.delete(result.id); return next; });
+          }
+          // Any other failure (network blip, 5xx) is transient — this one
+          // batch simply gets retried next cycle, same as before.
+          continue;
+        }
+        applyBatchResult(result.id, result.body);
       }
+
+      if (!cancelled) timeoutId = setTimeout(poll, 4000);
     }
     poll();
     return () => { cancelled = true; if (timeoutId !== undefined) clearTimeout(timeoutId); };
-  }, [activeBatchId]);
+  }, [hasVisibleBatches]);
 
   async function commitDelete(ids: string[]) {
     setBulkActionRunning(true);
@@ -965,10 +1110,59 @@ export default function ListingsReviewWorkspace() {
 
   const hasAnyData = drafts.length > 0;
   const bulkCount = bulkSelectedIds.size;
-  // A batch not yet claimed, or claimed/in_progress, is genuinely still
-  // live; completed/cancelled/expired are terminal — matches the same
-  // terminal-status list the polling effect itself stops on.
-  const batchIsLive = Boolean(activeBatchId) && batchStatus !== null && !isBatchStatusTerminal(batchStatus.status);
+
+  // Multi-batch support — the batch box grid's view models, sorted by
+  // display number so the two-column grid always reads Batch 1/Batch 2,
+  // Batch 3/Batch 4, … regardless of poll-arrival order. Built from
+  // visibleBatchIds (so a just-created or just-resumed batch with no poll
+  // response yet still gets a box, rendered as "Preparing…" rather than
+  // leaving a gap in the grid).
+  const batchBoxViewModels: BatchBoxViewModel[] = useMemo(() => [...visibleBatchIds].map(id => {
+    const status = batchStatusById.get(id);
+    const meta = batchMetaById.get(id);
+    const codeCopied = codeCopiedBatchId === id;
+    const pairingCode = pairingCodeById.get(id) ?? null;
+    if (!status) {
+      return {
+        batchId: id, displayNumber: meta?.displayNumber ?? 0, browserLabel: meta?.browserLabel ?? null,
+        status: "pending", listingCount: 0, completedCount: 0, failedCount: 0, cancelledCount: 0,
+        currentItemLabel: null, pairingCode, expiresAt: null, codeCopied,
+      };
+    }
+    const completedCount = status.items.filter(item => item.status === "completed").length;
+    const failedCount = status.items.filter(item => item.status === "failed").length;
+    const cancelledCount = status.items.filter(item => item.status === "cancelled").length;
+    const inProgressItem = status.items.find(item => item.status === "preparing" || item.status === "filling" || item.status === "saving");
+    const currentItemLabel = inProgressItem
+      ? `${inProgressItem.generatedTitle || inProgressItem.sku || "Listing"}${inProgressItem.detail ? ` — ${inProgressItem.detail}` : ""}`
+      : null;
+    return {
+      batchId: id, displayNumber: status.displayNumber, browserLabel: status.browserLabel,
+      status: status.status, listingCount: status.listingCount, completedCount, failedCount, cancelledCount,
+      currentItemLabel, pairingCode, expiresAt: status.expiresAt, codeCopied,
+    };
+  }).sort((a, b) => a.displayNumber - b.displayNumber), [visibleBatchIds, batchStatusById, batchMetaById, pairingCodeById, codeCopiedBatchId]);
+
+  // "Live" for the Live Activity header dot — true whenever ANY tracked
+  // batch is genuinely still non-terminal, not just the most recent one.
+  const anyBatchLive = useMemo(() => [...batchStatusById.values()].some(status => !isBatchStatusTerminal(status.status)), [batchStatusById]);
+
+  // Multi-batch support — one Live Activity filter button per batch this
+  // page session knows about (via batchMetaById, which — unlike
+  // visibleBatchIds — is never pruned by a box dismissal, so a batch's
+  // activity stays filterable even after its box is gone) whose activity
+  // hasn't itself been dismissed, sorted by display number. "All" is
+  // rendered separately by the panel itself.
+  const activityFilterOptions: ActivityBatchFilter[] = useMemo(() =>
+    [...batchMetaById.entries()]
+      .filter(([id]) => !activityDismissedBatchIds.has(id))
+      .sort((a, b) => a[1].displayNumber - b[1].displayNumber)
+      .map(([id, meta]) => ({ batchId: id, label: `Batch ${meta.displayNumber}` })),
+  [batchMetaById, activityDismissedBatchIds]);
+
+  const visibleActivityEvents = useMemo(() => activityEvents.filter(event =>
+    !activityDismissedBatchIds.has(event.batchId) && (activityFilter === "all" || event.batchId === activityFilter),
+  ), [activityEvents, activityDismissedBatchIds, activityFilter]);
 
   return <div className="lr-layout">
     <div className="lr-topline">
@@ -1042,36 +1236,18 @@ export default function ListingsReviewWorkspace() {
       </ul>}
     </div>}
 
-    {/* Compact contextual strip, not a dominant panel — collapses further
-        the moment the extension claims the batch (progress from then on
-        lives in the table's Workflow column, Live Activity, and toasts,
-        never repeated here as a transcript). The permanent safety badge
-        now lives in the page's own top line, so this strip doesn't repeat
-        it. */}
-    {(pairingCode || activeBatchId) && <div className="lr-pairing-strip" role="status">
-      {/* Terminal status is checked FIRST, ahead of claimedAt — a batch
-          cancelled/expired before ever being claimed has claimedAt stuck at
-          null forever, so gating on claimedAt alone would leave this strip
-          showing a dead pairing code indefinitely instead of collapsing to
-          the terminal "Clear" state. */}
-      {batchStatus && isBatchStatusTerminal(batchStatus.status) ? <>
-        <span>Batch {batchStatus.status}</span>
-        <button type="button" className="lr-pairing-clear" onClick={handleClearExtensionBatch}>Clear</button>
-      </> : !batchStatus?.claimedAt ? <>
-        <span>Pairing code: {pairingCode && <code className="lr-pairing-code">{pairingCode}</code>}</span>
-        {pairingCode && <button type="button" className="lr-pairing-copy" onClick={handleCopyPairingCode} aria-label="Copy pairing code">
-          {codeCopied ? "Copied" : "Copy"}
-        </button>}
-        <span className="lr-pairing-hint">
-          {pairingCode ? "Enter this code in the extension's side panel — single use" : "Waiting for the extension to claim this batch…"}
-        </span>
-        {batchStatus?.expiresAt && <span className="lr-pairing-expiry">Expires {formatRelativeMinutes(batchStatus.expiresAt)}</span>}
-        <button type="button" className="button-danger lr-pairing-cancel" onClick={handleCancelExtensionBatch}>Cancel</button>
-      </> : <>
-        <span>Extension is processing your batch</span>
-        <button type="button" className="button-secondary lr-pairing-cancel" onClick={handleCancelExtensionBatch}>Cancel batch</button>
-      </>}
-    </div>}
+    {/* Multi-batch support — replaces the old single pairing strip with a
+        grid of independent batch boxes (one per batch this session is
+        still displaying); renders nothing at all once every batch has
+        been dismissed, exactly like the old strip rendered nothing before
+        any batch existed. The permanent safety badge lives in the page's
+        own top line, so no box repeats it. */}
+    <ExtensionBatchGrid
+      batches={batchBoxViewModels}
+      onCancel={handleCancelBatch}
+      onDismissBox={handleDismissBatchBox}
+      onCopyCode={handleCopyPairingCode}
+    />
 
     {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
 
@@ -1118,7 +1294,7 @@ export default function ListingsReviewWorkspace() {
             <button
               type="button"
               className="button"
-              disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS || Boolean(activeBatchId)}
+              disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS}
               title={bulkCount > MAX_EXTENSION_BATCH_LISTINGS ? `Select at most ${MAX_EXTENSION_BATCH_LISTINGS} listings for the extension at once.` : "Fills Vinted's Create Listing form via the Chrome extension and saves each item as a draft — never publishes anything"}
               onClick={() => handleSendToExtension()}
             >
@@ -1152,7 +1328,14 @@ export default function ListingsReviewWorkspace() {
           }}
           onSendToExtension={id => handleSendToExtension([id])}
         />
-        <DraftActivityPanel events={activityEvents} isLive={batchIsLive} />
+        <DraftActivityPanel
+          events={visibleActivityEvents}
+          isLive={anyBatchLive}
+          filters={activityFilterOptions}
+          selectedFilter={activityFilter}
+          onSelectFilter={setActivityFilter}
+          onDismissActivity={handleDismissBatchActivity}
+        />
       </div>
     </div>}
 

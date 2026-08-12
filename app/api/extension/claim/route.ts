@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     const ip = requestIpForRateLimit(request);
     await enforceRateLimit(RATE_LIMIT_BUCKET_OWNER_ID, `extension_claim:${ip}`, RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECONDS);
 
-    const { pairingCode, extensionId, extensionVersion } = claimRequestSchema.parse(await request.json());
+    const { pairingCode, extensionId, extensionVersion, browserLabel } = claimRequestSchema.parse(await request.json());
     const codeHash = hashPairingCode(pairingCode);
     const genericError = () => extensionCorsJson(request, { error: "This code is invalid or has expired." }, 400);
 
@@ -72,7 +72,7 @@ export async function POST(request: Request) {
       `vinted_extension_batches?id=eq.${batch.id}&status=eq.pending_claim`,
       {
         method: "PATCH", headers: { Prefer: "return=representation" },
-        body: JSON.stringify({ status: "claimed", claimed_at: nowIso, extension_id: extensionId ?? null, extension_version: extensionVersion ?? null }),
+        body: JSON.stringify({ status: "claimed", claimed_at: nowIso, extension_id: extensionId ?? null, extension_version: extensionVersion ?? null, browser_label: browserLabel ?? null }),
       },
     );
     const claimedRows = await claimResponse.json() as BatchRow[];

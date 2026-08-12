@@ -156,6 +156,21 @@ describe("POST /api/extension/batch/items/[itemId]/result", () => {
     expect(batchPatch).toBeUndefined();
   });
 
+  it("REGRESSION (cancellation/completion race): the batch-completion PATCH's WHERE clause excludes an already-cancelled batch, not just an already-completed one — 'status=neq.completed' alone would let a completion-detection response racing a concurrent cancellation flip 'cancelled' back to 'completed'", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("vinted_extension_batches?")) return [batchRow()];
+      if (path.startsWith("vinted_extension_batch_items?") && path.includes(`id=eq.${ITEM_ID}`)) return [itemRow()];
+      if (path.startsWith("vinted_extension_batch_items?")) return [{ status: "completed" }]; // every other item already terminal
+      return [];
+    });
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "completed", vintedDraftId: "1" }, token), params());
+    const batchPatch = supabaseRequest.mock.calls.find(c => (c[0] as string).startsWith(`vinted_extension_batches?id=eq.${BATCH_ID}`));
+    expect(batchPatch).toBeDefined();
+    expect(batchPatch![0]).not.toContain("status=neq.completed");
+    expect(batchPatch![0]).toContain("status=in.(pending_claim,claimed,in_progress)");
+  });
+
   it("responds with CORS headers only for the configured EXTENSION_ORIGIN, and OPTIONS preflight succeeds", async () => {
     const token = await signBatchToken(BATCH_ID, 600);
     const response = await itemResultRoute(await requestWith({ status: "filling" }, token), params());

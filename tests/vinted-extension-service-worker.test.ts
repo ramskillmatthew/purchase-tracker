@@ -2206,3 +2206,85 @@ describe("service worker — final item's result report is awaited, not fire-and
     expect(result.state.batch.items[0].status).toBe("completed");
   });
 });
+
+// ============================================================================
+// Multi-batch support — this batch's own pairing is scoped to exactly one
+// batch (its own batchToken), so a 409 "batch no longer active" response
+// from the app's item-result route means the OWNER cancelled specifically
+// THIS batch — never a signal about any other batch this owner may have
+// running in a different browser/profile at the same time. Before this
+// fix, postResultToApp() never checked response.ok at all, so the worker
+// kept dispatching PROCESS_ITEM against a batch the app had already
+// stopped tracking. Also covers the best-effort, purely-cosmetic
+// browserLabel reported at claim time (e.g. "Chrome"/"Brave"), used only
+// for display attribution in the app's multi-batch UI — never a security
+// boundary.
+// ============================================================================
+describe("service worker — multi-batch support: browser label at claim time, and stop-on-batch-inactive (409)", () => {
+  it("reports a best-effort browserLabel string when claiming a batch", async () => {
+    const rawPayload = fullBatchPayloadFixture();
+    const { chromeMock, messageListeners } = createChromeMock({ sendMessageHandler: () => ({ response: {} }) });
+    let claimBody: any = null;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const href = String(url);
+      if (href.endsWith("/api/extension/claim")) {
+        claimBody = JSON.parse((init?.body as string) ?? "{}");
+        return new Response(JSON.stringify({ batchToken: "test-token", batchId: rawPayload.batchId, expiresAt: rawPayload.expiresAt }), { status: 200 });
+      }
+      if (href.endsWith("/api/extension/batch")) return new Response(JSON.stringify(rawPayload), { status: 200 });
+      return new Response(null, { status: 204 });
+    }));
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.CLAIM_BATCH, pairingCode: "ABCD2345" });
+
+    expect(typeof claimBody.browserLabel).toBe("string");
+    expect(claimBody.browserLabel.length).toBeGreaterThan(0);
+  });
+
+  it("REGRESSION: a 409 result-report response stops the queue locally — remaining QUEUED items are cancelled and running is set false, mirroring the user's own 'Cancel remaining' action", async () => {
+    const twoItemPayload = payload({
+      items: [
+        { itemId: "item-1", draftId: "draft-1", queuePosition: 0, title: "Hoka Clifton 9", sku: "AA1" },
+        { itemId: "item-2", draftId: "draft-2", queuePosition: 1, title: "Nike Pegasus", sku: "AA2" },
+      ],
+    });
+    let state = QueueState.applyBatchPayload(QueueState.createInitialState(), twoItemPayload, T0);
+    state = QueueState.applyClaim(state, { batchId: "batch-1", batchToken: "test-batch-token", expiresAt: "2026-08-05T10:30:00.000Z", claimedAt: T0 });
+    state = QueueState.applyAccountDetected(state, { memberId: "1", displayName: "shopfront_uk" }, T0);
+    state = QueueState.applyAccountConfirmed(state, T0);
+    state = QueueState.applySelectedVintedTab(state, 1);
+    state = QueueState.applyStart(state);
+
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      initialState: state, sendMessageHandler: () => ({ response: {} }),
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("/result")) return new Response(JSON.stringify({ error: "This batch is no longer active." }), { status: 409 });
+      return new Response(null, { status: 204 });
+    }));
+    await loadWorker(chromeMock);
+
+    await dispatch(messageListeners, { type: CONTENT_TO_WORKER.ITEM_RESULT, itemId: "item-1", status: "completed", vintedDraftId: "999" });
+
+    const finalState = storageData.state as any;
+    expect(finalState.batch.running).toBe(false);
+    expect(finalState.batch.items.find((i: any) => i.itemId === "item-2").status).toBe("cancelled");
+  });
+
+  it("a genuine network failure (not a 409) never stops the queue — only an explicit 409 from the app does", async () => {
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      initialState: seededRunningState(), sendMessageHandler: () => ({ response: {} }),
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("/result")) throw new Error("network down");
+      return new Response(null, { status: 204 });
+    }));
+    await loadWorker(chromeMock);
+
+    await dispatch(messageListeners, { type: CONTENT_TO_WORKER.ITEM_RESULT, itemId: "item-1", status: "completed", vintedDraftId: "999" });
+
+    const finalState = storageData.state as any;
+    expect(finalState.batch.running).toBe(true);
+  });
+});
