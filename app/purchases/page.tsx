@@ -8,14 +8,16 @@ import BulkArrivalsDialog from "@/components/BulkArrivalsDialog";
 import TaskToast from "@/components/TaskToast";
 import PageSizeSelect from "@/components/PageSizeSelect";
 import ArrivalToggle from "@/components/ArrivalToggle";
-import { purchaseAddedMessage } from "@/lib/success-messages";
+import StockStatusToggle from "@/components/StockStatusToggle";
+import { purchaseAddedMessage, stockStatusChangedMessage } from "@/lib/success-messages";
 import { DEFAULT_PAGE_SIZE, parseStoredPageSize, totalPagesFor, type PageSize } from "@/lib/pagination";
-import { arrivalFilters, matchesArrivalFilter, parseArrivalFilter, type ArrivalFilter } from "@/lib/purchases";
-import type { Purchase } from "@/lib/types";
+import { matchesStockFilter, parseStockFilter, stockFilters, type StockFilter } from "@/lib/purchases";
+import { buildPurchaseSearchText, matchesPurchaseSearchText, normalizeSearchTerms } from "@/lib/purchase-search";
+import type { Purchase, StockStatus } from "@/lib/types";
 
 const PURCHASES_PAGE_SIZE_KEY = "trotters:purchases-page-size";
 
-type SortKey = "order_date" | "seller_name" | "item_description" | "item_size" | "price_purchased" | "sku" | "arrived" | "purchased_from";
+type SortKey = "order_date" | "seller_name" | "item_description" | "item_size" | "price_purchased" | "sku" | "arrived" | "stock_status" | "purchased_from";
 
 const columns: { label: string; key: SortKey }[] = [
   { label: "Order Date", key: "order_date" },
@@ -25,12 +27,14 @@ const columns: { label: string; key: SortKey }[] = [
   { label: "Price", key: "price_purchased" },
   { label: "SKU", key: "sku" },
   { label: "Arrived", key: "arrived" },
+  { label: "Stock", key: "stock_status" },
   { label: "Platform", key: "purchased_from" },
 ];
 
 // Wrapped in Suspense because it reads useSearchParams (the Home page's
-// "Awaiting arrival" card links here with ?arrived=not-arrived) — Next.js
-// requires that to avoid de-opting the whole route from static prerendering.
+// Stock value / In stock awaiting arrival cards link here with
+// ?stock=in-stock / ?stock=waiting-on-arrival) — Next.js requires that to
+// avoid de-opting the whole route from static prerendering.
 export default function PurchasesPage() {
   return <Suspense fallback={null}><PurchasesPageInner /></Suspense>;
 }
@@ -47,14 +51,46 @@ function PurchasesPageInner() {
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "order_date", direction: "desc" });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSizeState] = useState<PageSize>(DEFAULT_PAGE_SIZE);
-  const [arrivalFilter, setArrivalFilter] = useState<ArrivalFilter>(() => parseArrivalFilter(searchParams.get("arrived")));
+  const [stockFilter, setStockFilter] = useState<StockFilter>(() => parseStockFilter(searchParams.get("stock")));
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
   const [confirmation, setConfirmation] = useState<{ type: "one" | "all"; id?: string } | null>(null);
   const [addedToast, setAddedToast] = useState(false);
+  const [stockToast, setStockToast] = useState<string | null>(null);
 
-  function changeArrivalFilter(next: ArrivalFilter) {
-    setArrivalFilter(next);
+  function changeStockFilter(next: StockFilter) {
+    setStockFilter(next);
     setPage(1);
   }
+  // Pagination must never be left on a page that no longer exists for the
+  // new results — reset happens synchronously with every keystroke, never
+  // debounced, since the visible table itself updates immediately too.
+  function changeQuery(next: string) {
+    setQuery(next);
+    setPage(1);
+  }
+
+  // Debounced URL sync — the visible input and filtered table update
+  // instantly from local `query`/`stockFilter` state above; only the URL
+  // write is debounced, so continuous typing never triggers a URL update
+  // (or the query-string-driven re-render that would follow it) on every
+  // keystroke. Rebuilds BOTH `stock` and `q` from current live state
+  // (never by trusting whatever the URL already happens to say), so the
+  // two can never drift apart — e.g. changing the stock filter (which,
+  // before this, never wrote back to the URL at all) and then typing a
+  // search must leave the URL reflecting both current selections, never a
+  // stale `stock` value left over from the page's initial load.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (stockFilter === "all") params.delete("stock"); else params.set("stock", stockFilter);
+      const trimmedQuery = query.trim();
+      if (trimmedQuery) params.set("q", trimmedQuery); else params.delete("q");
+      const next = params.toString();
+      if (next !== searchParams.toString()) router.replace(next ? `/purchases?${next}` : "/purchases", { scroll: false });
+    }, 300);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately excludes router/searchParams: including them would reset the debounce timer on every navigation this effect itself performs (including its own replace() call), and could never settle. Only query/stockFilter changing should ever restart the debounce.
+  }, [query, stockFilter]);
 
   // Restored after mount (not in the initial useState) so the server-rendered
   // and first-client-render HTML always agree on the default — avoids a
@@ -101,7 +137,48 @@ function PurchasesPageInner() {
       return true;
     } catch { return false; }
   }
-  const filteredRows = useMemo(() => rows.filter(row => matchesArrivalFilter(row, arrivalFilter)), [rows, arrivalFilter]);
+  // Mirrors toggleArrived exactly — updates the one row in place via PATCH,
+  // never a full page reload. Stock status and arrival stay fully independent:
+  // this never reads or writes `arrived`, and toggleArrived above never
+  // reads or writes `stock_status`. Only shows the bottom-right confirmation
+  // on a genuine success — a failure surfaces via the toggle's own inline
+  // error state instead (see StockStatusToggle), never a fabricated toast.
+  async function toggleStockStatus(id: string, next: StockStatus) {
+    try {
+      const response = await fetch(`/api/purchases?id=${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stock_status: next }),
+      });
+      if (!response.ok) return false;
+      const changed = rows.find(row => row.id === id);
+      setRows(current => current.map(row => row.id === id ? { ...row, stock_status: next } : row));
+      setStockToast(stockStatusChangedMessage(changed?.item_description, next));
+      return true;
+    } catch { return false; }
+  }
+  // Pipeline order: all purchases -> stock filter -> search -> sort ->
+  // pagination (below). `filteredRows` is the final stock+search result —
+  // the SAME collection every downstream consumer (row count, sort,
+  // pagination, "N matching rows") reads, so none of them can ever
+  // disagree about which rows currently qualify.
+  const stockFilteredRows = useMemo(() => rows.filter(row => matchesStockFilter(row, stockFilter)), [rows, stockFilter]);
+  const searchTerms = useMemo(() => normalizeSearchTerms(query), [query]);
+  // The expensive per-row step (building each row's searchable text) is
+  // memoised on stockFilteredRows alone, so it is recomputed only when the
+  // underlying rows or the active stock filter change — never on every
+  // keystroke. The actual per-keystroke work (searchTerms below) is just a
+  // cheap `.includes()` scan over these already-built strings.
+  const searchIndex = useMemo(
+    () => stockFilteredRows.map(row => ({ row, searchText: buildPurchaseSearchText(row) })),
+    [stockFilteredRows],
+  );
+  const filteredRows = useMemo(
+    () => searchTerms.length === 0
+      ? stockFilteredRows
+      : searchIndex.filter(entry => matchesPurchaseSearchText(entry.searchText, searchTerms)).map(entry => entry.row),
+    [stockFilteredRows, searchIndex, searchTerms],
+  );
   const sortedRows = useMemo(() => [...filteredRows].sort((a, b) => {
     const left = a[sort.key];
     const right = b[sort.key];
@@ -134,6 +211,9 @@ function PurchasesPageInner() {
     load();
   }
 
+  const hasActiveSearch = searchTerms.length > 0;
+  const matchingRowsLabel = filteredRows.length === 1 ? "1 matching row" : `${filteredRows.length.toLocaleString("en-GB")} matching rows`;
+
   return <section className="page-shell">
     <header className="purchase-topbar">
       <div className="title-row"><h1>Purchases</h1><span className="record-count">{rows.length.toLocaleString("en-GB")}</span></div>
@@ -156,10 +236,26 @@ function PurchasesPageInner() {
     <div className="data-panel">
       <div className="grid-toolbar">
         <div><strong>{filteredRows.length.toLocaleString("en-GB")} rows</strong><span>Page {Math.min(page, totalPages)} of {totalPages}</span></div>
-        <div className="period-switch arrival-filter-switch" role="group" aria-label="Filter by arrival status">
-          {arrivalFilters.map(option => <button key={option.value} type="button" className={arrivalFilter === option.value ? "period-active" : ""} onClick={() => changeArrivalFilter(option.value)}>{option.label}</button>)}
+        <div className="period-switch stock-filter-switch" role="group" aria-label="Filter by stock status">
+          {stockFilters.map(option => <button key={option.value} type="button" className={stockFilter === option.value ? "period-active" : ""} onClick={() => changeStockFilter(option.value)}>{option.label}</button>)}
         </div>
         {rows.length > 0 && <button className="button-danger" onClick={() => setConfirmation({ type: "all" })}>Clear all</button>}
+      </div>
+      <div className="purchase-search-row">
+        <div className="app-global-search purchase-search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 4.5 4.5" /></svg>
+          <input
+            type="search"
+            value={query}
+            onChange={event => changeQuery(event.target.value)}
+            onKeyDown={event => { if (event.key === "Escape" && query) { event.stopPropagation(); changeQuery(""); } }}
+            placeholder="Search purchases"
+            aria-label="Search purchases"
+            autoComplete="off"
+          />
+          {query && <button type="button" onClick={() => changeQuery("")} aria-label="Clear purchase search">×</button>}
+        </div>
+        {hasActiveSearch && <span className="purchase-search-count" role="status">{matchingRowsLabel}</span>}
       </div>
       <div className="table-scroll purchase-grid-scroll"><table className="purchase-grid"><thead><tr>{columns.map(column => <th key={column.key}><button type="button" onClick={() => changeSort(column.key)}><span>{column.label}</span><i className={sort.key === column.key ? "sort-active" : ""}>{sort.key === column.key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</i></button></th>)}</tr></thead>
         <tbody>{pageRows.length ? pageRows.map(row => <tr key={row.id} tabIndex={0} onClick={() => router.push(`/purchases/${row.id}`)} onKeyDown={event => { if (event.key === "Enter") router.push(`/purchases/${row.id}`); }}>
@@ -170,8 +266,9 @@ function PurchasesPageInner() {
           <td className="numeric-cell">{Number(row.price_purchased).toFixed(2)}</td>
           <td><span className="sku-pill">{row.sku}</span></td>
           <td><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
+          <td><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
           <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
-        </tr>) : <tr className="grid-empty-row"><td colSpan={8}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different arrival filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
+        </tr>) : hasActiveSearch ? <tr className="grid-empty-row"><td colSpan={9}><div><strong>No matching purchases</strong><span>No purchases match your search. Try different search terms, or clear the search to see all purchases in this view.</span><button onClick={() => changeQuery("")}>Clear search</button></div></td></tr> : <tr className="grid-empty-row"><td colSpan={9}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different stock filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
       </table></div>
       <div className="pagination-bar">
         <span>{sortedRows.length ? `${((page - 1) * pageSize + 1).toLocaleString("en-GB")}–${Math.min(page * pageSize, sortedRows.length).toLocaleString("en-GB")} of ${sortedRows.length.toLocaleString("en-GB")}` : "0 rows"}</span>
@@ -188,5 +285,6 @@ function PurchasesPageInner() {
     {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
     {bulkArrivalsOpen && <BulkArrivalsDialog onClose={() => setBulkArrivalsOpen(false)} onApplied={applyBulkArrivals} />}
     {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
+    {stockToast && <TaskToast message={stockToast} onDismiss={() => setStockToast(null)} position="bottom-right" />}
   </section>;
 }

@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 import type { Expense, Purchase } from "@/lib/types";
 import TodaysTasksCard from "@/components/TodaysTasksCard";
 import { computeHomeReport, periods, type Period } from "@/lib/home-report";
-import { awaitingArrivalItemsLabel, awaitingArrivalMessage, calculateAwaitingArrivalValue, countAwaitingArrival } from "@/lib/purchases";
+import {
+  calculateInStockAwaitingArrivalValue, calculateInStockValue, countInStock, countInStockAwaitingArrival,
+  inStockAwaitingArrivalItemsLabel, inStockItemsLabel,
+} from "@/lib/purchases";
 
 const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const shortMoney = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
@@ -31,14 +34,20 @@ export default function HomePage() {
   }, []);
 
   const report = useMemo(() => computeHomeReport(period, purchases, expenses), [period, purchases, expenses]);
-  // Total outstanding stock purchases — deliberately independent of `period`
-  // (the Compare period switch above only scopes the spend/source cards),
-  // since "how much am I still waiting on" is always a current, all-time fact.
-  // Both figures are derived from the same already-fetched `purchases` array
-  // (no extra request) and share the identical isAwaitingArrival eligibility
-  // rule, so the count and value can never disagree about which rows count.
-  const awaitingArrival = useMemo(() => countAwaitingArrival(purchases), [purchases]);
-  const awaitingArrivalValue = useMemo(() => calculateAwaitingArrivalValue(purchases), [purchases]);
+  // Current inventory totals — deliberately independent of `period` (the
+  // Compare period switch above only scopes the spend/source cards), since
+  // "how much stock do I currently have" and "how much of it am I still
+  // waiting on" are always current, all-time facts, not ones that change
+  // when a date-period filter changes. All four figures are derived from
+  // the same already-fetched `purchases` array (no extra request) and
+  // share the identical isInStock / isInStockAwaitingArrival eligibility
+  // rules used by the Purchases page's own filters, so a count and its
+  // paired £ value — and the Home cards and Purchases filters generally —
+  // can never disagree about which rows count.
+  const inStockCount = useMemo(() => countInStock(purchases), [purchases]);
+  const inStockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);
+  const inStockAwaitingArrival = useMemo(() => countInStockAwaitingArrival(purchases), [purchases]);
+  const inStockAwaitingArrivalValue = useMemo(() => calculateInStockAwaitingArrivalValue(purchases), [purchases]);
 
   return <section className="page-shell home-page">
     <header className="home-header">
@@ -57,17 +66,30 @@ export default function HomePage() {
       <article><span>Business expenses</span><strong>{loading ? "—" : money.format(report.expenseSpend)}</strong><small>{period === "all-time" ? "Expenses across all time" : "Expenses in period"}</small></article>
       <article className="summary-total"><span>Total spend</span><strong>{loading ? "—" : money.format(report.stockSpend + report.expenseSpend)}</strong><small>Stock + expenses</small></article>
       <article
+        className={loading ? "" : "summary-clickable"}
+        role={loading ? undefined : "button"}
+        tabIndex={loading ? undefined : 0}
+        aria-label={loading ? undefined : `${money.format(inStockValue)} stock value, ${inStockItemsLabel(inStockCount)}. View in-stock purchases.`}
+        title={loading ? undefined : inStockItemsLabel(inStockCount)}
+        onClick={loading ? undefined : () => router.push("/purchases?stock=in-stock")}
+        onKeyDown={loading ? undefined : event => { if (event.key === "Enter") router.push("/purchases?stock=in-stock"); }}
+      >
+        <span>Stock value</span>
+        <strong>{loading ? "—" : money.format(inStockValue)}</strong>
+        <small>{loading ? "" : inStockItemsLabel(inStockCount)}</small>
+      </article>
+      <article
         className={loading ? "summary-arrival" : "summary-arrival summary-clickable"}
         role={loading ? undefined : "button"}
         tabIndex={loading ? undefined : 0}
-        aria-label={loading ? undefined : `${awaitingArrivalMessage(awaitingArrival)}, ${money.format(awaitingArrivalValue)} stock value. View not arrived purchases.`}
-        title={loading ? undefined : awaitingArrivalMessage(awaitingArrival)}
-        onClick={loading ? undefined : () => router.push("/purchases?arrived=not-arrived")}
-        onKeyDown={loading ? undefined : event => { if (event.key === "Enter") router.push("/purchases?arrived=not-arrived"); }}
+        aria-label={loading ? undefined : `${inStockAwaitingArrivalItemsLabel(inStockAwaitingArrival)} in stock awaiting arrival, ${money.format(inStockAwaitingArrivalValue)} stock value. View in-stock, not yet arrived purchases.`}
+        title={loading ? undefined : `${inStockAwaitingArrivalItemsLabel(inStockAwaitingArrival)} in stock awaiting arrival`}
+        onClick={loading ? undefined : () => router.push("/purchases?stock=waiting-on-arrival")}
+        onKeyDown={loading ? undefined : event => { if (event.key === "Enter") router.push("/purchases?stock=waiting-on-arrival"); }}
       >
-        <span>Awaiting arrival</span>
-        <strong>{loading ? "—" : awaitingArrivalItemsLabel(awaitingArrival)}</strong>
-        <span className="summary-arrival-value" title={loading ? undefined : `${money.format(awaitingArrivalValue)} stock value`}>{loading ? "—" : money.format(awaitingArrivalValue)}</span>
+        <span>In stock awaiting arrival</span>
+        <strong>{loading ? "—" : inStockAwaitingArrivalItemsLabel(inStockAwaitingArrival)}</strong>
+        <span className="summary-arrival-value" title={loading ? undefined : `${money.format(inStockAwaitingArrivalValue)} stock value`}>{loading ? "—" : money.format(inStockAwaitingArrivalValue)}</span>
         <small>Stock value</small>
       </article>
     </div>

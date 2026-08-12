@@ -17,7 +17,7 @@ function purchase(overrides: Partial<Purchase>): Purchase {
   return {
     id: "p1", order_date: "2026-01-01", purchased_from: "Vinted", seller_name: "", sku: "SKU1",
     item_description: "Item", item_size: "M", quantity: 1, item_condition: "Brand new",
-    price_purchased: 10, arrived: null, created_at: "2026-01-01T00:00:00Z",
+    price_purchased: 10, arrived: null, stock_status: "in_stock", created_at: "2026-01-01T00:00:00Z",
     ...overrides,
   };
 }
@@ -239,28 +239,14 @@ describe("arrivalFilters — the three options the Purchases page filter renders
   });
 });
 
-describe("app/purchases/page.tsx — arrival filter + toggle wiring (structural, no React test harness in this project)", () => {
+describe("app/purchases/page.tsx — arrival toggle wiring (structural, no React test harness in this project)", () => {
   const source = readFileSync("app/purchases/page.tsx", "utf8");
 
-  it("filters rows by arrival status before sorting, so pagination/sort never operate on the unfiltered set", () => {
-    expect(source).toContain('const filteredRows = useMemo(() => rows.filter(row => matchesArrivalFilter(row, arrivalFilter)), [rows, arrivalFilter]);');
-    expect(source).toContain("const sortedRows = useMemo(() => [...filteredRows].sort((a, b) => {");
-  });
-
-  it("changing the arrival filter resets to page 1", () => {
-    const fn = source.slice(source.indexOf("function changeArrivalFilter"), source.indexOf("// Restored after mount"));
-    expect(fn).toContain("setPage(1)");
-  });
-
-  it("toggling arrival updates the one row in place via PATCH, never a full reload()", () => {
-    const fn = source.slice(source.indexOf("async function toggleArrived"), source.indexOf("const filteredRows"));
+  it("toggling arrival updates the one row in place via PATCH, never a full page reload", () => {
+    const fn = source.slice(source.indexOf("async function toggleArrived"), source.indexOf("async function toggleStockStatus"));
     expect(fn).toContain('method: "PATCH"');
     expect(fn).toContain("setRows(current => current.map(row => row.id === id ? { ...row, arrived: next } : row))");
     expect(fn).not.toContain("load()");
-  });
-
-  it("reads the initial filter from the ?arrived= query param (Home page card deep-link)", () => {
-    expect(source).toContain('parseArrivalFilter(searchParams.get("arrived"))');
   });
 
   it("is wrapped in Suspense (useSearchParams requirement)", () => {
@@ -270,6 +256,19 @@ describe("app/purchases/page.tsx — arrival filter + toggle wiring (structural,
   it("renders the ArrivalToggle control in the Arrived column, not a plain status label", () => {
     expect(source).toContain("<ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} />");
     expect(source).not.toContain('status-cell status-yes" : "status-cell status-no');
+  });
+
+  // REGRESSION (Stock status feature) — the old 3-way arrival-only filter
+  // switch (All/Not arrived/Arrived) was REPLACED by the new 5-way stock
+  // filter switch, never rendered alongside it: keeping both would let a
+  // user combine an independent arrival filter with an independent stock
+  // filter into a contradictory/confusing state, which the feature's own
+  // brief explicitly warns against.
+  it("REGRESSION: the old arrival-only filter switch and its ?arrived= query param are gone from this page — replaced by the stock filter switch", () => {
+    expect(source).not.toContain("arrivalFilters");
+    expect(source).not.toContain("matchesArrivalFilter");
+    expect(source).not.toContain('parseArrivalFilter(searchParams.get("arrived"))');
+    expect(source).not.toContain("arrival-filter-switch");
   });
 });
 
@@ -319,34 +318,64 @@ describe("components/GlobalPurchaseSearch.tsx — arrival toggle available direc
   });
 });
 
-describe("app/page.tsx — Home page Awaiting arrival card", () => {
+describe("app/page.tsx — Home page Stock value card", () => {
   const source = readFileSync("app/page.tsx", "utf8");
 
-  it("computes the count from the full fetched purchases array, independent of the selected period", () => {
-    expect(source).toContain("const awaitingArrival = useMemo(() => countAwaitingArrival(purchases), [purchases]);");
-  });
-
-  it("computes the £ value from the same purchases array — no separate fetch, no period dependency", () => {
-    expect(source).toContain("const awaitingArrivalValue = useMemo(() => calculateAwaitingArrivalValue(purchases), [purchases]);");
+  it("computes the count and £ value from the full fetched purchases array, independent of the selected period", () => {
+    expect(source).toContain("const inStockCount = useMemo(() => countInStock(purchases), [purchases]);");
+    expect(source).toContain("const inStockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);");
     // Guards against a second useEffect/fetch being added solely for this value.
     expect(source.match(/fetch\(/g) || []).toHaveLength(2); // /api/purchases + /api/expenses only
   });
 
-  it("displays both the item count and the £ stock value on the card, per the suggested structure", () => {
-    const start = source.indexOf('className={loading ? "summary-arrival"');
-    const article = source.slice(start, source.indexOf("</article>", start));
-    expect(article).toContain("<span>Awaiting arrival</span>");
-    expect(article).toContain("awaitingArrivalItemsLabel(awaitingArrival)");
-    expect(article).toContain('`${money.format(awaitingArrivalValue)} stock value`');
+  it("shows the £ value as the main figure and the item count as supporting text, per the requested structure", () => {
+    const start = source.indexOf('<span>Stock value</span>');
+    const article = source.slice(source.lastIndexOf("<article", start), source.indexOf("</article>", start));
+    expect(article).toContain("<strong>{loading ? \"—\" : money.format(inStockValue)}</strong>");
+    expect(article).toContain("inStockItemsLabel(inStockCount)");
   });
 
   it("reuses the existing `money` currency formatter rather than manually concatenating £", () => {
     expect(source).toContain('const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });');
-    expect(source).not.toMatch(/£\$\{awaitingArrivalValue/);
+    expect(source).not.toMatch(/£\$\{inStockValue/);
   });
 
-  it("clicking the card navigates to the Purchases page pre-filtered to Not arrived", () => {
-    expect(source).toContain('router.push("/purchases?arrived=not-arrived")');
+  it("clicking the card navigates to the Purchases page pre-filtered to In stock", () => {
+    expect(source).toContain('router.push("/purchases?stock=in-stock")');
+  });
+
+  it("the card is keyboard-activatable (Enter) as well as clickable", () => {
+    const start = source.indexOf('<span>Stock value</span>');
+    const article = source.slice(source.lastIndexOf("<article", start), source.indexOf("</article>", start));
+    expect(article).toContain("onKeyDown");
+    expect(article).toContain('event.key === "Enter"');
+    expect(article).toContain("summary-clickable");
+  });
+});
+
+describe("app/page.tsx — Home page In stock awaiting arrival card (renamed and re-scoped from the old Awaiting arrival card)", () => {
+  const source = readFileSync("app/page.tsx", "utf8");
+
+  it("computes the count from the full fetched purchases array using the stock-aware rule, independent of the selected period", () => {
+    expect(source).toContain("const inStockAwaitingArrival = useMemo(() => countInStockAwaitingArrival(purchases), [purchases]);");
+  });
+
+  it("computes the £ value from the same purchases array using the stock-aware rule — no separate fetch, no period dependency", () => {
+    expect(source).toContain("const inStockAwaitingArrivalValue = useMemo(() => calculateInStockAwaitingArrivalValue(purchases), [purchases]);");
+  });
+
+  it("displays the new 'In stock awaiting arrival' wording, never the old 'Awaiting arrival' label", () => {
+    const start = source.indexOf('className={loading ? "summary-arrival"');
+    const article = source.slice(start, source.indexOf("</article>", start));
+    expect(article).toContain("<span>In stock awaiting arrival</span>");
+    expect(article).not.toContain("<span>Awaiting arrival</span>");
+    expect(article).toContain("inStockAwaitingArrivalItemsLabel(inStockAwaitingArrival)");
+    expect(article).toContain('`${money.format(inStockAwaitingArrivalValue)} stock value`');
+  });
+
+  it("clicking the card navigates to the Purchases page pre-filtered to Waiting on arrival (the stock filter, not the old arrival-only one)", () => {
+    expect(source).toContain('router.push("/purchases?stock=waiting-on-arrival")');
+    expect(source).not.toContain('router.push("/purchases?arrived=not-arrived")');
   });
 
   it("the card is keyboard-activatable (Enter) as well as clickable", () => {

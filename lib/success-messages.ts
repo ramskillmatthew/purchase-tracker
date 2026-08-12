@@ -47,3 +47,14 @@ export function expenseAddedMessage(): string {
 export function expensesImportedMessage(count: number): string {
   return `Sorted — ${count} ${pluralize(count, "expense", "expenses")} imported`;
 }
+
+// Purchases page row-level stock-status toggle — confirmation only, shown
+// after the PATCH has already succeeded, never before. Deliberately
+// matches the exact requested wording ("X is now in stock" / "X is now no
+// longer in stock"), not this file's usual "Cushty —"/"Sorted —" prefix
+// style, and handles a purchase with no item description gracefully
+// rather than showing a blank/broken sentence.
+export function stockStatusChangedMessage(itemDescription: string | null | undefined, stockStatus: "in_stock" | "no_longer_in_stock"): string {
+  const label = (itemDescription ?? "").trim() || "This item";
+  return `${label} is now ${stockStatus === "in_stock" ? "in stock" : "no longer in stock"}`;
+}

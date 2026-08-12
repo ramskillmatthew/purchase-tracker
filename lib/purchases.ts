@@ -1,4 +1,4 @@
-import type { Purchase } from "./types";
+import type { Purchase, StockStatus } from "./types";
 
 /**
  * Canonical "has this stock purchase arrived?" check. `arrived` is a
@@ -116,4 +116,136 @@ export function awaitingArrivalMessage(count: number): string {
 // awaitingArrivalMessage's fuller phrase (used for the card's aria-label).
 export function awaitingArrivalItemsLabel(count: number): string {
   return `${count.toLocaleString("en-GB")} ${count === 1 ? "item" : "items"}`;
+}
+
+// ============================================================================
+// Stock status — a genuinely different question from arrival. `arrived`
+// answers "has this physically turned up?"; `stock_status` answers "is
+// this still part of my inventory at all?" The two are deliberately kept
+// independent throughout this module: changing one never reads or implies
+// the other. See supabase-add-stock-status.sql for the column itself and
+// the one-time historical backfill.
+// ============================================================================
+
+/** True only for the explicit 'in_stock' status — mirrors isArrived's own "no third state" discipline. */
+export function isInStock(purchase: Pick<Purchase, "stock_status">): boolean {
+  return purchase.stock_status === "in_stock";
+}
+
+export function isNoLongerInStock(purchase: Pick<Purchase, "stock_status">): boolean {
+  return purchase.stock_status === "no_longer_in_stock";
+}
+
+/**
+ * "In stock awaiting arrival" — the Home card's own eligibility rule.
+ * Built from isInStock + isArrived (never a separate/duplicated arrival
+ * check), so a no_longer_in_stock purchase can never appear here even if
+ * its `arrived` value happens to be false or null — leaving stock is what
+ * removes it, regardless of what arrived says.
+ */
+export function isInStockAwaitingArrival(purchase: Pick<Purchase, "stock_status" | "arrived">): boolean {
+  return isInStock(purchase) && !isArrived(purchase);
+}
+
+/** "In stock and physically here" — the mirror image of isInStockAwaitingArrival; every in_stock purchase is in exactly one of the two. */
+export function isInStockPhysicallyHere(purchase: Pick<Purchase, "stock_status" | "arrived">): boolean {
+  return isInStock(purchase) && isArrived(purchase);
+}
+
+// The Home "In stock awaiting arrival" card's own count/value pair — built
+// on the identical isInStockAwaitingArrival predicate, so (matching
+// countAwaitingArrival/calculateAwaitingArrivalValue's own discipline) the
+// two can never disagree about which rows are eligible. A
+// no_longer_in_stock purchase is excluded here even when its `arrived`
+// value is false or null — leaving stock removes it from this card
+// immediately, regardless of arrival.
+export function countInStockAwaitingArrival(purchases: Pick<Purchase, "stock_status" | "arrived">[]): number {
+  return purchases.reduce((total, purchase) => total + (isInStockAwaitingArrival(purchase) ? 1 : 0), 0);
+}
+
+export function calculateInStockAwaitingArrivalValue(purchases: Pick<Purchase, "stock_status" | "arrived" | "price_purchased">[]): number {
+  return purchases.reduce((total, purchase) => {
+    if (!isInStockAwaitingArrival(purchase)) return total;
+    const price = toFinitePrice(purchase.price_purchased);
+    return price === null ? total : total + price;
+  }, 0);
+}
+
+export type StockFilter = "all" | "in-stock" | "waiting-on-arrival" | "physically-here" | "no-longer-in-stock";
+
+// "All" first and default, exactly like arrivalFilters — the Purchases
+// page must keep opening unfiltered. These five options REPLACE the old
+// arrival-only switch on that page (never rendered alongside it) so a
+// user can never combine an independent arrival filter with an
+// independent stock filter into a contradictory or confusing state.
+export const stockFilters: { value: StockFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "in-stock", label: "In stock" },
+  { value: "waiting-on-arrival", label: "Waiting on arrival" },
+  { value: "physically-here", label: "Physically here" },
+  { value: "no-longer-in-stock", label: "No longer in stock" },
+];
+
+// Reads the ?stock= query param the Home cards deep-link to (in-stock /
+// waiting-on-arrival) and that the Purchases page's own filter switch
+// writes back — any unrecognised or missing value safely falls back to
+// "all", matching parseArrivalFilter's own behaviour.
+export function parseStockFilter(value: string | null | undefined): StockFilter {
+  return value === "in-stock" || value === "waiting-on-arrival" || value === "physically-here" || value === "no-longer-in-stock"
+    ? value
+    : "all";
+}
+
+export function matchesStockFilter(purchase: Pick<Purchase, "stock_status" | "arrived">, filter: StockFilter): boolean {
+  switch (filter) {
+    case "all": return true;
+    case "in-stock": return isInStock(purchase);
+    case "waiting-on-arrival": return isInStockAwaitingArrival(purchase);
+    case "physically-here": return isInStockPhysicallyHere(purchase);
+    case "no-longer-in-stock": return isNoLongerInStock(purchase);
+  }
+}
+
+// Total current in-stock items — like countAwaitingArrival, never scoped
+// to any date period: "how much stock do I currently have" is always a
+// present-moment fact, not one that changes when Home's Compare period
+// switch changes.
+export function countInStock(purchases: Pick<Purchase, "stock_status">[]): number {
+  return purchases.reduce((total, purchase) => total + (isInStock(purchase) ? 1 : 0), 0);
+}
+
+/**
+ * Combined value of the exact same in-stock collection countInStock
+ * counts — built on the identical isInStock check, so the count and the £
+ * total can never disagree about which rows are included. Purchase price
+ * only (never postage/fees/estimated resale value); each row contributes
+ * once; invalid/missing prices contribute nothing rather than throwing or
+ * poisoning the total with NaN; sums raw values and only rounds at
+ * display time (via the caller's currency formatter), matching
+ * calculateAwaitingArrivalValue's own discipline exactly.
+ */
+export function calculateInStockValue(purchases: Pick<Purchase, "stock_status" | "price_purchased">[]): number {
+  return purchases.reduce((total, purchase) => {
+    if (!isInStock(purchase)) return total;
+    const price = toFinitePrice(purchase.price_purchased);
+    return price === null ? total : total + price;
+  }, 0);
+}
+
+// The Home "Stock value" card's supporting line — "1 item in stock" /
+// "427 items in stock".
+export function inStockItemsLabel(count: number): string {
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? "item" : "items"} in stock`;
+}
+
+// The Home "In stock awaiting arrival" card's main line — "1 item" / "12
+// items" — mirrors awaitingArrivalItemsLabel's exact wording, just fed by
+// the stock-aware count instead of the arrival-only one.
+export function inStockAwaitingArrivalItemsLabel(count: number): string {
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? "item" : "items"}`;
+}
+
+/** The stock-status row toggle's own PATCH target — the opposite of whatever the purchase's current stock_status is. */
+export function nextStockStatus(current: StockStatus): StockStatus {
+  return current === "in_stock" ? "no_longer_in_stock" : "in_stock";
 }

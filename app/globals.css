@@ -145,8 +145,20 @@ h1 { margin: 0; color: var(--text); font-size: 1.65rem; font-weight: 710; letter
 .grid-toolbar strong { color: var(--text); font-size: 11px; font-weight: 700; }
 .grid-toolbar span { color: var(--muted); font-size: 10px; }
 .grid-toolbar .button-danger { min-height: 28px; padding: 0 9px; font-size: 10px; }
+
+/* Purchases-page search row — sits below the row-count/stock-filter
+   toolbar and above the table header, inside the same card. Reuses
+   .app-global-search's own box styling (icon/input/clear-button
+   appearance) rather than inventing a new input style; .purchase-search-box
+   only adds the width constraints appropriate to living inline in this
+   card instead of the fixed global header. */
+.purchase-search-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.purchase-search-box { flex: 1 1 280px; max-width: 480px; min-width: 0; }
+.purchase-search-box:focus-within { border-color: color-mix(in srgb, var(--primary) 68%, var(--line)); box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow-sm); }
+.purchase-search-count { color: var(--muted); font-size: 10px; font-weight: 650; white-space: nowrap; }
+
 .purchase-grid-scroll { max-height: calc(100vh - 190px); overflow: auto; }
-.purchase-grid { width: 100%; min-width: 980px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.purchase-grid { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .purchase-grid th { position: sticky; top: 0; z-index: 3; height: 34px; padding: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line-strong); background: var(--surface-2); }
 .purchase-grid th:nth-child(1) { width: 112px; }
 .purchase-grid th:nth-child(2) { width: 140px; }
@@ -155,7 +167,8 @@ h1 { margin: 0; color: var(--text); font-size: 1.65rem; font-weight: 710; letter
 .purchase-grid th:nth-child(5) { width: 92px; }
 .purchase-grid th:nth-child(6) { width: 105px; }
 .purchase-grid th:nth-child(7) { width: 82px; }
-.purchase-grid th:nth-child(8) { width: 180px; }
+.purchase-grid th:nth-child(8) { width: 140px; }
+.purchase-grid th:nth-child(9) { width: 180px; }
 .purchase-grid th button { display: flex; width: 100%; height: 100%; padding: 0 10px; align-items: center; justify-content: space-between; border: 0; color: var(--muted); background: transparent; font-size: 9px; font-weight: 760; letter-spacing: .065em; text-transform: uppercase; }
 .purchase-grid th button:hover { color: var(--text); background: var(--surface-3); }
 .purchase-grid th i { color: var(--subtle); font-size: 10px; font-style: normal; }
@@ -182,6 +195,20 @@ h1 { margin: 0; color: var(--text); font-size: 1.65rem; font-weight: 710; letter
 .arrival-toggle:disabled { cursor: not-allowed; opacity: .6; }
 .arrival-toggle-error { color: var(--danger); font-size: 8px; font-weight: 650; white-space: nowrap; }
 .arrival-filter-switch { flex-wrap: wrap; }
+.stock-filter-switch { flex-wrap: wrap; }
+
+/* Stock-status row control — reuses .status-cell/.status-yes/.status-no
+   (the Purchases table's own existing pill classes, previously the plain
+   arrival label before ArrivalToggle replaced it) as a real <button>
+   rather than a static span, so "In stock"/"No longer in stock" looks
+   native to this exact table instead of introducing a new visual
+   language. */
+.stock-status-toggle-wrap { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; max-width: 100%; }
+.stock-status-toggle.status-cell { max-width: 100%; overflow: hidden; border: 0; text-overflow: ellipsis; transition: opacity 140ms ease, transform 100ms ease; }
+.stock-status-toggle.status-cell:hover:not(:disabled) { opacity: .85; }
+.stock-status-toggle.status-cell:active:not(:disabled) { transform: scale(.96); }
+.stock-status-toggle.status-cell:disabled { cursor: not-allowed; opacity: .6; }
+.stock-status-toggle-error { color: var(--danger); font-size: 8px; font-weight: 650; white-space: nowrap; }
 .platform-cell { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 6px; }
 .platform-cell > span { overflow: hidden; text-overflow: ellipsis; }
 .cell-actions { display: flex; opacity: 0; gap: 3px; transition: opacity 100ms ease; }
@@ -397,7 +424,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .period-switch button:hover { color: var(--text); background: var(--surface-2); }
 .period-switch .period-active { color: var(--primary); background: var(--primary-soft); }
 .home-error { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 8px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
-.summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .summary-grid article { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-sm); }
 .summary-grid article.summary-clickable { cursor: pointer; transition: border-color 140ms ease, transform 140ms ease; }
 .summary-grid article.summary-clickable:hover, .summary-grid article.summary-clickable:focus-visible { border-color: color-mix(in srgb, var(--primary) 40%, var(--line)); transform: translateY(-1px); }
@@ -831,6 +858,14 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .task-toast button:hover { text-decoration: underline; }
 @keyframes taskToastIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
 
+/* Bottom-right variant — same border/radius/shadow/box as .task-toast
+   above, just repositioned and given its own (non-centring) slide-in
+   animation. Used by the Purchases page's stock-status confirmation; see
+   TaskToast.tsx's own comment on why this reconstructs (rather than
+   literally reuses) Listings Review's former bottom-right toast pattern. */
+.task-toast-bottom-right { left: auto; right: 24px; bottom: 24px; transform: none; animation: taskToastInRight 180ms ease-out; }
+@keyframes taskToastInRight { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
 .task-list { display: flex; flex-direction: column; }
 .task-row { display: flex; max-height: 120px; padding: 12px 14px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); transition: opacity 260ms ease, max-height 260ms ease, padding 260ms ease, margin 260ms ease; }
 .task-list .task-row:last-child { border-bottom: 0; }
@@ -923,6 +958,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .mobile-nav-link span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-nav-active { color: var(--primary); background: var(--primary-soft); }
   .task-toast { bottom: 82px; }
+  .task-toast-bottom-right { right: 14px; bottom: 82px; }
   .global-search-shell { inset: 56px 0 auto; height: 54px; padding: 8px 14px; }
   .global-search-inner { width: 100%; }
   .app-main { width: 100%; margin-left: 0; padding: 128px 16px 88px; }
@@ -970,6 +1006,10 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .grid-toolbar { flex-wrap: wrap; height: auto; row-gap: 8px; }
   .arrival-filter-switch { order: 3; width: 100%; }
   .arrival-filter-switch button { flex: 1; }
+  .stock-filter-switch { order: 3; width: 100%; }
+  .stock-filter-switch button { flex: 1; }
+  .purchase-search-box { max-width: none; flex-basis: 100%; }
+  .purchase-search-count { flex-basis: 100%; }
   .empty-state { min-height: 130px; padding: 18px 12px; }
   .purchase-topbar { grid-template-columns: 1fr; gap: 10px; }
   .purchase-topbar h1 { font-size: 1.45rem; }

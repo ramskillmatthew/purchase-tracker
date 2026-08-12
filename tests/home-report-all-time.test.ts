@@ -6,7 +6,7 @@ function purchase(overrides: Partial<Purchase>): Purchase {
   return {
     id: "p1", order_date: "2026-01-01", purchased_from: "Vinted", seller_name: "", sku: "SKU1",
     item_description: "Item", item_size: "M", quantity: 1, item_condition: "Brand new",
-    price_purchased: 10, arrived: null, created_at: "2026-01-01T00:00:00Z",
+    price_purchased: 10, arrived: null, stock_status: "in_stock", created_at: "2026-01-01T00:00:00Z",
     ...overrides,
   };
 }
