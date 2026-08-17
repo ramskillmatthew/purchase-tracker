@@ -411,8 +411,10 @@ describe("app/purchases/page.tsx — existing behaviour is unchanged", () => {
     expect(source).toContain('{stockToast && <TaskToast message={stockToast} onDismiss={() => setStockToast(null)} position="bottom-right" />}');
   });
 
-  it("REGRESSION: row click/edit navigation is unaffected — rows still route to /purchases/[id]", () => {
-    expect(source).toContain("onClick={() => router.push(`/purchases/${row.id}`)}");
+  it("REGRESSION: a normal row click with no active selection still routes to /purchases/[id] (now via handleRowClick/resolveRowClick's \"navigate\" branch — see tests/purchases-selection.test.ts and tests/purchases-selection-ui.test.ts for the full selection-click behaviour)", () => {
+    expect(source).toContain("onClick={event => handleRowClick(event, row)}");
+    const fn = source.slice(source.indexOf("function handleRowClick"), source.indexOf("async function bulkDeleteSelected"));
+    expect(fn).toContain("router.push(`/purchases/${row.id}`)");
   });
 
   it("REGRESSION: existing sort-column click behaviour is unchanged", () => {
@@ -440,8 +442,16 @@ describe("app/purchases/page.tsx — responsive search-row structure", () => {
 
   it("REGRESSION: on narrow viewports the search box and matching-count text can each wrap onto their own full-width row, and the row itself allows wrapping", () => {
     expect(css).toMatch(/\.purchase-search-row\s*\{[^}]*flex-wrap:\s*wrap/);
-    const narrowBlockStart = css.indexOf("@media (max-width: 620px)");
-    const narrowBlock = css.slice(narrowBlockStart, narrowBlockStart + 4000);
+    // Anchored to the rule itself (via lastIndexOf back from it) rather
+    // than the first "@media (max-width: 620px)" in the whole file — this
+    // file interleaves many separate 620px blocks for different features
+    // (see the project's own established convention), so the first one in
+    // file order is not necessarily this feature's own block.
+    const boxRuleIdx = css.indexOf(".purchase-search-box { max-width: none; flex-basis: 100%; }");
+    expect(boxRuleIdx).toBeGreaterThan(-1);
+    const narrowBlockStart = css.lastIndexOf("@media (max-width: 620px)", boxRuleIdx);
+    const narrowBlock = css.slice(narrowBlockStart, boxRuleIdx + 200);
+    expect(narrowBlockStart).toBeGreaterThan(-1);
     expect(narrowBlock).toContain(".purchase-search-box { max-width: none; flex-basis: 100%; }");
     expect(narrowBlock).toContain(".purchase-search-count { flex-basis: 100%; }");
   });

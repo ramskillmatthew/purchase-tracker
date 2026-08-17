@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import PurchaseForm from "@/components/PurchaseForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -13,6 +13,7 @@ import { purchaseAddedMessage, stockStatusChangedMessage } from "@/lib/success-m
 import { DEFAULT_PAGE_SIZE, parseStoredPageSize, totalPagesFor, type PageSize } from "@/lib/pagination";
 import { matchesStockFilter, parseStockFilter, stockFilters, type StockFilter } from "@/lib/purchases";
 import { buildPurchaseSearchText, matchesPurchaseSearchText, normalizeSearchTerms } from "@/lib/purchase-search";
+import { pruneMissingIds, resolveRowClick, selectionSummary, toggleId, toggleVisiblePage } from "@/lib/purchases-selection";
 import type { Purchase, StockStatus } from "@/lib/types";
 
 const PURCHASES_PAGE_SIZE_KEY = "trotters:purchases-page-size";
@@ -56,6 +57,16 @@ function PurchasesPageInner() {
   const [confirmation, setConfirmation] = useState<{ type: "one" | "all"; id?: string } | null>(null);
   const [addedToast, setAddedToast] = useState(false);
   const [stockToast, setStockToast] = useState<string | null>(null);
+  // Selected purchase UUIDs, independent of the current page/filter/sort —
+  // never a row index, so selections survive pagination and re-sorting.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // The Shift-click range anchor. Reset whenever the selection is cleared
+  // (including via the row-click-to-clear gesture below) so a later
+  // Shift-click can never reuse a stale range.
+  const [rangeAnchor, setRangeAnchor] = useState<string | null>(null);
+  const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState("");
 
   function changeStockFilter(next: StockFilter) {
     setStockFilter(next);
@@ -111,6 +122,11 @@ function PurchasesPageInner() {
     if (response.ok) { setRows(await response.json()); setError(""); } else setError("Connect Supabase to view purchases.");
   }
   useEffect(() => { load(); }, []);
+  // If a refresh (or a bulk delete) leaves a selected id no longer present
+  // in `rows`, drop it from the selection rather than holding onto a stale id.
+  useEffect(() => {
+    setSelectedIds(current => pruneMissingIds(current, new Set(rows.map(row => row.id))));
+  }, [rows]);
 
   async function remove(id: string) {
     const response = await fetch(`/api/purchases?id=${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -193,10 +209,66 @@ function PurchasesPageInner() {
   const totalPages = totalPagesFor(sortedRows.length, pageSize);
   const pageRows = sortedRows.slice((page - 1) * pageSize, page * pageSize);
   useEffect(() => { setPage(current => Math.min(current, totalPages)); }, [totalPages]);
+  // Shift-click ranges and "select all" are always resolved against this
+  // exact visible-page id list — the same order the user sees, after
+  // search/filter/sort/pagination — never against every purchase.
+  const pageIds = useMemo(() => pageRows.map(row => row.id), [pageRows]);
+  const selection = useMemo(() => selectionSummary(selectedIds, pageIds), [selectedIds, pageIds]);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  // No declarative HTML attribute for the indeterminate checkbox state — it's
+  // only exposed as a DOM property, set imperatively (mirrors the same
+  // pattern in components/listings-review/ListingsTable.tsx).
+  useEffect(() => { if (selectAllRef.current) selectAllRef.current.indeterminate = selection.someSelected; }, [selection.someSelected]);
 
   function changeSort(key: SortKey) {
     setSort(current => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" });
     setPage(1);
+  }
+
+  function toggleRowSelected(id: string) {
+    setSelectedIds(current => toggleId(current, id));
+    setRangeAnchor(id);
+  }
+  function toggleSelectAllVisible() {
+    setSelectedIds(current => toggleVisiblePage(current, pageIds));
+  }
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setRangeAnchor(null);
+  }
+  // Priority order: Shift+click always ranges (never clears); a plain click
+  // clears the whole selection if anything is selected; only with nothing
+  // selected does a plain click open the purchase. See resolveRowClick.
+  function handleRowClick(event: React.MouseEvent, row: Purchase) {
+    const action = resolveRowClick({ shiftKey: event.shiftKey, hasSelection: selectedIds.size > 0, pageIds, anchorId: rangeAnchor, targetId: row.id });
+    if (action.type === "range") { setSelectedIds(current => { const next = new Set(current); for (const id of action.ids) next.add(id); return next; }); return; }
+    if (action.type === "select-single") { setSelectedIds(current => { const next = new Set(current); next.add(action.id); return next; }); setRangeAnchor(action.id); return; }
+    if (action.type === "clear") { clearSelection(); return; }
+    router.push(`/purchases/${row.id}`);
+  }
+  async function bulkDeleteSelected() {
+    if (bulkDeleting) return;
+    setBulkDeleting(true);
+    setBulkDeleteError("");
+    try {
+      const ids = Array.from(selectedIds);
+      const response = await fetch("/api/purchases/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!response.ok) { setBulkDeleteError("Could not delete the selected purchases. Try again."); setBulkDeleting(false); return; }
+      const { deletedIds } = await response.json() as { deletedIds: string[] };
+      const deleted = new Set<string>(deletedIds);
+      setSelectedIds(current => { const next = new Set(current); for (const id of deleted) next.delete(id); return next; });
+      setRangeAnchor(current => (current && deleted.has(current) ? null : current));
+      setBulkDeleteConfirmOpen(false);
+      setBulkDeleting(false);
+      load();
+    } catch {
+      setBulkDeleteError("Could not delete the selected purchases. Try again.");
+      setBulkDeleting(false);
+    }
   }
 
   // Patches the affected rows in place for an instant filter/search update,
@@ -220,6 +292,7 @@ function PurchasesPageInner() {
       <div className="purchase-topbar-actions">
         <button type="button" className="button-secondary" onClick={() => setImportOpen(true)}>Import spreadsheet</button>
         <button type="button" className="button-secondary" onClick={() => setBulkArrivalsOpen(true)}>Bulk mark arrivals</button>
+        {selectedIds.size > 0 && <button type="button" className="button-danger" onClick={() => setBulkDeleteConfirmOpen(true)}>Delete {selectedIds.size} selected</button>}
         <button className={`button page-action purchase-toggle ${open && !editing ? "purchase-toggle-close" : ""}`} onClick={() => { if (open && !editing) setOpen(false); else { setEditing(undefined); setOpen(true); } }}>
           <span className="purchase-toggle-icon" aria-hidden="true">{open && !editing ? "×" : "+"}</span>
           <span className="purchase-toggle-label">{open && !editing ? "Close form" : "Add purchase"}</span>
@@ -239,7 +312,11 @@ function PurchasesPageInner() {
         <div className="period-switch stock-filter-switch" role="group" aria-label="Filter by stock status">
           {stockFilters.map(option => <button key={option.value} type="button" className={stockFilter === option.value ? "period-active" : ""} onClick={() => changeStockFilter(option.value)}>{option.label}</button>)}
         </div>
-        {rows.length > 0 && <button className="button-danger" onClick={() => setConfirmation({ type: "all" })}>Clear all</button>}
+        <div className="grid-toolbar-actions">
+          {selectedIds.size > 0 && <span className="selection-hint">Shift-click rows to select a range</span>}
+          {selectedIds.size > 0 && <button type="button" className="button-secondary" onClick={clearSelection}>Clear selection</button>}
+          {rows.length > 0 && <button className="button-danger" onClick={() => setConfirmation({ type: "all" })}>Clear all</button>}
+        </div>
       </div>
       <div className="purchase-search-row">
         <div className="app-global-search purchase-search-box">
@@ -257,8 +334,12 @@ function PurchasesPageInner() {
         </div>
         {hasActiveSearch && <span className="purchase-search-count" role="status">{matchingRowsLabel}</span>}
       </div>
-      <div className="table-scroll purchase-grid-scroll"><table className="purchase-grid"><thead><tr>{columns.map(column => <th key={column.key}><button type="button" onClick={() => changeSort(column.key)}><span>{column.label}</span><i className={sort.key === column.key ? "sort-active" : ""}>{sort.key === column.key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</i></button></th>)}</tr></thead>
-        <tbody>{pageRows.length ? pageRows.map(row => <tr key={row.id} tabIndex={0} onClick={() => router.push(`/purchases/${row.id}`)} onKeyDown={event => { if (event.key === "Enter") router.push(`/purchases/${row.id}`); }}>
+      <div className="table-scroll purchase-grid-scroll"><table className="purchase-grid"><thead><tr>
+        <th className="purchase-checkbox-cell"><input ref={selectAllRef} type="checkbox" aria-label={selection.someSelected ? `${selection.selectedCount} of ${pageRows.length} purchases on this page selected` : "Select all purchases on this page"} checked={selection.allSelected} onChange={toggleSelectAllVisible} /></th>
+        {columns.map(column => <th key={column.key}><button type="button" onClick={() => changeSort(column.key)}><span>{column.label}</span><i className={sort.key === column.key ? "sort-active" : ""}>{sort.key === column.key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</i></button></th>)}
+      </tr></thead>
+        <tbody>{pageRows.length ? pageRows.map(row => <tr key={row.id} tabIndex={0} className={selectedIds.has(row.id) ? "purchase-row-selected" : undefined} onClick={event => handleRowClick(event, row)} onKeyDown={event => { if (event.key === "Enter") router.push(`/purchases/${row.id}`); }}>
+          <td className="purchase-checkbox-cell" onClick={event => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${row.item_description || "this purchase"} (SKU ${row.sku || "none"}, ${row.order_date})`} checked={selectedIds.has(row.id)} onChange={() => toggleRowSelected(row.id)} /></td>
           <td>{row.order_date}</td>
           <td>{row.seller_name || "—"}</td>
           <td className="description-cell">{row.item_description}</td>
@@ -268,7 +349,7 @@ function PurchasesPageInner() {
           <td><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
           <td><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
           <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
-        </tr>) : hasActiveSearch ? <tr className="grid-empty-row"><td colSpan={9}><div><strong>No matching purchases</strong><span>No purchases match your search. Try different search terms, or clear the search to see all purchases in this view.</span><button onClick={() => changeQuery("")}>Clear search</button></div></td></tr> : <tr className="grid-empty-row"><td colSpan={9}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different stock filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
+        </tr>) : hasActiveSearch ? <tr className="grid-empty-row"><td colSpan={10}><div><strong>No matching purchases</strong><span>No purchases match your search. Try different search terms, or clear the search to see all purchases in this view.</span><button onClick={() => changeQuery("")}>Clear search</button></div></td></tr> : <tr className="grid-empty-row"><td colSpan={10}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different stock filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
       </table></div>
       <div className="pagination-bar">
         <span>{sortedRows.length ? `${((page - 1) * pageSize + 1).toLocaleString("en-GB")}–${Math.min(page * pageSize, sortedRows.length).toLocaleString("en-GB")} of ${sortedRows.length.toLocaleString("en-GB")}` : "0 rows"}</span>
@@ -282,6 +363,16 @@ function PurchasesPageInner() {
       </div>
     </div>
     {confirmation && <ConfirmDialog title={confirmation.type === "all" ? "Clear all purchases?" : "Delete this purchase?"} message={confirmation.type === "all" ? `This will permanently remove all ${rows.length.toLocaleString("en-GB")} saved purchase records. This cannot be undone.` : "This purchase will be permanently removed from your history. This cannot be undone."} confirmLabel={confirmation.type === "all" ? "Clear all purchases" : "Delete purchase"} onCancel={() => setConfirmation(null)} onConfirm={() => confirmation.type === "all" ? clearAll() : remove(confirmation.id!)} />}
+    {bulkDeleteConfirmOpen && <ConfirmDialog
+      title={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? "" : "s"}?`}
+      message="The selected purchase records will be permanently removed. This cannot be undone."
+      confirmLabel={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? "" : "s"}`}
+      confirming={bulkDeleting}
+      confirmingLabel="Deleting…"
+      error={bulkDeleteError}
+      onCancel={() => { if (!bulkDeleting) { setBulkDeleteConfirmOpen(false); setBulkDeleteError(""); } }}
+      onConfirm={bulkDeleteSelected}
+    />}
     {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
     {bulkArrivalsOpen && <BulkArrivalsDialog onClose={() => setBulkArrivalsOpen(false)} onApplied={applyBulkArrivals} />}
     {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
