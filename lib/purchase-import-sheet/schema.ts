@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { conditions, purchaseImportInputSchema } from "@/lib/validation/purchase";
+import { conditions, purchaseCategories, purchaseImportInputSchema, resolveCategoryText } from "@/lib/validation/purchase";
 import {
   FORMULA_CELL, anyText, cellToText, isRowBlank, mapHeadings as mapHeadingsGeneric, parseField, parseImportArrived,
   parseImportDate as parseImportDateGeneric, parseMoneyValue, requiredText, sheetRowNumber as sheetRowNumberGeneric,
@@ -28,9 +28,9 @@ import {
 
 export type ImportField =
   | "order_date" | "purchased_from" | "sku" | "arrived"
-  | "item_description" | "item_size" | "item_condition" | "price_purchased";
+  | "item_description" | "item_size" | "item_condition" | "category" | "price_purchased";
 
-export const importColumns: { field: ImportField; heading: string; aliases: string[] }[] = [
+export const importColumns: { field: ImportField; heading: string; aliases: string[]; required?: boolean }[] = [
   { field: "order_date", heading: "Order Date", aliases: ["order date", "date", "purchase date"] },
   { field: "purchased_from", heading: "Purchased From", aliases: ["purchased from", "platform", "retailer", "source"] },
   { field: "sku", heading: "SKU", aliases: ["sku"] },
@@ -38,6 +38,12 @@ export const importColumns: { field: ImportField; heading: string; aliases: stri
   { field: "item_description", heading: "Item Description", aliases: ["item description", "description", "item", "product"] },
   { field: "item_size", heading: "Size", aliases: ["size", "item size"] },
   { field: "item_condition", heading: "Item Condition", aliases: ["item condition", "condition"] },
+  // Not required: an older template/CSV predating Category must still
+  // import cleanly (see the ImportColumn.required comment in
+  // lib/spreadsheet-import/cell-parsers.ts) — every row without this column
+  // present at all, or with a blank cell, defaults to "Other" via
+  // parseImportCategory below, never rejected for a missing/blank category.
+  { field: "category", heading: "Category", aliases: ["category", "product category"], required: false },
   { field: "price_purchased", heading: "Price Purchased", aliases: ["price purchased", "purchase price", "price", "cost"] },
 ];
 
@@ -86,6 +92,18 @@ export function parseImportPrice(value: CellValue): FieldResult<number> {
  */
 export function parseImportCondition(value: CellValue): FieldResult<string> {
   return requiredText(value, fieldLabel("item_condition"));
+}
+
+/**
+ * A blank cell (or a column entirely absent from the file — buildImportRows
+ * defaults cellsByField.category to null in that case) safely resolves to
+ * "Other", never rejected or guessed from other row content. A non-blank
+ * cell must match one of the canonical categories case-insensitively —
+ * typos are rejected explicitly rather than silently coerced.
+ */
+export function parseImportCategory(value: CellValue): FieldResult<string> {
+  const resolved = resolveCategoryText(cellToText(value));
+  return resolved.ok ? resolved : { ok: false, error: `${fieldLabel("category")} must be one of: ${purchaseCategories.join(", ")}, or left blank.` };
 }
 
 export type ImportRowValues = Record<ImportField, string>;
@@ -155,16 +173,20 @@ export function buildImportRow(sheetRow: number, cellsByField: Record<ImportFiel
   display.item_condition = condition.ok ? condition.value : cellToText(cellsByField.item_condition);
   if (!condition.ok) errors.push({ field: "item_condition", reason: condition.error });
 
+  const category = parseField(cellsByField.category, fieldLabel("category"), parseImportCategory);
+  display.category = category.ok ? category.value : cellToText(cellsByField.category);
+  if (!category.ok) errors.push({ field: "category", reason: category.error });
+
   const price = parseField(cellsByField.price_purchased, fieldLabel("price_purchased"), value => parseMoneyValue(value, "Price Purchased"));
   display.price_purchased = price.ok ? price.value.toFixed(2) : cellToText(cellsByField.price_purchased);
   if (!price.ok) errors.push({ field: "price_purchased", reason: price.error });
 
   let purchase: PurchaseImportCandidate | null = null;
-  if (!errors.length && date.ok && purchasedFrom.ok && sku.ok && arrived.ok && description.ok && size.ok && condition.ok && price.ok) {
+  if (!errors.length && date.ok && purchasedFrom.ok && sku.ok && arrived.ok && description.ok && size.ok && condition.ok && category.ok && price.ok) {
     const candidate = {
       order_date: date.value, purchased_from: purchasedFrom.value, seller_name: null,
       sku: sku.value, item_description: description.value, item_size: size.value, quantity: 1,
-      item_condition: condition.value, price_purchased: price.value, arrived: arrived.value,
+      item_condition: condition.value, category: category.value, price_purchased: price.value, arrived: arrived.value,
     };
     const parsed = purchaseImportInputSchema.safeParse(candidate);
     if (parsed.success) purchase = parsed.data;

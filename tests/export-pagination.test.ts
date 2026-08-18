@@ -16,7 +16,7 @@ import { GET as expensesExportGet } from "@/app/api/export/expenses/route";
 function purchaseRow(id: number) {
   return {
     id: `p-${id}`, order_date: "2026-01-15", purchased_from: "Vinted", sku: `SKU${id}`,
-    arrived: true, item_description: `Item ${id}`, item_size: "M", item_condition: "Brand new", price_purchased: 9.99,
+    arrived: true, item_description: `Item ${id}`, item_size: "M", item_condition: "Brand new", category: "Other", price_purchased: 9.99,
   };
 }
 function expenseRow(id: number) {
@@ -132,11 +132,11 @@ describe("GET /api/export/purchases — no longer truncated at 1,000 rows", () =
 });
 
 describe("GET /api/export/purchases — CSV format unchanged", () => {
-  it("9/10. headings and column order are unchanged", async () => {
+  it("9/10. headings and column order are unchanged apart from the new Category column", async () => {
     mockPagedFetch(fetchMock, [purchaseRow(1)], 1000);
     const response = await purchasesExportGet(exportRequest("http://test/api/export/purchases?start=2026-01-01&end=2026-01-31"));
     const csv = await response.text();
-    expect(csv.split("\r\n")[0]).toBe("Order Date,Purchased From,SKU,Arrived,Item Description,Item Size,Item Condition,Price Purchased");
+    expect(csv.split("\r\n")[0]).toBe("Order Date,Purchased From,SKU,Arrived,Item Description,Item Size,Item Condition,Category,Price Purchased");
   });
 
   it("11. commas within a value remain escaped", async () => {

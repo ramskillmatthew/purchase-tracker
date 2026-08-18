@@ -3,8 +3,9 @@
 import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { parseUkDate, formatUkDate } from "@/lib/validation/uk-date";
+import { purchaseCategories } from "@/lib/validation/purchase";
 
-type Field = "order_date" | "purchased_from" | "seller_name" | "sku" | "arrived" | "item_description" | "item_size" | "item_condition" | "price_purchased";
+type Field = "order_date" | "purchased_from" | "seller_name" | "sku" | "arrived" | "item_description" | "item_size" | "item_condition" | "category" | "price_purchased";
 type Columns = Record<Field, string>;
 type ApplyState = Record<"order_date" | "purchased_from" | "seller_name" | "arrived", boolean>;
 type BulkRow = Record<Field, string> & { price: number | null; date: string | null; dateIssue: string | null; arrivedValue: boolean | null; errors: Field[] };
@@ -14,6 +15,7 @@ const fields: { key: Field; label: string; placeholder: string }[] = [
   { key: "item_description", label: "Item Description", placeholder: "Nike Air Max 95 Black\nNew Balance 2002R Grey" },
   { key: "item_size", label: "Item Size", placeholder: "9\n8.5\n10" },
   { key: "item_condition", label: "Item Condition", placeholder: "Brand new\nGood condition from photos" },
+  { key: "category", label: "Category", placeholder: `${purchaseCategories[0]}\n${purchaseCategories[1]}` },
   { key: "price_purchased", label: "Price Purchased", placeholder: "13.49\n£15\n22.50" },
   { key: "seller_name", label: "Seller Name", placeholder: "seller_one\nseller_two" },
   { key: "purchased_from", label: "Purchased From", placeholder: "Vinted\neBay" },
@@ -49,12 +51,20 @@ function parseArrived(value: string) {
 function arrivedIsValid(value: string) {
   return !value.trim() || /^(yes|no|true|false|1|0)$/i.test(value.trim());
 }
+// Blank is valid (server-side defaults it to "Other" — see resolveBulkCategory
+// in app/api/purchases/bulk/route.ts); a non-blank value must exactly match
+// one of the canonical categories, case-insensitively.
+function categoryIsValid(value: string) {
+  const trimmed = value.trim();
+  return !trimmed || purchaseCategories.some(category => category.toLowerCase() === trimmed.toLowerCase());
+}
 function fieldFromHeading(value: string): Field | "" {
   const heading = value.trim().toLowerCase().replace(/[_-]+/g, " ");
   if (/\bsku\b/.test(heading)) return "sku";
   if (/seller/.test(heading)) return "seller_name";
   if (/arrived/.test(heading)) return "arrived";
   if (/condition/.test(heading)) return "item_condition";
+  if (/category/.test(heading)) return "category";
   if (/size/.test(heading)) return "item_size";
   if (/price|cost|amount/.test(heading)) return "price_purchased";
   if (/description|item|title/.test(heading)) return "item_description";
@@ -100,6 +110,7 @@ export default function BulkInputPage() {
     if (price === null) errors.push("price_purchased");
     if (dateIssue) errors.push("order_date");
     if (!arrivedIsValid(values.arrived)) errors.push("arrived");
+    if (!categoryIsValid(values.category)) errors.push("category");
     return { ...values, price, date, dateIssue, arrivedValue: parseArrived(values.arrived), errors };
   }), [apply, columns, count, shared]);
   const ready = rows.filter(row => !row.errors.length).length;
@@ -199,6 +210,7 @@ export default function BulkInputPage() {
       item_description: row.item_description,
       item_size: row.item_size || null,
       item_condition: row.item_condition || null,
+      category: row.category || null,
       price_purchased: row.price,
       arrived: row.arrivedValue,
     }));
@@ -278,7 +290,7 @@ export default function BulkInputPage() {
 
     <section className="bulk-panel"><div className="bulk-section-heading"><h2>Column inputs</h2><span>One line equals one purchase. Blank lines stay in position.</span></div><div className="bulk-columns">{fields.map(field => <label key={field.key}><span>{field.label}{["sku", "item_description", "price_purchased"].includes(field.key) && <b>*</b>}{sharedKeys.has(field.key) && apply[field.key as keyof ApplyState] && <i>Shared</i>}</span><textarea value={columns[field.key]} onChange={event => setColumns(current => ({ ...current, [field.key]: event.target.value }))} placeholder={field.placeholder} spellCheck={field.key === "item_description"} /></label>)}</div></section>
 
-    <section className="bulk-panel preview-panel"><div className="bulk-preview-toolbar"><div><h2>Live preview</h2><span>Click any cell to edit it.</span></div><div className="bulk-counts"><span>Rows detected <strong>{count}</strong></span><span>Ready to save <strong>{ready}</strong></span><span className={invalid ? "count-error" : ""}>Rows with errors <strong>{invalid}</strong></span></div></div>{dateIssues.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "8px 11px", color: "var(--danger, #d92d20)", fontSize: 11 }}>{dateIssues.map(issue => <span key={issue}>{issue}</span>)}</div>}<div className="bulk-table-scroll"><table className="bulk-table"><thead><tr><th>#</th>{fields.filter(field => field.key !== "price_purchased").sort((a, b) => ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition"].indexOf(a.key) - ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition"].indexOf(b.key)).map(field => <th key={field.key}>{field.label}</th>)}<th>Price Purchased</th></tr></thead><tbody>{rows.length ? rows.map((row, index) => <tr key={index}><td>{index + 1}</td>{(["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "price_purchased"] as Field[]).map(field => <td key={field} className={row.errors.includes(field) ? "bulk-cell-error" : ""}><input value={field === "order_date" ? displayDate(row[field]) : field === "price_purchased" && row.price !== null ? String(row.price) : row[field]} onChange={event => editCell(field, index, event.target.value)} aria-label={`${fields.find(item => item.key === field)?.label} row ${index + 1}`} /></td>)}</tr>) : <tr className="bulk-empty-row"><td colSpan={10}>Paste or type values into a column to create preview rows.</td></tr>}</tbody></table></div></section>
+    <section className="bulk-panel preview-panel"><div className="bulk-preview-toolbar"><div><h2>Live preview</h2><span>Click any cell to edit it.</span></div><div className="bulk-counts"><span>Rows detected <strong>{count}</strong></span><span>Ready to save <strong>{ready}</strong></span><span className={invalid ? "count-error" : ""}>Rows with errors <strong>{invalid}</strong></span></div></div>{dateIssues.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "8px 11px", color: "var(--danger, #d92d20)", fontSize: 11 }}>{dateIssues.map(issue => <span key={issue}>{issue}</span>)}</div>}<div className="bulk-table-scroll"><table className="bulk-table"><thead><tr><th>#</th>{fields.filter(field => field.key !== "price_purchased").sort((a, b) => ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category"].indexOf(a.key) - ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category"].indexOf(b.key)).map(field => <th key={field.key}>{field.label}</th>)}<th>Price Purchased</th></tr></thead><tbody>{rows.length ? rows.map((row, index) => <tr key={index}><td>{index + 1}</td>{(["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category", "price_purchased"] as Field[]).map(field => <td key={field} className={row.errors.includes(field) ? "bulk-cell-error" : ""}><input value={field === "order_date" ? displayDate(row[field]) : field === "price_purchased" && row.price !== null ? String(row.price) : row[field]} onChange={event => editCell(field, index, event.target.value)} aria-label={`${fields.find(item => item.key === field)?.label} row ${index + 1}`} /></td>)}</tr>) : <tr className="bulk-empty-row"><td colSpan={11}>Paste or type values into a column to create preview rows.</td></tr>}</tbody></table></div></section>
 
     {saveError && <div className="bulk-save-error">{saveError}</div>}
     <div className="bulk-save-bar"><div><strong>{ready} purchases ready</strong><span>{invalid ? `${invalid} invalid rows will be skipped.` : "Only valid rows will be saved."}</span></div><button className="button" disabled={!ready || saving || !!sharedDateError} onClick={() => setConfirming(true)}>{saving ? "Saving..." : "Save All Purchases"}</button></div>

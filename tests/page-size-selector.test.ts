@@ -221,7 +221,7 @@ describe("app/purchases/page.tsx — page-size selector integration", () => {
     const headerBlock = source.slice(source.indexOf('<header className="purchase-topbar">'), source.indexOf("</header>"));
     expect(headerBlock).not.toContain("PageSizeSelect");
     const paginationBarIndex = source.indexOf('<div className="pagination-bar">');
-    const confirmationIndex = source.indexOf("{confirmation &&");
+    const confirmationIndex = source.indexOf('{confirmation?.type === "one"');
     expect(paginationBarIndex).toBeGreaterThan(-1);
     expect(confirmationIndex).toBeGreaterThan(paginationBarIndex);
     const footerBlock = source.slice(paginationBarIndex, confirmationIndex);

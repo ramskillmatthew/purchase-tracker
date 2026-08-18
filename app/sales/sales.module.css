@@ -1,0 +1,1454 @@
+/*
+ * Sales feature styling — deliberately a CSS Module, NOT app/globals.css.
+ * Every other feature in this codebase shares one global stylesheet, but
+ * Investments is being actively edited there in a concurrent session; a
+ * CSS Module gives the Sales feature its own class names (locally scoped
+ * and hashed by Next.js at build time) with zero risk of colliding with, or
+ * needing to touch, that in-flight work. Reuses the app's existing design
+ * tokens throughout (var(--primary), var(--surface), var(--line), etc. —
+ * defined on :root/.dark in globals.css, which cascade into this module
+ * unaffected by its class-name scoping) so it still looks like a native
+ * part of the same product, and reuses existing global utility classes
+ * (.button, .button-secondary, .button-danger, .input, .card, .page-shell,
+ * .data-panel, .dialog-*) directly in markup wherever they already fit.
+ */
+
+/* ---------- Sales list page ---------- */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.topbarActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.summaryCard {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.summaryCard span {
+  display: block;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.summaryCard strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: -.02em;
+}
+
+.negative {
+  color: var(--danger) !important;
+}
+
+.listToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.searchBox {
+  display: flex;
+  min-width: 220px;
+  flex: 1 1 260px;
+  max-width: 420px;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.searchBox input {
+  flex: 1;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+}
+
+.searchBox svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--subtle);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.statusFilterSwitch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.statusFilterSwitch button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.statusFilterActive {
+  color: white !important;
+  background: var(--primary) !important;
+}
+
+.selectionHint {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.selectionActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.salesTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.salesTable th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 760;
+  letter-spacing: .06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.salesTable td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.salesTable .numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.salesRow {
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.salesRow:hover,
+.salesRow:focus-visible {
+  background: var(--primary-soft);
+  outline: none;
+}
+
+.rowSelected,
+.rowSelected:hover {
+  background: var(--primary-soft) !important;
+}
+
+.cancelledRow {
+  opacity: .64;
+}
+
+.cancelledRow:hover,
+.cancelledRow:focus-visible {
+  opacity: 1;
+}
+
+.checkboxCell {
+  padding: 0 !important;
+  text-align: center;
+}
+
+.checkboxCell input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.profitPositive {
+  color: #16845d;
+}
+
+.profitNegative {
+  color: var(--danger);
+}
+
+.descriptionCell {
+  max-width: 260px;
+}
+
+.descriptionLine {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.descriptionLine + .descriptionLine {
+  margin-top: 2px;
+}
+
+.descriptionMore {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.profitPill {
+  display: inline-flex;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.profitPillRed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.profitPillAmber {
+  color: #a15c00;
+  background: rgba(245, 158, 11, .15);
+}
+
+.profitPillGreen {
+  color: #16845d;
+  background: rgba(38, 190, 131, .12);
+}
+
+.statusPill {
+  display: inline-flex;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 720;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.statusCompleted {
+  color: #16845d;
+  background: rgba(38, 190, 131, .12);
+}
+
+.statusRefunded,
+.statusCancelled {
+  color: var(--muted);
+  background: var(--surface-3);
+}
+
+.emptyState,
+.loadingState,
+.errorState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.emptyState strong,
+.errorState strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.errorState strong {
+  color: var(--danger);
+}
+
+.skeletonRow {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-2) 37%, var(--surface-3) 63%);
+  background-size: 400% 100%;
+  animation: salesSkeleton 1.4s ease infinite;
+}
+
+@keyframes salesSkeleton {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* ---------- Sale builder (Quick Sale / Order Sale) ---------- */
+
+.builderLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  align-items: start;
+  gap: 16px;
+}
+
+.builderMain {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.modeSwitch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.modeSwitch button {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.modeSwitchActive {
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--shadow-sm);
+}
+
+.searchPanel {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.searchInputRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.searchInputRow .input {
+  flex: 1;
+}
+
+.resultHint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.resultList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.resultRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.resultRow:hover,
+.resultRowHighlighted {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+  background: var(--primary-soft);
+}
+
+.resultRowAdded {
+  opacity: .55;
+}
+
+.resultInfo {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.resultTitle {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resultMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.resultMeta span {
+  white-space: nowrap;
+}
+
+.resultCost {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.resultAddButton {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--line));
+  border-radius: 7px;
+  color: var(--primary);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 720;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.resultAddButton:hover {
+  color: white;
+  background: var(--primary);
+}
+
+.resultAddButton:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+/* ---------- Basket ---------- */
+
+.basketPanel {
+  position: sticky;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+}
+
+.basketHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.basketHeading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 730;
+}
+
+.basketCount {
+  display: inline-grid;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.basketEmpty {
+  padding: 22px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.basketGroupList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.basketGroup {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.basketGroupHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.basketGroupInfo {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.basketGroupTitle {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.basketGroupMeta {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.basketGroupFinance {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.basketGroupCost {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.basketGroupProfit {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.iconButton {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.iconButton:hover {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+}
+
+.basketUnitList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 10px 8px;
+}
+
+.basketUnitDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 0;
+  border-top: 1px solid var(--line);
+}
+
+.basketUnitTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.basketUnitLabel {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.basketUnitProfit {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.basketUnitBreakdown {
+  color: var(--subtle);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.unitPriceRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 8px;
+}
+
+.unitPriceRow label {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.unitPriceRow input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.basketTotals {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.basketTotalsRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 11.5px;
+}
+
+.basketTotalsRow span:first-child {
+  color: var(--muted);
+}
+
+.basketTotalsRow span:last-child {
+  color: var(--text);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.basketTotalsRowLarge span:last-child {
+  font-size: 15px;
+  font-weight: 750;
+}
+
+/* ---------- Sale details form ---------- */
+
+.detailsGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.detailsGrid .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detailsGridWide {
+  grid-column: 1 / -1;
+}
+
+.revenueModeSwitch {
+  display: flex;
+  gap: 6px;
+}
+
+.revenueModeSwitch button {
+  flex: 1;
+  padding: 8px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.revenueModeActive {
+  color: white !important;
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+}
+
+.helperNote {
+  margin: 2px 0 0;
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.reconcileWarning {
+  margin: 4px 0 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line));
+  border-radius: 7px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.recordButton {
+  width: 100%;
+  min-height: 44px;
+  font-size: 12.5px;
+}
+
+.conflictError {
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line));
+  border-radius: 8px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.successBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line));
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--primary-soft);
+  font-size: 12px;
+}
+
+/* ---------- Sale detail (view one sale) page ---------- */
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.detailFact span {
+  display: block;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 720;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.detailFact strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 720;
+}
+
+.itemsTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.itemsTable th {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 760;
+  letter-spacing: .05em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.itemsTable td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.itemsTable .numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.deletedPurchaseNote {
+  color: var(--subtle);
+  font-size: 10px;
+  font-style: italic;
+}
+
+.readOnlyNote {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 11px;
+}
+
+.cancellationNote {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-2);
+  font-size: 11px;
+}
+
+.cancellationNote strong {
+  font-weight: 700;
+}
+
+/* ---------- Cancel sales dialog ---------- */
+
+.cancelDialog {
+  position: relative;
+  width: min(480px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 30px 100px rgba(0, 0, 0, .32);
+}
+
+.cancelDialogEyebrow {
+  margin: 0 0 6px;
+  color: var(--primary);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.cancelDialog h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 730;
+  letter-spacing: -.03em;
+}
+
+.cancelDialogMessage {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.cancelDialogStats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.cancelDialogStats > div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.cancelDialogStats span {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.cancelDialogStats strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 730;
+  font-variant-numeric: tabular-nums;
+}
+
+.cancelDialogQuestion {
+  margin: 18px 0 0;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.cancelDialogActions {
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+  gap: 8px;
+}
+
+.cancelDialogActions .button,
+.cancelDialogActions .button-secondary {
+  min-height: 42px;
+  font-size: 12px;
+}
+
+.cancelDialogDismiss {
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.cancelDialogDismiss:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+/* ---------- Sales Reports dashboard ---------- */
+
+.reportBackLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.reportBackLink:hover {
+  color: var(--text);
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 16px;
+}
+
+.presetGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.presetButton {
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  white-space: nowrap;
+}
+
+.presetButton:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.presetButtonActive {
+  color: white !important;
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+}
+
+.rangeInfo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rangeInfoLabel {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.rangeInfoValue {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.customRangeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  width: 100%;
+  padding-top: 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.customRangeField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.customRangeField label {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.customRangeField input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.customRangeError {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.heroCardsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.heroCard {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.heroCard span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.heroCard strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 32px;
+  font-weight: 780;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/*
+ * Dashboard-scale profit colouring — negative/positive only (see
+ * lib/sales/profit.ts's dashboardProfitTone doc comment for the full
+ * rationale: the existing per-sale £10/£20 profitBadgeTone bands would make
+ * almost any real period total read as "green", carrying no signal at this
+ * scale).
+ */
+.heroCardPositive strong {
+  color: #16845d;
+}
+
+.heroCardNegative strong {
+  color: var(--danger);
+}
+
+/* "Average profit per unit" card — colours the value text only (not a pill; this card already shares the standard .summaryCard type scale), using the same red/amber/green per-sale-scale bands as profitBadgeTone. */
+.avgProfitRed {
+  color: var(--danger) !important;
+}
+
+.avgProfitAmber {
+  color: #a15c00 !important;
+}
+
+.avgProfitGreen {
+  color: #16845d !important;
+}
+
+.cardsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.reportSection {
+  margin-bottom: 18px;
+}
+
+.reportSectionHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.reportSectionHeader h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 730;
+}
+
+.chartToolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chartLegend {
+  display: flex;
+  gap: 12px;
+}
+
+.chartLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.legendSwatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+
+.legendSwatchRevenue {
+  background: var(--primary);
+}
+
+.legendSwatchProfit {
+  background: #16845d;
+}
+
+.legendSwatchLoss {
+  background: var(--danger);
+}
+
+.chartPanel {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.chartScroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.chartSvg {
+  display: block;
+}
+
+.chartBarGroup {
+  cursor: pointer;
+}
+
+.chartBarGroup:focus-visible rect {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.chartBarGroupActive rect.chartRevenueBar {
+  fill: var(--primary);
+}
+
+.chartAxisLabel {
+  fill: var(--muted);
+  font-size: 9px;
+}
+
+.chartZeroLine {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.chartDetailPanel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.chartDetailItem span {
+  display: block;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.chartDetailItem strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 730;
+  font-variant-numeric: tabular-nums;
+}
+
+.sortGroup {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.sortGroup button {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sortGroupActive {
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--shadow-sm);
+}
+
+.comparisonPanel {
+  padding: 6px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow-x: auto;
+}
+
+.comparisonTable {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.comparisonTable th {
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 760;
+  letter-spacing: .05em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.comparisonTable td {
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.comparisonTable tr:last-child td {
+  border-bottom: 0;
+}
+
+.comparisonTable .numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.comparisonLabelCell {
+  min-width: 160px;
+  white-space: normal !important;
+}
+
+.comparisonBarTrack {
+  position: relative;
+  width: 100%;
+  min-width: 90px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.comparisonBarFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.comparisonBarFillNegative {
+  background: var(--danger);
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 900px) {
+  .builderLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .basketPanel {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .detailsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .descriptionCell {
+    max-width: 160px;
+  }
+
+  .cancelDialogStats {
+    grid-template-columns: 1fr;
+  }
+}

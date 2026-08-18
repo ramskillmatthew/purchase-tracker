@@ -5,16 +5,19 @@ import PurchaseForm from "@/components/PurchaseForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import PurchaseImportDialog from "@/components/PurchaseImportDialog";
 import BulkArrivalsDialog from "@/components/BulkArrivalsDialog";
+import PurchaseProtectedDialog from "@/components/PurchaseProtectedDialog";
 import TaskToast from "@/components/TaskToast";
 import PageSizeSelect from "@/components/PageSizeSelect";
 import ArrivalToggle from "@/components/ArrivalToggle";
 import StockStatusToggle from "@/components/StockStatusToggle";
-import { purchaseAddedMessage, stockStatusChangedMessage } from "@/lib/success-messages";
+import { purchaseAddedMessage, purchasesDeletedMessage, stockStatusChangedMessage } from "@/lib/success-messages";
 import { DEFAULT_PAGE_SIZE, parseStoredPageSize, totalPagesFor, type PageSize } from "@/lib/pagination";
 import { matchesStockFilter, parseStockFilter, stockFilters, type StockFilter } from "@/lib/purchases";
 import { buildPurchaseSearchText, matchesPurchaseSearchText, normalizeSearchTerms } from "@/lib/purchase-search";
 import { pruneMissingIds, resolveRowClick, selectionSummary, toggleId, toggleVisiblePage } from "@/lib/purchases-selection";
-import type { Purchase, StockStatus } from "@/lib/types";
+import { deletionConfirmLabel, deletionDialogMessage, deletionDialogTitle, type DeletionEligibility } from "@/lib/purchases-delete-copy";
+import { comparePurchasesForDisplay, compareSkuDescending } from "@/lib/purchase-order";
+import type { DeletePurchasesResult, PurchaseListItem, StockStatus } from "@/lib/types";
 
 const PURCHASES_PAGE_SIZE_KEY = "trotters:purchases-page-size";
 
@@ -46,8 +49,8 @@ function PurchasesPageInner() {
   const [open, setOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [bulkArrivalsOpen, setBulkArrivalsOpen] = useState(false);
-  const [editing, setEditing] = useState<Purchase | undefined>();
-  const [rows, setRows] = useState<Purchase[]>([]);
+  const [editing, setEditing] = useState<PurchaseListItem | undefined>();
+  const [rows, setRows] = useState<PurchaseListItem[]>([]);
   const [error, setError] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "order_date", direction: "desc" });
   const [page, setPage] = useState(1);
@@ -55,8 +58,20 @@ function PurchasesPageInner() {
   const [stockFilter, setStockFilter] = useState<StockFilter>(() => parseStockFilter(searchParams.get("stock")));
   const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
   const [confirmation, setConfirmation] = useState<{ type: "one" | "all"; id?: string } | null>(null);
+  // Shared by both the single-delete and Clear All confirm dialogs (only
+  // one is ever open at a time) — tracks the in-flight request so a failure
+  // (including the race-condition 409 the safe-deletion RPC itself detects)
+  // keeps the dialog open with a clear error, instead of closing regardless
+  // of outcome.
+  const [deleteActionPending, setDeleteActionPending] = useState(false);
+  const [deleteActionError, setDeleteActionError] = useState("");
+  // The sales_orders.id currently protecting a purchase the user just tried
+  // to delete via its row's own Delete button — shows an informational,
+  // non-destructive explanation instead of the normal delete confirmation.
+  const [protectedNoticeSaleId, setProtectedNoticeSaleId] = useState<string | null>(null);
   const [addedToast, setAddedToast] = useState(false);
   const [stockToast, setStockToast] = useState<string | null>(null);
+  const [deleteToast, setDeleteToast] = useState<string | null>(null);
   // Selected purchase UUIDs, independent of the current page/filter/sort —
   // never a row index, so selections survive pagination and re-sorting.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -128,15 +143,59 @@ function PurchasesPageInner() {
     setSelectedIds(current => pruneMissingIds(current, new Set(rows.map(row => row.id))));
   }, [rows]);
 
+  // Only ever called for a purchase this page's own eligibility check
+  // (row.protectedSaleId) already believed was deletable — but the
+  // authoritative check is always the RPC's own, transactional one, so a
+  // 409 here (something became protected between preflight and this click)
+  // is a real, expected outcome, not a bug: it must fail safely, with the
+  // dialog staying open and a clear explanation, never a silent no-op.
   async function remove(id: string) {
-    const response = await fetch(`/api/purchases?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    setConfirmation(null);
-    if (response.ok) load(); else setError("Could not delete purchase.");
+    if (deleteActionPending) return;
+    setDeleteActionPending(true);
+    setDeleteActionError("");
+    try {
+      const response = await fetch(`/api/purchases?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const body = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) {
+        setDeleteActionError(body?.error || "Could not delete purchase.");
+        setDeleteActionPending(false);
+        if (response.status === 409) load(); // refresh so protection flags reflect the new reality
+        return;
+      }
+      setConfirmation(null);
+      setDeleteActionPending(false);
+      load();
+    } catch {
+      setDeleteActionError("Could not delete purchase.");
+      setDeleteActionPending(false);
+    }
   }
+  // Shares safe_delete_purchases with every other deletion path — never a
+  // separate unconditional wipe. Purchases currently linked to an active or
+  // completed sale are left completely intact; the dialog the user just
+  // confirmed already told them exactly how many would be deleted vs kept.
   async function clearAll() {
-    const response = await fetch("/api/purchases?clear=all", { method: "DELETE" });
-    setConfirmation(null);
-    if (response.ok) { setEditing(undefined); setOpen(false); load(); } else setError("Could not clear purchases.");
+    if (deleteActionPending) return;
+    setDeleteActionPending(true);
+    setDeleteActionError("");
+    try {
+      const response = await fetch("/api/purchases?clear=all", { method: "DELETE" });
+      const body = await response.json().catch(() => null) as (DeletePurchasesResult & { error?: string }) | null;
+      if (!response.ok) {
+        setDeleteActionError(body?.error || "Could not clear purchases.");
+        setDeleteActionPending(false);
+        return;
+      }
+      setConfirmation(null);
+      setDeleteActionPending(false);
+      setEditing(undefined);
+      setOpen(false);
+      if (body) setDeleteToast(purchasesDeletedMessage(body.deletedCount, body.protectedCount));
+      load();
+    } catch {
+      setDeleteActionError("Could not clear purchases.");
+      setDeleteActionPending(false);
+    }
   }
   // Updates the one row in place — never refetches the whole table, so
   // toggling arrival on a large list stays instant and doesn't disturb sort
@@ -195,17 +254,35 @@ function PurchasesPageInner() {
       : searchIndex.filter(entry => matchesPurchaseSearchText(entry.searchText, searchTerms)).map(entry => entry.row),
     [stockFilteredRows, searchIndex, searchTerms],
   );
-  const sortedRows = useMemo(() => [...filteredRows].sort((a, b) => {
-    const left = a[sort.key];
-    const right = b[sort.key];
-    if (left === right) return 0;
-    if (left === null || left === undefined) return 1;
-    if (right === null || right === undefined) return -1;
-    const result = typeof left === "number" && typeof right === "number"
-      ? left - right
-      : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
-    return sort.direction === "asc" ? result : -result;
-  }), [filteredRows, sort]);
+  // The default view (order_date, desc — this page's initial sort state)
+  // uses the SAME authoritative multi-key comparator as GET /api/purchases
+  // itself (see lib/purchase-order.ts): order_date desc, then numeric SKU
+  // desc, then created_at desc, then id — never just the array's incoming
+  // order. The SKU column also delegates to that same numeric-safe (BigInt)
+  // comparator, rather than a separate localeCompare-based one, so there is
+  // only ever one definition of "numeric SKU order" on this page. Every
+  // other column keeps its existing generic comparator, unchanged.
+  const sortedRows = useMemo(() => {
+    if (sort.key === "order_date") {
+      const base = [...filteredRows].sort(comparePurchasesForDisplay);
+      return sort.direction === "asc" ? base.reverse() : base;
+    }
+    if (sort.key === "sku") {
+      const base = [...filteredRows].sort((a, b) => compareSkuDescending(a.sku, b.sku));
+      return sort.direction === "asc" ? base.reverse() : base;
+    }
+    return [...filteredRows].sort((a, b) => {
+      const left = a[sort.key];
+      const right = b[sort.key];
+      if (left === right) return 0;
+      if (left === null || left === undefined) return 1;
+      if (right === null || right === undefined) return -1;
+      const result = typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+      return sort.direction === "asc" ? result : -result;
+    });
+  }, [filteredRows, sort]);
   const totalPages = totalPagesFor(sortedRows.length, pageSize);
   const pageRows = sortedRows.slice((page - 1) * pageSize, page * pageSize);
   useEffect(() => { setPage(current => Math.min(current, totalPages)); }, [totalPages]);
@@ -219,6 +296,26 @@ function PurchasesPageInner() {
   // only exposed as a DOM property, set imperatively (mirrors the same
   // pattern in components/listings-review/ListingsTable.tsx).
   useEffect(() => { if (selectAllRef.current) selectAllRef.current.indeterminate = selection.someSelected; }, [selection.someSelected]);
+
+  // The bulk-delete preflight: split the CURRENT selection into what's
+  // actually deletable vs protected right now, from the same already-loaded
+  // `rows` this page just rendered (protectedSaleId is annotated by GET
+  // /api/purchases — see lib/purchases-protection.ts) — no separate
+  // round-trip needed to show the eligibility split. The safe_delete_purchases
+  // RPC re-validates authoritatively regardless, so a purchase that becomes
+  // protected between this and the actual confirm click still fails safely
+  // (see bulkDeleteSelected below), never silently.
+  const selectedRows = useMemo(() => rows.filter(row => selectedIds.has(row.id)), [rows, selectedIds]);
+  const selectedEligibility: DeletionEligibility = useMemo(() => ({
+    deletableCount: selectedRows.filter(row => row.protectedSaleId === null).length,
+    protectedCount: selectedRows.filter(row => row.protectedSaleId !== null).length,
+  }), [selectedRows]);
+  // Clear All's own preflight — over every currently loaded purchase, not
+  // just the selection.
+  const allEligibility: DeletionEligibility = useMemo(() => ({
+    deletableCount: rows.filter(row => row.protectedSaleId === null).length,
+    protectedCount: rows.filter(row => row.protectedSaleId !== null).length,
+  }), [rows]);
 
   function changeSort(key: SortKey) {
     setSort(current => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" });
@@ -239,31 +336,54 @@ function PurchasesPageInner() {
   // Priority order: Shift+click always ranges (never clears); a plain click
   // clears the whole selection if anything is selected; only with nothing
   // selected does a plain click open the purchase. See resolveRowClick.
-  function handleRowClick(event: React.MouseEvent, row: Purchase) {
+  function handleRowClick(event: React.MouseEvent, row: PurchaseListItem) {
     const action = resolveRowClick({ shiftKey: event.shiftKey, hasSelection: selectedIds.size > 0, pageIds, anchorId: rangeAnchor, targetId: row.id });
     if (action.type === "range") { setSelectedIds(current => { const next = new Set(current); for (const id of action.ids) next.add(id); return next; }); return; }
     if (action.type === "select-single") { setSelectedIds(current => { const next = new Set(current); next.add(action.id); return next; }); setRangeAnchor(action.id); return; }
     if (action.type === "clear") { clearSelection(); return; }
     router.push(`/purchases/${row.id}`);
   }
+  // Only ever sends the ids this page's own preflight (selectedEligibility)
+  // already showed as deletable — the confirm button's own label ("Delete N
+  // available purchases") is an explicit promise about exactly that count,
+  // so a purchase already known-protected is never even included in the
+  // request. safe_delete_purchases still re-validates every id it does
+  // receive authoritatively; protectedIds in its response covers only a
+  // genuine race (something protected between preflight and this click),
+  // reconciled below by keeping exactly those ids selected.
   async function bulkDeleteSelected() {
     if (bulkDeleting) return;
+    const deletableIds = selectedRows.filter(row => row.protectedSaleId === null).map(row => row.id);
+    if (deletableIds.length === 0) return;
     setBulkDeleting(true);
     setBulkDeleteError("");
     try {
-      const ids = Array.from(selectedIds);
       const response = await fetch("/api/purchases/bulk-delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ ids: deletableIds }),
       });
-      if (!response.ok) { setBulkDeleteError("Could not delete the selected purchases. Try again."); setBulkDeleting(false); return; }
-      const { deletedIds } = await response.json() as { deletedIds: string[] };
-      const deleted = new Set<string>(deletedIds);
-      setSelectedIds(current => { const next = new Set(current); for (const id of deleted) next.delete(id); return next; });
-      setRangeAnchor(current => (current && deleted.has(current) ? null : current));
+      const body = await response.json().catch(() => null) as (DeletePurchasesResult & { error?: string }) | null;
+      if (!response.ok) {
+        setBulkDeleteError(body?.error || "Could not delete the selected purchases. Try again.");
+        setBulkDeleting(false);
+        if (response.status === 409) load();
+        return;
+      }
+      const result = body as DeletePurchasesResult;
+      const stillProtected = new Set(result.protectedIds);
+      setSelectedIds(current => {
+        const next = new Set(current);
+        for (const id of deletableIds) if (!stillProtected.has(id)) next.delete(id);
+        return next;
+      });
+      setRangeAnchor(current => (current && deletableIds.includes(current) && !stillProtected.has(current) ? null : current));
       setBulkDeleteConfirmOpen(false);
       setBulkDeleting(false);
+      // The originally-selected-but-already-protected count (excluded from
+      // the request entirely) plus anything newly protected by a race —
+      // together the true total the user's selection contained.
+      setDeleteToast(purchasesDeletedMessage(result.deletedCount, selectedEligibility.protectedCount + result.protectedCount));
       load();
     } catch {
       setBulkDeleteError("Could not delete the selected purchases. Try again.");
@@ -348,7 +468,7 @@ function PurchasesPageInner() {
           <td><span className="sku-pill">{row.sku}</span></td>
           <td><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
           <td><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
-          <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
+          <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); if (row.protectedSaleId) setProtectedNoticeSaleId(row.protectedSaleId); else setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
         </tr>) : hasActiveSearch ? <tr className="grid-empty-row"><td colSpan={10}><div><strong>No matching purchases</strong><span>No purchases match your search. Try different search terms, or clear the search to see all purchases in this view.</span><button onClick={() => changeQuery("")}>Clear search</button></div></td></tr> : <tr className="grid-empty-row"><td colSpan={10}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different stock filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
       </table></div>
       <div className="pagination-bar">
@@ -362,20 +482,45 @@ function PurchasesPageInner() {
         </div>
       </div>
     </div>
-    {confirmation && <ConfirmDialog title={confirmation.type === "all" ? "Clear all purchases?" : "Delete this purchase?"} message={confirmation.type === "all" ? `This will permanently remove all ${rows.length.toLocaleString("en-GB")} saved purchase records. This cannot be undone.` : "This purchase will be permanently removed from your history. This cannot be undone."} confirmLabel={confirmation.type === "all" ? "Clear all purchases" : "Delete purchase"} onCancel={() => setConfirmation(null)} onConfirm={() => confirmation.type === "all" ? clearAll() : remove(confirmation.id!)} />}
+    {confirmation?.type === "one" && <ConfirmDialog
+      title="Delete this purchase?"
+      message="This purchase will be permanently removed from your history. This cannot be undone."
+      confirmLabel="Delete purchase"
+      confirming={deleteActionPending}
+      confirmingLabel="Deleting…"
+      error={deleteActionError}
+      onCancel={() => { if (!deleteActionPending) { setConfirmation(null); setDeleteActionError(""); } }}
+      onConfirm={() => remove(confirmation.id!)}
+    />}
+    {confirmation?.type === "all" && <ConfirmDialog
+      title={deletionDialogTitle(allEligibility)}
+      message={deletionDialogMessage(allEligibility)}
+      confirmLabel={deletionConfirmLabel(allEligibility)}
+      hideConfirm={allEligibility.deletableCount === 0}
+      cancelLabel={allEligibility.deletableCount === 0 ? "Close" : undefined}
+      confirming={deleteActionPending}
+      confirmingLabel="Clearing…"
+      error={deleteActionError}
+      onCancel={() => { if (!deleteActionPending) { setConfirmation(null); setDeleteActionError(""); } }}
+      onConfirm={clearAll}
+    />}
     {bulkDeleteConfirmOpen && <ConfirmDialog
-      title={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? "" : "s"}?`}
-      message="The selected purchase records will be permanently removed. This cannot be undone."
-      confirmLabel={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? "" : "s"}`}
+      title={deletionDialogTitle(selectedEligibility)}
+      message={deletionDialogMessage(selectedEligibility)}
+      confirmLabel={deletionConfirmLabel(selectedEligibility)}
+      hideConfirm={selectedEligibility.deletableCount === 0}
+      cancelLabel={selectedEligibility.deletableCount === 0 ? "Close" : undefined}
       confirming={bulkDeleting}
       confirmingLabel="Deleting…"
       error={bulkDeleteError}
       onCancel={() => { if (!bulkDeleting) { setBulkDeleteConfirmOpen(false); setBulkDeleteError(""); } }}
       onConfirm={bulkDeleteSelected}
     />}
+    {protectedNoticeSaleId && <PurchaseProtectedDialog saleId={protectedNoticeSaleId} onClose={() => setProtectedNoticeSaleId(null)} />}
     {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
     {bulkArrivalsOpen && <BulkArrivalsDialog onClose={() => setBulkArrivalsOpen(false)} onApplied={applyBulkArrivals} />}
     {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
     {stockToast && <TaskToast message={stockToast} onDismiss={() => setStockToast(null)} position="bottom-right" />}
+    {deleteToast && <TaskToast message={deleteToast} onDismiss={() => setDeleteToast(null)} />}
   </section>;
 }

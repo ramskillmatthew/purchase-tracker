@@ -266,10 +266,10 @@ describe("buildImportRows", () => {
 describe("SAFETY: formula cells are rejected explicitly, never accepted as their cached result", () => {
   const fieldLabels: Record<ImportField, string> = {
     order_date: "Order Date", purchased_from: "Purchased From", sku: "SKU", arrived: "Arrived",
-    item_description: "Item Description", item_size: "Size", item_condition: "Item Condition", price_purchased: "Price Purchased",
+    item_description: "Item Description", item_size: "Size", item_condition: "Item Condition", category: "Category", price_purchased: "Price Purchased",
   };
 
-  it("applies to all eight mapped fields, each with its own clear, field-specific message", () => {
+  it("applies to all nine mapped fields (including the optional Category column), each with its own clear, field-specific message", () => {
     for (const field of importColumns.map(c => c.field)) {
       const result = buildImportRows(aoaFrom([cellsFor({ [field]: FORMULA_CELL })]));
       expect(result.ok).toBe(true);
@@ -306,7 +306,7 @@ describe("SAFETY: formula cells are rejected explicitly, never accepted as their
     const allFormula = importColumns.reduce((acc, c) => ({ ...acc, [c.field]: FORMULA_CELL }), {} as Record<ImportField, CellValue>);
     const result = buildImportRows(aoaFrom([allFormula]));
     expect(result.ok).toBe(true);
-    if (result.ok) { expect(result.rows).toHaveLength(1); expect(result.rows[0].errors).toHaveLength(8); }
+    if (result.ok) { expect(result.rows).toHaveLength(1); expect(result.rows[0].errors).toHaveLength(importColumns.length); }
   });
 
   it("REGRESSION: ordinary, non-formula values for every field are completely unaffected", () => {

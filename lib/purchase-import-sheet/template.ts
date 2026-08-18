@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { conditions } from "@/lib/validation/purchase";
+import { conditions, purchaseCategories } from "@/lib/validation/purchase";
 import { importColumns } from "./schema";
 
 /**
@@ -11,7 +11,7 @@ import { importColumns } from "./schema";
 
 const COLUMN_WIDTHS: Record<string, number> = {
   order_date: 14, purchased_from: 22, sku: 14, arrived: 10,
-  item_description: 40, item_size: 12, item_condition: 32, price_purchased: 16,
+  item_description: 40, item_size: 12, item_condition: 32, category: 16, price_purchased: 16,
 };
 
 // Working range for dropdown validation and formats — generous enough for
@@ -36,7 +36,7 @@ export async function buildImportTemplate(): Promise<Buffer> {
     cell.alignment = { vertical: "middle", horizontal: "left" };
     cell.border = { bottom: { style: "thin", color: { argb: "FF1F2937" } } };
   });
-  sheet.autoFilter = { from: "A1", to: "H1" };
+  sheet.autoFilter = { from: "A1", to: `${String.fromCharCode(64 + importColumns.length)}1` };
 
   sheet.getColumn("order_date").numFmt = "dd/mm/yyyy";
   sheet.getColumn("sku").numFmt = "@";
@@ -44,9 +44,11 @@ export async function buildImportTemplate(): Promise<Buffer> {
 
   const arrivedColumn = String.fromCharCode(65 + importColumns.findIndex(c => c.field === "arrived"));
   const conditionColumn = String.fromCharCode(65 + importColumns.findIndex(c => c.field === "item_condition"));
+  const categoryColumn = String.fromCharCode(65 + importColumns.findIndex(c => c.field === "category"));
   for (let row = 2; row <= VALIDATION_ROWS; row++) {
     sheet.getCell(`${arrivedColumn}${row}`).dataValidation = { type: "list", allowBlank: true, formulae: ['"Yes,No"'] };
     sheet.getCell(`${conditionColumn}${row}`).dataValidation = { type: "list", allowBlank: true, formulae: [`"${conditions.join(",")}"`] };
+    sheet.getCell(`${categoryColumn}${row}`).dataValidation = { type: "list", allowBlank: true, formulae: [`"${purchaseCategories.join(",")}"`] };
   }
 
   const instructions = workbook.addWorksheet("Instructions");
@@ -64,6 +66,7 @@ export async function buildImportTemplate(): Promise<Buffer> {
     "Size is required.",
     `Item Condition: choose one of ${conditions.join(", ")} for a new purchase.`,
     "Historical spreadsheet imports may use a factual free-text condition description, such as ‘Holes in heel’ or ‘Scuffs on toe box’. New purchases should use one of the standard conditions.",
+    `Category is optional — choose one of ${purchaseCategories.join(", ")}. Leaving it blank (or omitting the column entirely) defaults to Other.`,
     "Price Purchased must be a non-negative amount in pounds, e.g. 12.50.",
     "Do not add totals, merged cells, notes, or formulas within the import table.",
   ];

@@ -11,6 +11,7 @@ const previewColumns = [
   { key: "item_description", label: "Item Description" },
   { key: "item_size", label: "Size" },
   { key: "item_condition", label: "Item Condition" },
+  { key: "category", label: "Category" },
   { key: "price_purchased", label: "Price Purchased" },
 ];
 

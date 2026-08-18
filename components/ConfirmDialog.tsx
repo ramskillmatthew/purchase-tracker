@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-export default function ConfirmDialog({ title, message, confirmLabel, onConfirm, onCancel, confirming = false, confirmingLabel, error }: {
+export default function ConfirmDialog({ title, message, confirmLabel, onConfirm, onCancel, confirming = false, confirmingLabel, error, hideConfirm = false, cancelLabel }: {
   title: string;
   message: string;
   confirmLabel: string;
@@ -15,6 +15,12 @@ export default function ConfirmDialog({ title, message, confirmLabel, onConfirm,
   confirming?: boolean;
   confirmingLabel?: string;
   error?: string;
+  // Optional — for the case where nothing here is actually confirmable
+  // (e.g. every selected record turned out to be protected): renders only
+  // the dismiss button, never a destructive confirm action alongside it.
+  // Every existing caller omits this and keeps its normal two-button layout.
+  hideConfirm?: boolean;
+  cancelLabel?: string;
 }) {
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) { if (event.key === "Escape" && !confirming) onCancel(); }
@@ -28,7 +34,10 @@ export default function ConfirmDialog({ title, message, confirmLabel, onConfirm,
       <div className="dialog-danger-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 8.5v9m7-9v9M5 6h14M9 6V3.8h6V6m2.5 0-.7 14H7.2L6.5 6" /></svg></div>
       <div className="dialog-copy"><p className="dialog-eyebrow">Permanent action</p><h2 id="confirm-title">{title}</h2><p id="confirm-message">{message}</p></div>
       {error && <p className="import-select-error" role="alert">{error}</p>}
-      <div className="dialog-actions"><button type="button" className="dialog-cancel" onClick={onCancel} disabled={confirming}>Keep records</button><button type="button" className="dialog-confirm" onClick={onConfirm} disabled={confirming}>{confirming ? (confirmingLabel ?? "Deleting…") : confirmLabel}</button></div>
+      <div className={hideConfirm ? "dialog-actions dialog-actions-single" : "dialog-actions"}>
+        <button type="button" className="dialog-cancel" onClick={onCancel} disabled={confirming}>{cancelLabel ?? "Keep records"}</button>
+        {!hideConfirm && <button type="button" className="dialog-confirm" onClick={onConfirm} disabled={confirming}>{confirming ? (confirmingLabel ?? "Deleting…") : confirmLabel}</button>}
+      </div>
     </div>
   </div>;
 }

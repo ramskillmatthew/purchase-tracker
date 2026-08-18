@@ -16,6 +16,7 @@
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.7",
     "archiver": "^8.0.0",
+    "decimal.js": "^10.6.0",
     "exceljs": "^4.4.0",
     "heic-convert": "^2.1.0",
     "heic2any": "^0.0.4",

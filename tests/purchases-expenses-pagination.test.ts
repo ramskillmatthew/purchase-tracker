@@ -35,13 +35,18 @@ describe("REQUIREMENT 12/16: GET /api/purchases is not capped at 1000 and preser
     expect(body).toHaveLength(1798);
   });
 
-  it("uses the shared paginating helper rather than a single unbounded request", async () => {
+  it("uses the shared paginating helper rather than a single unbounded request — plus one further bounded call for the sale-protection annotation (see lib/purchases-protection.ts), never one request per purchase", async () => {
+    // First call: the purchases fetch itself. Second call: loadPurchaseProtectionMap's
+    // own sale_items lookup (empty here, via the base mock, so it never needs a
+    // third call for sales_orders — see lib/purchases-protection.ts's early return).
     supabaseRequestAll.mockResolvedValueOnce(rowsOf(5));
     await purchasesGet();
-    expect(supabaseRequestAll).toHaveBeenCalledTimes(1);
+    expect(supabaseRequestAll).toHaveBeenCalledTimes(2);
     const [path] = supabaseRequestAll.mock.calls[0];
     expect(path).toContain("purchases?select=*");
     expect(path).toContain("order=order_date.desc,created_at.desc");
+    const [protectionPath] = supabaseRequestAll.mock.calls[1];
+    expect(protectionPath).toContain("sale_items?purchase_id=not.is.null");
   });
 
   it("propagates a paging failure as a safe error rather than a partial 200 response", async () => {

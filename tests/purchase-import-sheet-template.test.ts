@@ -18,7 +18,7 @@ describe("buildImportTemplate", () => {
     expect(workbook.getWorksheet("Instructions")).toBeTruthy();
   });
 
-  it("has all eight columns, in the exact required order and wording", async () => {
+  it("has all columns (including the optional Category column), in the exact required order and wording", async () => {
     const buffer = await buildImportTemplate();
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -51,14 +51,14 @@ describe("buildImportTemplate", () => {
     expect(sheet.getColumn(columnLetter("price_purchased")).numFmt).toContain("£");
   });
 
-  it("freezes the header row and adds an autofilter across all eight columns", async () => {
+  it("freezes the header row and adds an autofilter across every column", async () => {
     const buffer = await buildImportTemplate();
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
     const sheet = workbook.getWorksheet("Purchases")!;
     expect(sheet.views[0]).toMatchObject({ state: "frozen", ySplit: 1 });
     expect(JSON.stringify(sheet.autoFilter)).toContain("A1");
-    expect(JSON.stringify(sheet.autoFilter)).toContain("H1");
+    expect(JSON.stringify(sheet.autoFilter)).toContain(`${String.fromCharCode(64 + importColumns.length)}1`);
   });
 
   it("has sensible column widths so no heading is clipped", async () => {
@@ -112,7 +112,7 @@ describe("buildImportTemplate", () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
     const sheet = workbook.getWorksheet("Purchases")!;
-    sheet.addRow(["2026-07-24", "Vinted", "1801", "Yes", "Nike Air Max 95", "9", "Brand new", 13.49]);
+    sheet.addRow(["2026-07-24", "Vinted", "1801", "Yes", "Nike Air Max 95", "9", "Brand new", "Pokémon", 13.49]);
     const roundTrip = Buffer.from(await workbook.xlsx.writeBuffer());
     const aoa = await readSheetFile(roundTrip, "xlsx");
     const result = buildImportRows(aoa);

@@ -18,6 +18,7 @@ export default async function PurchaseRecordPage({ params }: { params: Promise<{
     ["Item Size", purchase.item_size],
     ["Quantity", purchase.quantity],
     ["Item Condition", purchase.item_condition],
+    ["Category", purchase.category],
     ["Price Purchased", `£${Number(purchase.price_purchased).toFixed(2)}`],
   ];
 

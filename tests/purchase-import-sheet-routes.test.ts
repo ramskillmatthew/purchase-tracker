@@ -35,7 +35,7 @@ function validCsv(rows: string[][] = []) {
 function oneValidRow(overrides: Record<string, string> = {}) {
   const values: Record<string, string> = {
     "Order Date": "2026-07-24", "Purchased From": "Vinted", "SKU": "1801", "Arrived": "Yes",
-    "Item Description": "Nike Air Max 95", "Size": "9", "Item Condition": "Brand new", "Price Purchased": "13.49",
+    "Item Description": "Nike Air Max 95", "Size": "9", "Item Condition": "Brand new", "Category": "Other", "Price Purchased": "13.49",
     ...overrides,
   };
   return canonicalHeader.map(heading => values[heading]);
@@ -162,7 +162,7 @@ describe("POST /api/purchases/import/commit", () => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet("Purchases");
     sheet.addRow(canonicalHeader);
-    sheet.addRow([...oneValidRow().slice(0, 6), { formula: "A1", result: "Brand new" } as ExcelJS.CellFormulaValue, oneValidRow()[7]]);
+    sheet.addRow([...oneValidRow().slice(0, 6), { formula: "A1", result: "Brand new" } as ExcelJS.CellFormulaValue, ...oneValidRow().slice(7)]);
     const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
     const response = await commitRoute(new Request("http://test/api/purchases/import/commit", { method: "POST", body: (() => { const fd = new FormData(); fd.append("file", new File([buffer], "purchases.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); return fd; })() }));
     expect(response.status).toBe(400);

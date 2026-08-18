@@ -30,7 +30,7 @@ const purchaseHeader = purchaseColumns.map(c => c.heading);
 function purchaseRow(overrides: Record<string, string> = {}) {
   const values: Record<string, string> = {
     "Order Date": "2026-07-24", "Purchased From": "Vinted", "SKU": "1801", "Arrived": "Yes",
-    "Item Description": "Nike Air Max 95", "Size": "9", "Item Condition": "Brand new", "Price Purchased": "13.49",
+    "Item Description": "Nike Air Max 95", "Size": "9", "Item Condition": "Brand new", "Category": "Other", "Price Purchased": "13.49",
     ...overrides,
   };
   return purchaseHeader.map(heading => values[heading]);

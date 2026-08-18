@@ -125,7 +125,15 @@ export function normalizeHeading(value: string): string {
   return value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
-export type ImportColumn<F extends string> = { field: F; heading: string; aliases: string[] };
+// `required` defaults to true (every existing domain's columns omit it and
+// keep their exact prior behaviour unchanged) — only a column that
+// explicitly opts out with `required: false` is allowed to be absent from
+// an uploaded file's header row without failing mapHeadings' missing-column
+// check below. Introduced for the purchase-import Category column: an older
+// template/CSV that predates Category must still import (and default the
+// column to a safe fallback per-row — see parseImportCategory), never be
+// rejected outright for lacking a column that didn't exist yet.
+export type ImportColumn<F extends string> = { field: F; heading: string; aliases: string[]; required?: boolean };
 
 export type HeadingMapResult<F extends string> =
   | { ok: true; mapping: (F | null)[]; ignoredColumns: string[] }
@@ -161,7 +169,7 @@ export function mapHeadings<F extends string>(headerRow: unknown[], columns: Imp
     .map(([field, headings]) => ({ field, headings }));
   if (duplicates.length) return { ok: false, missing: [], duplicates };
 
-  const requiredFields = columns.map(c => c.field);
+  const requiredFields = columns.filter(c => c.required !== false).map(c => c.field);
   const missing = requiredFields.filter(field => !headingsByField.has(field));
   if (missing.length) return { ok: false, missing, duplicates: [] };
 

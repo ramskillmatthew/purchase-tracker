@@ -7,6 +7,7 @@ import {
   purchaseAddedMessage,
   purchasesAddedMessage,
   purchasesImportedMessage,
+  salesCancelledMessage,
   taskCompletedMessage,
   taskRestoredMessage,
 } from "@/lib/success-messages";
@@ -58,6 +59,24 @@ describe("lib/success-messages.ts — exact wording and pluralisation", () => {
 
   it("expensesImportedMessage never reuses the purchase wording ('Lovely jubbly')", () => {
     expect(expensesImportedMessage(1)).not.toContain("Lovely jubbly");
+  });
+
+  it("REQUIREMENT: salesCancelledMessage matches the exact requested wording — return-to-stock case", () => {
+    expect(salesCancelledMessage(3, 7, true)).toBe("3 sales cancelled and 7 items returned to stock.");
+  });
+
+  it("REQUIREMENT: salesCancelledMessage matches the exact requested wording — keep-out-of-stock case", () => {
+    expect(salesCancelledMessage(3, 7, false)).toBe("3 sales cancelled. 7 items remain out of stock.");
+  });
+
+  it("salesCancelledMessage singularises both sale and item counts independently", () => {
+    expect(salesCancelledMessage(1, 5, true)).toBe("1 sale cancelled and 5 items returned to stock.");
+    expect(salesCancelledMessage(5, 1, true)).toBe("5 sales cancelled and 1 item returned to stock.");
+    expect(salesCancelledMessage(1, 1, false)).toBe("1 sale cancelled. 1 item remains out of stock.");
+  });
+
+  it("salesCancelledMessage is deliberately literal, not the file's usual catchphrase style", () => {
+    expect(salesCancelledMessage(1, 1, true)).not.toMatch(/Lovely jubbly|Cushty|Sorted —|He who dares/);
   });
 });
 
@@ -141,9 +160,11 @@ describe("app/purchases/page.tsx — manual purchase-added toast", () => {
     expect(source).toContain("purchaseAddedMessage()");
   });
 
-  it("does not touch destructive-action wording (Clear all / Delete confirmations)", () => {
-    expect(source).toContain("Clear all purchases?");
-    expect(source).toContain("permanently removed");
+  it("does not touch destructive-action wording (Clear all / Delete confirmations) — now driven by the shared eligibility-aware copy helpers rather than a static string, but still permanence-worded", () => {
+    expect(source).toContain("title={deletionDialogTitle(allEligibility)}");
+    expect(source).toContain("title=\"Delete this purchase?\"");
+    const copySource = readFileSync("lib/purchases-delete-copy.ts", "utf8");
+    expect(copySource).toContain("permanently removed");
   });
 });
 

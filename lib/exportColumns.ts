@@ -23,6 +23,7 @@ export const purchaseExportColumns: ExportColumn<Purchase>[] = [
   { heading: "Item Description", value: (row) => row.item_description },
   { heading: "Item Size", value: (row) => row.item_size },
   { heading: "Item Condition", value: (row) => row.item_condition },
+  { heading: "Category", value: (row) => row.category },
   { heading: "Price Purchased", value: (row) => Number(row.price_purchased) },
 ];
 

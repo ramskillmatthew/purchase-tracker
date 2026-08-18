@@ -1,4 +1,5 @@
 import type { Expense, Purchase } from "@/lib/types";
+import { comparePurchasesForDisplay } from "@/lib/purchase-order";
 
 /**
  * Home dashboard period comparison + aggregation — extracted from
@@ -104,6 +105,11 @@ export function computeHomeReport(period: Period, purchases: Purchase[], expense
     percentage: stockSpend ? (values.spend / stockSpend) * 100 : 0,
     average: values.purchases ? values.spend / values.purchases : 0,
   })).sort((a, b) => b.spend - a.spend);
-  const recent = [...periodPurchases].sort((a, b) => b.order_date.localeCompare(a.order_date) || b.created_at.localeCompare(a.created_at)).slice(0, 10);
+  // Same authoritative order as everywhere else purchases are displayed
+  // (see lib/purchase-order.ts) — order_date desc, then numeric SKU desc,
+  // then created_at desc, then id — never just date+created_at, which
+  // left same-date Bulk Input rows in whatever order they happened to be
+  // inserted.
+  const recent = [...periodPurchases].sort(comparePurchasesForDisplay).slice(0, 10);
   return { periodPurchases, stockSpend, expenseSpend, sources, recent };
 }

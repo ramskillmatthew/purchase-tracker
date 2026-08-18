@@ -58,3 +58,28 @@ export function stockStatusChangedMessage(itemDescription: string | null | undef
   const label = (itemDescription ?? "").trim() || "This item";
   return `${label} is now ${stockStatus === "in_stock" ? "in stock" : "no longer in stock"}`;
 }
+
+// Sales bulk-cancellation success toast — deliberately literal/factual
+// wording (not this file's usual "Cushty —"/"Sorted —" prefix style),
+// matching the exact phrasing requested for this feature. `orderCount` is
+// how many sales orders were cancelled; `unitCount` is the RPC's own
+// units_affected count (see supabase-sales-v3.sql), never re-derived
+// client-side, so the number shown always matches what the database
+// actually changed.
+export function salesCancelledMessage(orderCount: number, unitCount: number, returnedToStock: boolean): string {
+  const sales = `${orderCount} ${pluralize(orderCount, "sale", "sales")} cancelled`;
+  const items = `${unitCount} ${pluralize(unitCount, "item", "items")}`;
+  const remains = pluralize(unitCount, "remains", "remain");
+  return returnedToStock ? `${sales} and ${items} returned to stock.` : `${sales}. ${items} ${remains} out of stock.`;
+}
+
+// Purchase deletion (single, bulk, Clear All) success toast — deliberately
+// literal/factual wording, matching salesCancelledMessage's own precedent
+// for a safety-relevant result rather than this file's usual catchphrase
+// style. `deletedCount` and `protectedCount` must both come from the
+// server's own safe_delete_purchases result, never re-derived client-side.
+export function purchasesDeletedMessage(deletedCount: number, protectedCount: number): string {
+  const deleted = `${deletedCount} ${pluralize(deletedCount, "purchase", "purchases")} deleted.`;
+  if (protectedCount === 0) return deleted;
+  return `${deleted} ${protectedCount} ${pluralize(protectedCount, "purchase was", "purchases were")} protected by completed sales.`;
+}

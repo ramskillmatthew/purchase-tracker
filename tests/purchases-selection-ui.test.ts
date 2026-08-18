@@ -134,10 +134,11 @@ describe("app/purchases/page.tsx — bulk delete button, dynamic label, and conf
     expect(source).toContain("{bulkDeleteConfirmOpen && <ConfirmDialog");
   });
 
-  it("REQUIREMENT: the confirmation dialog's title, message, and confirm label reflect the exact selected count", () => {
-    expect(source).toContain("title={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? \"\" : \"s\"}?`}");
-    expect(source).toContain('message="The selected purchase records will be permanently removed. This cannot be undone."');
-    expect(source).toContain("confirmLabel={`Delete ${selectedIds.size} purchase${selectedIds.size === 1 ? \"\" : \"s\"}`}");
+  it("REQUIREMENT: the confirmation dialog's title, message, and confirm label reflect the deletable/protected eligibility split, not the raw selected count", () => {
+    expect(source).toContain("title={deletionDialogTitle(selectedEligibility)}");
+    expect(source).toContain("message={deletionDialogMessage(selectedEligibility)}");
+    expect(source).toContain("confirmLabel={deletionConfirmLabel(selectedEligibility)}");
+    expect(source).toContain("hideConfirm={selectedEligibility.deletableCount === 0}");
   });
 
   it("REQUIREMENT: disables repeat submission and shows a deleting state via the shared ConfirmDialog's confirming/confirmingLabel props", () => {
@@ -147,35 +148,90 @@ describe("app/purchases/page.tsx — bulk delete button, dynamic label, and conf
     expect(guard).toContain("if (bulkDeleting) return;");
   });
 
-  it("uses a dedicated POST to the bulk-delete route with the exact selected ids, never a loop of per-purchase DELETE calls", () => {
+  it("REQUIREMENT: sends only the ids already known-deletable from the preflight split, never a purchase already known protected, and never a loop of per-purchase DELETE calls", () => {
     const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
+    expect(fn).toContain("const deletableIds = selectedRows.filter(row => row.protectedSaleId === null).map(row => row.id);");
     expect(fn).toContain('fetch("/api/purchases/bulk-delete"');
     expect(fn).toContain('method: "POST"');
-    expect(fn).toContain("body: JSON.stringify({ ids })");
+    expect(fn).toContain("body: JSON.stringify({ ids: deletableIds })");
   });
 
-  it("REQUIREMENT: only removes deleted ids from selection and only closes the dialog on a confirmed successful deletion", () => {
+  it("REQUIREMENT: only reconciles selection and only closes the dialog on a confirmed successful deletion, keeping any newly (race-condition) protected id still selected", () => {
     const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
-    const successBranch = fn.slice(fn.indexOf("const { deletedIds }"));
-    expect(successBranch).toContain("setSelectedIds(current => { const next = new Set(current); for (const id of deleted) next.delete(id); return next; });");
+    const successBranch = fn.slice(fn.indexOf("const result = body as DeletePurchasesResult;"));
+    expect(successBranch).toContain("const stillProtected = new Set(result.protectedIds);");
+    expect(successBranch).toContain("for (const id of deletableIds) if (!stillProtected.has(id)) next.delete(id);");
     expect(successBranch).toContain("setBulkDeleteConfirmOpen(false);");
   });
 
-  it("REQUIREMENT: a failed deletion keeps the dialog open, keeps the selection, and surfaces an actionable error instead", () => {
+  it("REQUIREMENT: a failed deletion keeps the dialog open, keeps the selection, and surfaces an actionable error instead — including the RPC's own protected-conflict message on a 409", () => {
     const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
-    expect(fn).toContain('if (!response.ok) { setBulkDeleteError("Could not delete the selected purchases. Try again."); setBulkDeleting(false); return; }');
-    expect(fn).not.toMatch(/if \(!response\.ok\)[\s\S]{0,40}setSelectedIds\(new Set/);
-    expect(fn).not.toMatch(/if \(!response\.ok\)[\s\S]{0,40}setBulkDeleteConfirmOpen\(false\)/);
+    expect(fn).toContain('setBulkDeleteError(body?.error || "Could not delete the selected purchases. Try again.");');
+    expect(fn).not.toMatch(/if \(!response\.ok\)[\s\S]{0,80}setSelectedIds\(new Set/);
+    expect(fn).not.toMatch(/if \(!response\.ok\)[\s\S]{0,120}setBulkDeleteConfirmOpen\(false\)/);
+  });
+
+  it("REQUIREMENT: a 409 (something became protected mid-flight) triggers a refresh so eligibility recomputes from reality, never silently detaching anything", () => {
+    const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
+    expect(fn).toContain('if (response.status === 409) load();');
   });
 
   it("also removes the deleted ids from a matching Shift-click anchor so a stale anchor can't be reused after deletion", () => {
     const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
-    expect(fn).toContain("setRangeAnchor(current => (current && deleted.has(current) ? null : current));");
+    expect(fn).toContain("setRangeAnchor(current => (current && deletableIds.includes(current) && !stillProtected.has(current) ? null : current));");
+  });
+
+  it("REQUIREMENT: the success toast reports both the actually-deleted count and the FULL protected count (originally-excluded plus any race-condition find)", () => {
+    const fn = source.slice(source.indexOf("async function bulkDeleteSelected"), source.indexOf("// Patches the affected rows in place"));
+    expect(fn).toContain("setDeleteToast(purchasesDeletedMessage(result.deletedCount, selectedEligibility.protectedCount + result.protectedCount));");
   });
 
   it("does not touch the existing single-purchase delete or Clear-all flows", () => {
     expect(source).toContain("async function remove(id: string) {");
     expect(source).toContain("async function clearAll() {");
+  });
+});
+
+describe("app/purchases/page.tsx — single-purchase delete: protected vs eligible", () => {
+  it("REQUIREMENT: a protected row's Delete button shows the informational PurchaseProtectedDialog instead of the destructive confirmation", () => {
+    expect(source).toContain("if (row.protectedSaleId) setProtectedNoticeSaleId(row.protectedSaleId); else setConfirmation({ type: \"one\", id: row.id });");
+  });
+
+  it("REQUIREMENT: a 409 on single delete (a race between preflight and confirm) keeps the dialog open, shows the server's own explanation, and refreshes so protection reflects reality", () => {
+    const fn = source.slice(source.indexOf("async function remove(id: string) {"), source.indexOf("// Shares safe_delete_purchases"));
+    expect(fn).toContain('setDeleteActionError(body?.error || "Could not delete purchase.");');
+    expect(fn).toContain("if (response.status === 409) load();");
+    expect(fn).not.toMatch(/if \(!response\.ok\)[\s\S]{0,80}setConfirmation\(null\)/);
+  });
+
+  it("REQUIREMENT: only closes the dialog on confirmed success", () => {
+    const fn = source.slice(source.indexOf("async function remove(id: string) {"), source.indexOf("// Shares safe_delete_purchases"));
+    const successBranch = fn.slice(fn.lastIndexOf("setConfirmation(null);"));
+    expect(successBranch).toContain("load();");
+  });
+
+  it("renders the informational protected dialog (not the destructive ConfirmDialog) when a row is protected", () => {
+    expect(source).toContain('{protectedNoticeSaleId && <PurchaseProtectedDialog saleId={protectedNoticeSaleId} onClose={() => setProtectedNoticeSaleId(null)} />}');
+  });
+});
+
+describe("app/purchases/page.tsx — Clear All respects sales protection", () => {
+  it("REQUIREMENT: Clear All's own preflight is computed over every currently loaded purchase, not just the selection", () => {
+    const block = source.slice(source.indexOf("const allEligibility: DeletionEligibility"), source.indexOf("function changeSort"));
+    expect(block).toContain("rows.filter(row => row.protectedSaleId === null).length");
+    expect(block).toContain("rows.filter(row => row.protectedSaleId !== null).length");
+  });
+
+  it("REQUIREMENT: the Clear All dialog uses the same eligibility-driven copy and hides the confirm button when everything is protected", () => {
+    expect(source).toContain("title={deletionDialogTitle(allEligibility)}");
+    expect(source).toContain("message={deletionDialogMessage(allEligibility)}");
+    expect(source).toContain("confirmLabel={deletionConfirmLabel(allEligibility)}");
+    expect(source).toContain("hideConfirm={allEligibility.deletableCount === 0}");
+  });
+
+  it("REQUIREMENT: a successful Clear All shows the exact server-reported deleted/protected counts as a success toast", () => {
+    const fn = source.slice(source.indexOf("async function clearAll() {"), source.indexOf("// Updates the one row in place"));
+    expect(fn).toContain("purchasesDeletedMessage(body.deletedCount, body.protectedCount)");
   });
 });
 
@@ -216,8 +272,20 @@ describe("components/ConfirmDialog.tsx — extended for an in-place deleting sta
   });
 
   it("disables both buttons while confirming, and shows the confirming label instead of the normal one", () => {
-    expect(dialogSource).toContain('<button type="button" className="dialog-cancel" onClick={onCancel} disabled={confirming}>Keep records</button>');
-    expect(dialogSource).toContain('<button type="button" className="dialog-confirm" onClick={onConfirm} disabled={confirming}>{confirming ? (confirmingLabel ?? "Deleting…") : confirmLabel}</button>');
+    expect(dialogSource).toContain('<button type="button" className="dialog-cancel" onClick={onCancel} disabled={confirming}>{cancelLabel ?? "Keep records"}</button>');
+    expect(dialogSource).toContain('{!hideConfirm && <button type="button" className="dialog-confirm" onClick={onConfirm} disabled={confirming}>{confirming ? (confirmingLabel ?? "Deleting…") : confirmLabel}</button>}');
+  });
+
+  it("REQUIREMENT: hideConfirm/cancelLabel are optional and backward compatible — every existing caller omitting them keeps the normal two-button layout", () => {
+    expect(dialogSource).toContain("hideConfirm?: boolean;");
+    expect(dialogSource).toContain("cancelLabel?: string;");
+    expect(dialogSource).toContain("hideConfirm = false");
+  });
+
+  it("REQUIREMENT: hideConfirm renders only the dismiss button — no destructive confirm action alongside a purchase that cannot currently be deleted", () => {
+    const actionsBlock = dialogSource.slice(dialogSource.indexOf('<div className={hideConfirm'), dialogSource.indexOf('</div>', dialogSource.indexOf('<div className={hideConfirm')));
+    expect(actionsBlock).toContain('"dialog-actions dialog-actions-single"');
+    expect(actionsBlock).toContain("{!hideConfirm &&");
   });
 
   it("Escape and backdrop-click are both suppressed while confirming, so an in-flight delete can't be dismissed out from under itself", () => {
