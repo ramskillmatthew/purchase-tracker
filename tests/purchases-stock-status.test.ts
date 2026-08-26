@@ -319,13 +319,13 @@ describe("inStockItemsLabel / inStockAwaitingArrivalItemsLabel — singular/plur
 // Purchases page stock filter — URL query parameters, ordering, defaults
 // ============================================================================
 describe("stockFilters — the five options the Purchases page filter renders", () => {
-  it("exposes exactly All, In stock, Waiting on arrival, Physically here, No longer in stock, in that order", () => {
+  it("exposes exactly the approved reordered stock filters", () => {
     expect(stockFilters).toEqual([
       { value: "all", label: "All" },
       { value: "in-stock", label: "In stock" },
+      { value: "no-longer-in-stock", label: "No longer in stock" },
       { value: "waiting-on-arrival", label: "Waiting on arrival" },
       { value: "physically-here", label: "Physically here" },
-      { value: "no-longer-in-stock", label: "No longer in stock" },
     ]);
   });
 });
@@ -388,18 +388,13 @@ describe("nextStockStatus — the row toggle's own PATCH target", () => {
 // ============================================================================
 // app/page.tsx — Home stock figures ignore the date-period filter
 // ============================================================================
-describe("REQUIREMENT: Home stock value/count/awaiting-arrival figures ignore the Compare period filter", () => {
+describe("REQUIREMENT: Home Stock Value KPI ignores the Compare period filter", () => {
   const source = readFileSync("app/page.tsx", "utf8");
 
-  it("all four figures are computed from the raw `purchases` array, never from the period-scoped `report`", () => {
-    for (const line of [
-      "const inStockCount = useMemo(() => countInStock(purchases), [purchases]);",
-      "const inStockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);",
-      "const inStockAwaitingArrival = useMemo(() => countInStockAwaitingArrival(purchases), [purchases]);",
-      "const inStockAwaitingArrivalValue = useMemo(() => calculateInStockAwaitingArrivalValue(purchases), [purchases]);",
-    ]) {
-      expect(source).toContain(line);
-    }
+  it("both stock value and supporting item count use the raw purchases array, never the period-scoped report", () => {
+    expect(source).toContain("const stockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);");
+    expect(source).toContain('purchases.filter(row => row.stock_status === "in_stock").length');
+    expect(source).not.toContain("calculateInStockValue(report.periodPurchases)");
   });
 });
 

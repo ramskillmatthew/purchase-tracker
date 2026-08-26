@@ -12,7 +12,7 @@ import TaskToast from "./TaskToast";
 // Fully self-contained — its own fetch, state and modal — so it can be
 // dropped onto the Home dashboard as a single component without wiring
 // into app/page.tsx's existing data flow.
-export default function TodaysTasksCard() {
+export default function TodaysTasksCard({ maxTasks = 5 }: { maxTasks?: number }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -39,7 +39,7 @@ export default function TodaysTasksCard() {
   const today = tasks
     .filter(task => !task.completed && task.due_date !== null && (isTaskOverdue(task) || isTaskDueToday(task)))
     .sort(compareTodayTasks)
-    .slice(0, 5);
+    .slice(0, maxTasks);
 
   async function toggle(task: Task, nextCompleted: boolean) {
     try {

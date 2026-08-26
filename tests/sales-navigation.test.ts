@@ -16,7 +16,7 @@ describe("components/AppHeader.tsx — Sales navigation", () => {
   });
 
   it("REQUIREMENT: a sale sub-page (e.g. /sales/new, /sales/<id>) highlights the Sales nav link as active, matching the existing Purchases sub-page pattern", () => {
-    expect(source).toContain('(href === "/purchases" || href === "/sales") && pathname.startsWith(`${href}/`)');
+    expect(source).toMatch(/href === "\/sales"[^\n]*pathname\.startsWith\(`\$\{href\}\/`\)/);
   });
 
   it("REGRESSION: does not modify the Investments link or its icon", () => {

@@ -22,24 +22,24 @@ describe("app/sales/page.tsx — Sales list", () => {
   });
 
   it("has loading, error, and empty states, distinct from the 'no matching search' state", () => {
-    expect(listPage).toContain("styles.loadingState");
-    expect(listPage).toContain("styles.errorState");
+    expect(listPage).toContain("styles.loadingRows");
+    expect(listPage).toContain('title="Could not load sales"');
     expect(listPage).toContain("No sales recorded yet");
-    expect(listPage).toContain("No matching sales");
+    expect(listPage).toContain("No sales match these filters");
   });
 
   it("provides a search input over the loaded sales", () => {
-    expect(listPage).toContain('aria-label="Search sales"');
+    expect(listPage).toContain('aria-label="Search item, platform or status"');
   });
 
   it("REQUIREMENT: the summary is derived only from completed sales (never counting refunded/cancelled as revenue)", () => {
-    const summaryFn = builderPageSlice(listPage, "const summary = useMemo(", "}, [orders]);");
-    expect(summaryFn).toContain('order.status === "completed"');
+    expect(listPage).toContain("data.kpis.completedSales");
+    expect(listPage).toContain("data.kpis.revenuePence");
   });
 
   it("clicking a row opens that sale's detail page, and Enter does too (keyboard-accessible)", () => {
     expect(listPage).toContain("router.push(`/sales/${order.id}`)");
-    expect(listPage).toContain('if (event.key === "Enter") router.push(`/sales/${order.id}`)');
+    expect(listPage).toContain('if (e.key === "Enter" && selectedIds.size === 0) router.push(`/sales/${order.id}`)');
   });
 
   it("does not build a full reporting dashboard here (no chart/export code)", () => {
@@ -51,31 +51,50 @@ describe("app/sales/page.tsx — Sales list", () => {
   it("REQUIREMENT: table columns are in the required order — a leading selection checkbox, then Date, Item Description, Platform, Units, Revenue, Profit, Status", () => {
     const theadBlock = listPage.slice(listPage.indexOf("<thead><tr>"), listPage.indexOf("</tr></thead>"));
     expect(theadBlock).toContain("styles.checkboxCell");
-    expect(theadBlock).toContain("<th>Date</th><th>Item Description</th><th>Platform</th><th>Units</th><th className={styles.numeric}>Revenue</th><th className={styles.numeric}>Profit</th><th>Status</th>");
+    expect(theadBlock).toContain('<SortHead label="Date" name="date"');
+    expect(theadBlock).toContain("<th>Item description</th><th>Platform</th>");
+    expect(theadBlock).toContain('<SortHead label="Margin" name="margin"');
     // the checkbox column comes before Date, not after
-    expect(theadBlock.indexOf("checkboxCell")).toBeLessThan(theadBlock.indexOf("<th>Date</th>"));
+    expect(theadBlock.indexOf("checkboxCell")).toBeLessThan(theadBlock.indexOf('label="Date"'));
   });
 
   it("REQUIREMENT: item description uses the grouped, snapshot-based summary (stacked lines, or first line + overflow count for many products)", () => {
     expect(listPage).toContain("summariseItemGroups(order.itemGroups)");
-    expect(listPage).toContain("descriptionSummary.lines.map(");
-    expect(listPage).toContain("descriptionSummary.overflowCount > 0");
-    expect(listPage).toContain("more product{descriptionSummary.overflowCount === 1 ? \"\" : \"s\"}");
+    expect(listPage).toContain("summary.lines.slice(1).map(");
+    expect(listPage).toContain("summary.overflowCount > 0");
+    expect(listPage).toContain("more products");
   });
 
-  it("REQUIREMENT: profit is shown as a coloured pill using the shared exact-pence threshold helper, with an accessible text label — colour is only applied to the pill, never the row", () => {
-    expect(listPage).toContain('import { profitBadgeTone } from "@/lib/sales/profit";');
-    expect(listPage).toContain("const profitTone = profitBadgeTone(order.profitPence);");
-    expect(listPage).toContain("aria-label={`Profit ${formatPenceAsGBP(order.profitPence)}`}");
-    expect(listPage).not.toContain("styles.salesRow} ${styles[PROFIT_TONE_CLASS");
+  it("REQUIREMENT: profit is shown as illuminated signed text, not a badge or row colour, and retains an accessible exact-money label", () => {
+    expect(listPage).toContain('const profitTone = order.profitPence > 0 ? styles.profitPositive : order.profitPence < 0 ? styles.profitNegative : styles.profitNeutral;');
+    expect(listPage).toContain('className={`${styles.profitValue} ${profitTone}`}');
+    expect(listPage).toContain('aria-label={`Profit ${formatPenceAsGBP(order.profitPence)}`}');
+    expect(listPage).not.toContain("styles.profitPill");
+    expect(listPage).not.toContain("styles.salesRow} ${profitTone}");
   });
 
   it("REQUIREMENT: search also matches item descriptions, not just platform/status/date", () => {
-    expect(listPage).toContain("itemGroupsSearchText(order.itemGroups)");
+    expect(listPage).toContain("search: searchDraft");
+    expect(listPage).toContain("fetch(`/api/sales?${p}`");
   });
 });
 
 describe("app/sales/page.tsx — bulk selection and cancellation", () => {
+  it("offers an accessible bulk process-status menu with every illuminated status option", () => {
+    expect(listPage).toContain("<BulkProcessStatusMenu");
+    expect(listPage).toContain('aria-label={`Set status for ${count} selected sales`}');
+    expect(listPage).toContain("SALES_PROCESS_STATUS_OPTIONS.map((option, index)");
+    expect(listPage).toContain("Cancellation statuses will ask what should happen to stock.");
+    expect(listPage).toContain("persistBulkProcessStatus");
+  });
+
+  it("routes bulk terminal statuses through the existing stock-outcome cancellation dialog", () => {
+    const bulkFn = listPage.slice(listPage.indexOf("async function persistBulkProcessStatus"), listPage.indexOf("async function cancelSelected"));
+    expect(bulkFn).toContain('processStatus === "cancelled" || processStatus === "returned_cancelled"');
+    expect(bulkFn).toContain("setTerminalTransition");
+    expect(bulkFn).toContain("setCancelDialogOpen(true)");
+  });
+
   it("REQUIREMENT: reuses the Purchases page's own selection helpers rather than a second inconsistent implementation", () => {
     expect(listPage).toContain('import { pruneMissingIds, resolveRowClick, selectionSummary, toggleId, toggleVisiblePage } from "@/lib/purchases-selection";');
   });
@@ -84,21 +103,22 @@ describe("app/sales/page.tsx — bulk selection and cancellation", () => {
     expect(listPage).toContain('const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());');
   });
 
-  it("REQUIREMENT: shift-click ranges and select-all are resolved only against currently visible AND selectable (completed) rows", () => {
-    expect(listPage).toContain("const selectableIds = useMemo(() => filtered.filter(isSelectableForCancellation).map(order => order.id), [filtered]);");
+  it("REQUIREMENT: every visible sale type can be selected for permanent deletion", () => {
+    expect(listPage).toContain('(data?.rows ?? []).map(row => row.id)');
+    expect(listPage).toContain('activeSelectedOrders.length > 0');
     expect(listPage).toContain("toggleVisiblePage(current, selectableIds)");
     expect(listPage).toContain("pageIds: selectableIds");
   });
 
-  it("REGRESSION: a cancelled row is never a valid shift-click range endpoint or select target — checked explicitly before falling through to resolveRowClick", () => {
-    const handleRowClickFn = listPage.slice(listPage.indexOf("function handleRowClick("), listPage.indexOf("const selectedOrders = useMemo"));
-    expect(handleRowClickFn).toContain("if (!isSelectableForCancellation(order)) {");
-    expect(handleRowClickFn).toContain("if (event.shiftKey) return;");
+  it("REGRESSION: a row can only become a shift-click endpoint when the current filter makes it selectable", () => {
+    const handleRowClickFn = listPage.slice(listPage.indexOf("function rowClick("), listPage.indexOf("async function cancelSelected"));
+    expect(handleRowClickFn).toContain("if (!selectableIds.includes(order.id))");
+    expect(handleRowClickFn).toContain("if (!event.shiftKey");
   });
 
   it("REQUIREMENT: a cancelled row stays clickable to open its detail page (when nothing is selected), and clears selection first when something is selected — same rule as a normal row", () => {
-    const handleRowClickFn = listPage.slice(listPage.indexOf("function handleRowClick("), listPage.indexOf("const selectedOrders = useMemo"));
-    expect(handleRowClickFn).toContain("if (selectedIds.size > 0) { clearSelection(); return; }");
+    const handleRowClickFn = listPage.slice(listPage.indexOf("function rowClick("), listPage.indexOf("async function cancelSelected"));
+    expect(handleRowClickFn).toContain("else if (!event.shiftKey) clearSelection()");
     expect(handleRowClickFn).toContain("router.push(`/sales/${order.id}`);");
   });
 
@@ -107,16 +127,17 @@ describe("app/sales/page.tsx — bulk selection and cancellation", () => {
     expect(listPage).toContain("}, [selectableIds]);");
   });
 
-  it("REQUIREMENT: only a selectable (completed) row renders a checkbox — a cancelled row's checkbox cell is empty", () => {
-    expect(listPage).toContain("{selectable && <input");
+  it("REQUIREMENT: permanent deletion is exposed through row interaction and select-all in every filter", () => {
+    expect(listPage).toContain('>Permanently delete {selectedIds.size}</button>');
+    expect(listPage).toContain('aria-label="Select all visible sales"');
   });
 
   it("checkbox clicks stop propagation so they never also trigger the row's own navigate/select click handler", () => {
-    expect(listPage).toContain('<td className={styles.checkboxCell} onClick={event => event.stopPropagation()}>');
+    expect(listPage).toContain('<td className={styles.checkboxCell} onClick={(e: React.MouseEvent) => e.stopPropagation()}>');
   });
 
   it("REQUIREMENT: header checkbox selects/deselects every currently visible selectable row", () => {
-    expect(listPage).toContain("onChange={toggleSelectAllVisible}");
+    expect(listPage).toContain("toggleVisiblePage(current, selectableIds)");
     expect(listPage).toContain("checked={selection.allSelected}");
   });
 
@@ -125,18 +146,19 @@ describe("app/sales/page.tsx — bulk selection and cancellation", () => {
   });
 
   it("REQUIREMENT: the bulk-delete button shows the exact selected count and is only rendered (hidden, not just disabled) when something is selected", () => {
-    expect(listPage).toContain('{selectedIds.size > 0 && <button type="button" className="button-danger" onClick={() => setCancelDialogOpen(true)}>Delete {selectedIds.size} selected</button>}');
+    expect(listPage).toContain('{selectedIds.size > 0 && <div');
+    expect(listPage).toContain('>Permanently delete {selectedIds.size}</button>');
+    expect(listPage).toContain('>Cancel {selectedIds.size} selected</button>');
   });
 
-  it("REQUIREMENT: Completed / Cancelled / All filter switch is present and defaults to Completed", () => {
-    expect(listPage).toContain('const [statusFilter, setStatusFilter] = useState<SalesStatusFilter>("completed");');
+  it("REQUIREMENT: Pending / Completed / Cancelled / All filter switch is present and defaults to Completed", () => {
+    expect(listPage).toContain('status: "completed"');
     expect(listPage).toContain("salesStatusFilters.map(option =>");
   });
 
   it("REQUIREMENT: search operates within the currently selected status filter, not the full unfiltered list", () => {
-    const filteredFn = listPage.slice(listPage.indexOf("const filtered = useMemo("), listPage.indexOf("const selectableIds"));
-    expect(filteredFn).toContain("statusFilteredOrders.filter(order =>");
-    expect(filteredFn).not.toContain("(orders ?? []).filter(order =>");
+    expect(listPage).toContain("status: option.value");
+    expect(listPage).toContain("search: searchDraft");
   });
 
   it("REQUIREMENT: cancelling calls the atomic cancel endpoint exactly once per action, never separate requests for orders/items/purchases", () => {
@@ -145,26 +167,29 @@ describe("app/sales/page.tsx — bulk selection and cancellation", () => {
   });
 
   it("REQUIREMENT: double-submit is prevented — a second cancellation cannot start while one is already in flight", () => {
-    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("const statusFilterLabel"));
+    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("function sortBy"));
     expect(cancelFn).toContain("if (submittingAction) return;");
   });
 
   it("REQUIREMENT: on failure, the selection and open dialog are preserved so the user can retry without re-selecting", () => {
-    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("const statusFilterLabel"));
-    expect(cancelFn).toContain("setCancelError(body?.error || \"Could not cancel the selected sales.\");");
-    expect(cancelFn).not.toMatch(/setCancelError\(body\?\.error[^)]*\);\s*setCancelDialogOpen\(false\)/);
+    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("function sortBy"));
+    expect(cancelFn).toContain('throw new Error(body?.error || "Could not cancel the selected sales.")');
+    expect(cancelFn).toContain("setCancelError((err as Error).message)");
   });
 
   it("REQUIREMENT: on success, the dialog closes, selection clears, a toast shows the exact server-reported counts, and the list refreshes", () => {
-    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("const statusFilterLabel"));
+    const cancelFn = listPage.slice(listPage.indexOf("async function cancelSelected("), listPage.indexOf("function sortBy"));
     expect(cancelFn).toContain("setCancelDialogOpen(false);");
     expect(cancelFn).toContain("clearSelection();");
-    expect(cancelFn).toContain("salesCancelledMessage(ordersCancelled, unitsAffected, returnToStock)");
-    expect(cancelFn).toContain("load();");
+    expect(cancelFn).toContain("salesCancelledMessage(result.ordersCancelled, result.unitsAffected, returnToStock)");
+    expect(cancelFn).toContain("setReloadKey(key => key + 1)");
   });
 
   it("clicking Cancel in the dialog makes no request and preserves the current selection", () => {
-    expect(listPage).toContain('onCancel={() => { if (!submittingAction) { setCancelDialogOpen(false); setCancelError(""); } }}');
+    const cancelHandler = listPage.slice(listPage.indexOf('onCancel={() => { if (!submittingAction)'), listPage.indexOf('onConfirm={cancelSelected}'));
+    expect(cancelHandler).toContain("setCancelDialogOpen(false)");
+    expect(cancelHandler).not.toContain("clearSelection");
+    expect(cancelHandler).not.toContain("fetch(");
   });
 });
 

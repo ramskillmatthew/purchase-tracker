@@ -15,10 +15,15 @@
 import { PANEL_TO_WORKER } from "./shared/messages.js";
 import {
   computeProgressSummary, ITEM_STATUSES, isVintedTabLostPause, VINTED_TAB_LOST_MESSAGE,
-  SAVE_DRAFT_UNCONFIRMED_ERROR_CODE,
+  SAVE_DRAFT_UNCONFIRMED_ERROR_CODE, isManualReloadPause, MANUAL_RELOAD_WARNING_MESSAGE,
 } from "./shared/queue-state.js";
 
 const IN_FLIGHT_STATUSES = new Set([ITEM_STATUSES.PREPARING, ITEM_STATUSES.FILLING, ITEM_STATUSES.SAVING]);
+// Follow-up correction (native browser reload-confirmation bug) — mirrors
+// shared/queue-state.js's own BLOCKING_STATUSES: the waiting item is still
+// "the current item" for display purposes (queue-row highlighting, the
+// active/queued stat split) even though it isn't strictly IN_FLIGHT.
+const BLOCKING_ITEM_STATUSES = new Set([...IN_FLIGHT_STATUSES, ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD]);
 const TERMINAL_ITEM_STATUSES = new Set([ITEM_STATUSES.COMPLETED, ITEM_STATUSES.FAILED, ITEM_STATUSES.CANCELLED]);
 
 const els = {
@@ -77,6 +82,10 @@ const els = {
   completedBanner: document.getElementById("completed-banner"),
   completedSummary: document.getElementById("completed-summary"),
 
+  manualReloadBanner: document.getElementById("manual-reload-banner"),
+  manualReloadMessage: document.getElementById("manual-reload-message"),
+  retryManualReload: document.getElementById("retry-manual-reload"),
+
   actionBar: document.getElementById("action-bar"),
   startButton: document.getElementById("start-button"),
   pauseButton: document.getElementById("pause-button"),
@@ -98,6 +107,7 @@ const STATUS_LABELS = {
   [ITEM_STATUSES.FAILED]: "Failed",
   [ITEM_STATUSES.PAUSED]: "Paused",
   [ITEM_STATUSES.CANCELLED]: "Cancelled",
+  [ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD]: "Waiting for manual reload",
 };
 
 // Follow-up correction (live-investigation diagnostics gap) — human-
@@ -221,6 +231,7 @@ function renderAccountSection(state) {
     els.accountErrorBox.hidden = true;
     els.accountChangeBanner.hidden = true;
     els.vintedTabLostBanner.hidden = true;
+    els.manualReloadBanner.hidden = true;
     return;
   }
   const { account: confirmed, pendingConfirmation: pending, accountIdentificationError: detectionError } = state.batch;
@@ -245,6 +256,20 @@ function renderAccountSection(state) {
     els.vintedTabLostMessage.textContent = VINTED_TAB_LOST_MESSAGE;
   } else {
     els.vintedTabLostBanner.hidden = true;
+  }
+
+  // Follow-up correction (native browser reload-confirmation bug) — a
+  // prominent warning banner, exactly mirroring the vinted-tab-lost banner
+  // above, shown whenever state.batch.manualReload is pending. Text comes
+  // from the SAME MANUAL_RELOAD_WARNING_MESSAGE constant used by the Live
+  // activity feed entry (updateActivityLog below) and by
+  // service-worker.js's own app-facing report, so all three can never
+  // drift apart.
+  if (isManualReloadPause(state)) {
+    els.manualReloadBanner.hidden = false;
+    els.manualReloadMessage.textContent = MANUAL_RELOAD_WARNING_MESSAGE;
+  } else {
+    els.manualReloadBanner.hidden = true;
   }
 }
 
@@ -303,7 +328,7 @@ function progressIconFor(status) {
   if (status === ITEM_STATUSES.FAILED) {
     return { tone: "danger", svg: '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.4"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>' };
   }
-  if (status === ITEM_STATUSES.PAUSED) {
+  if (status === ITEM_STATUSES.PAUSED || status === ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD) {
     return { tone: "warning", svg: '<svg viewBox="0 0 16 16" fill="none"><rect x="5.5" y="4.5" width="1.8" height="7" rx="0.6" fill="currentColor"/><rect x="8.7" y="4.5" width="1.8" height="7" rx="0.6" fill="currentColor"/></svg>' };
   }
   return { tone: "neutral", svg: '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.7V8l2.4 1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>' };
@@ -529,6 +554,15 @@ function updateActivityLog(state) {
         pushActivity({ id: `${item.itemId}:failed-${item.attemptCount ?? 0}`, tone: "failure", message: `${label} — ${item.errorMessage || "draft failed"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
       } else if (IN_FLIGHT_STATUSES.has(item.status) && !IN_FLIGHT_STATUSES.has(prev.status)) {
         pushActivity({ id: `${item.itemId}:started`, tone: "progress", message: `${label} — draft started`, timestampIso: item.startedAt ?? new Date().toISOString() });
+      } else if (item.status === ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD) {
+        // Follow-up correction (native browser reload-confirmation bug) — a
+        // prominent WARNING entry (tone "warning", never "progress"), using
+        // the exact required text, verbatim and unmodified — see
+        // shared/queue-state.js's MANUAL_RELOAD_WARNING_MESSAGE, the single
+        // source of truth this and the banner above both read from.
+        pushActivity({ id: `${item.itemId}:manual-reload-${item.attemptCount ?? 0}`, tone: "warning", message: MANUAL_RELOAD_WARNING_MESSAGE, timestampIso: new Date().toISOString() });
+      } else if (prev.status === ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD && item.status === ITEM_STATUSES.QUEUED) {
+        pushActivity({ id: `${item.itemId}:manual-reload-resolved`, tone: "success", message: `${label} — reload confirmed, resuming automatically`, timestampIso: new Date().toISOString() });
       }
     } else if (IN_FLIGHT_STATUSES.has(item.status) && item.currentStep && item.currentStep !== prev.currentStep) {
       pushActivity({ id: `${item.itemId}:step-${item.currentStep}`, tone: "progress", message: `${label} — ${stepLabel(item.currentStep)}`, timestampIso: new Date().toISOString() });
@@ -587,7 +621,12 @@ function renderActionBar(state, summary) {
   // actionable until the account has been explicitly confirmed.
   els.startButton.disabled = summary.total === 0 || !state.batch.account;
   els.pauseButton.hidden = allTerminal || !state.batch.running || state.batch.paused;
-  els.resumeButton.hidden = allTerminal || !state.batch.paused;
+  // Follow-up correction (native browser reload-confirmation bug) — the
+  // generic Resume button is never offered during a manual-reload wait:
+  // clicking it can't itself resolve anything (only a genuinely observed
+  // clean page can — see attemptManualReloadRecovery), so it would just be
+  // a dead-end next to the dedicated "Try reload again" action below.
+  els.resumeButton.hidden = allTerminal || !state.batch.paused || isManualReloadPause(state);
   els.cancelButton.hidden = allTerminal;
   // Clear stays visible throughout an active batch (matching the reference
   // — it is not only a post-completion action), just disabled until every
@@ -663,6 +702,15 @@ els.clearButton.addEventListener("click", () => send(PANEL_TO_WORKER.CLEAR_BATCH
 els.confirmAccountChange.addEventListener("click", () => send(PANEL_TO_WORKER.CONFIRM_ACCOUNT_CHANGE).then(r => render(r.state)));
 els.confirmAccount.addEventListener("click", () => send(PANEL_TO_WORKER.CONFIRM_ACCOUNT).then(r => render(r.state)));
 els.retryAccountDetection.addEventListener("click", () => send(PANEL_TO_WORKER.RETRY_ACCOUNT_DETECTION).then(r => render(r.state)));
+els.retryManualReload.addEventListener("click", async () => {
+  els.retryManualReload.disabled = true;
+  try {
+    const result = await send(PANEL_TO_WORKER.RETRY_MANUAL_RELOAD);
+    if (result.state) render(result.state);
+  } finally {
+    els.retryManualReload.disabled = false;
+  }
+});
 
 chrome.storage.onChanged.addListener(changes => {
   if (changes.state) render(changes.state.newValue ?? { pairing: null, batch: null });

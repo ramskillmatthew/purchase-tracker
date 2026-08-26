@@ -9,6 +9,7 @@ import { normaliseFootwearVintedAudience, deriveDraftItemFamily } from "@/lib/li
 import { buildListingWarnings, type ReadinessCheckFields } from "@/lib/listing-studio/listing-review";
 import { generatePairingCode, hashPairingCode } from "@/lib/listing-studio/extension-pairing-code";
 import { MAX_EXTENSION_BATCH_LISTINGS, EXTENSION_BATCH_EXPIRY_SECONDS } from "@/lib/listing-studio/extension-batch-schema";
+import { classifyBatchForRecovery } from "@/lib/listing-studio/extension-batch-recovery";
 import { enforceRateLimit } from "@/lib/security/activity";
 import type { VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 
@@ -57,19 +58,59 @@ type RejectedListing = { draftId: string; sku: string | null; reasons: string[] 
  * than one may legitimately be in flight at once. Read-only,
  * owner-scoped, no photo I/O.
  */
+type OwnerBatchRow = {
+  id: string; status: string; expires_at: string; display_number: number;
+  box_dismissed_at: string | null; last_extension_activity_at: string | null; listing_count: number;
+};
+
+/**
+ * Follow-up correction (orphaned extension batch recovery) — this used to
+ * silently DROP every nonterminal batch whose expires_at had passed, and
+ * every batch whose box had been dismissed, from the response entirely —
+ * exactly the "hidden active batch" gap: a batch can still be genuinely
+ * locking drafts (via the create-batch RPC's own guard, which only looks
+ * at `status`, never at `expires_at` or `box_dismissed_at`) while being
+ * completely invisible to this route's caller. `batchIds` keeps its exact
+ * previous meaning/shape for existing callers (the ordinary box grid —
+ * still genuinely live-and-fresh, or terminal-but-not-yet-dismissed); the
+ * new `recoverable` array surfaces every OTHER nonterminal batch this
+ * owner has — hidden, stale, or both — so Listings Review can offer
+ * "Recover stuck batch" for it instead of it silently vanishing.
+ */
 export async function GET() {
   try {
     const user = await requireOwner();
-    const batches = await supabaseRequestAll<{ id: string; status: string; expires_at: string; display_number: number }>(
-      `vinted_extension_batches?owner_id=eq.${user.id}&box_dismissed_at=is.null`
-      + `&select=id,status,expires_at,display_number&order=created_at.desc`,
+    const batches = await supabaseRequestAll<OwnerBatchRow>(
+      `vinted_extension_batches?owner_id=eq.${user.id}`
+      + `&select=id,status,expires_at,display_number,box_dismissed_at,last_extension_activity_at,listing_count&order=created_at.desc`,
     );
+    const now = Date.now();
+
     const visible = batches.filter(batch => {
+      if (batch.box_dismissed_at !== null) return false;
       const isLive = batch.status === "pending_claim" || batch.status === "claimed" || batch.status === "in_progress";
-      return isLive ? new Date(batch.expires_at).getTime() > Date.now() : true;
+      return isLive ? new Date(batch.expires_at).getTime() > now : true;
     });
+
+    const recoverable = batches
+      .map(batch => ({
+        batch,
+        classification: classifyBatchForRecovery(
+          { status: batch.status, expiresAt: batch.expires_at, lastExtensionActivityAt: batch.last_extension_activity_at, boxDismissedAt: batch.box_dismissed_at },
+          now,
+        ),
+      }))
+      .filter(({ classification }) => classification.isRecoverable)
+      .map(({ batch, classification }) => ({
+        batchId: batch.id, displayNumber: batch.display_number, status: batch.status,
+        listingCount: batch.listing_count, expiresAt: batch.expires_at,
+        boxDismissedAt: batch.box_dismissed_at, lastExtensionActivityAt: batch.last_extension_activity_at,
+        isHidden: classification.isHidden, isStale: classification.isStale,
+      }));
+
     return NextResponse.json({
       batchIds: visible.map(batch => ({ batchId: batch.id, displayNumber: batch.display_number })),
+      recoverable,
     });
   } catch (error) { return safeApiError(error, "Could not check for active batches."); }
 }
@@ -83,6 +124,48 @@ export async function GET() {
 // discipline as lib/purchase-import/rpc-errors.ts's own classifyRpcError.
 function isDraftAlreadyActiveConflict(error: unknown): boolean {
   return error instanceof Error && error.message.includes("DRAFT_ALREADY_IN_ACTIVE_BATCH");
+}
+
+type BlockingBatchLookupItemRow = { batch_id: string; draft_id: string; status: string };
+type BlockingBatchLookupBatchRow = {
+  id: string; status: string; display_number: number; expires_at: string; created_at: string;
+  box_dismissed_at: string | null; last_extension_activity_at: string | null;
+};
+
+/**
+ * Error-message improvement (orphaned extension batch recovery) — finds
+ * the actual owner-owned, still-locking batch behind a
+ * DRAFT_ALREADY_IN_ACTIVE_BATCH conflict, using a fresh, independent,
+ * owner-scoped query over the SAME draft ids just submitted (never the
+ * RPC error's own `detail` text — its exact shape isn't a stable public
+ * contract). If more than one candidate somehow matches, the most
+ * recently created one wins (the freshest genuine lock). Returns null —
+ * never throws — if nothing owner-scoped is found, which can only mean a
+ * race (the conflicting batch resolved between the RPC's check and this
+ * lookup); the plain conflict message alone is still returned in that case.
+ */
+async function findBlockingBatch(ownerId: string, draftIds: string[]) {
+  if (draftIds.length === 0) return null;
+  const items = await supabaseRequestAll<BlockingBatchLookupItemRow>(
+    `vinted_extension_batch_items?draft_id=in.(${draftIds.join(",")})&status=not.in.(completed,failed,cancelled)&select=batch_id,draft_id,status`,
+  );
+  if (items.length === 0) return null;
+  const candidateBatchIds = [...new Set(items.map(i => i.batch_id))];
+  const batches = await supabaseRequestAll<BlockingBatchLookupBatchRow>(
+    `vinted_extension_batches?id=in.(${candidateBatchIds.join(",")})&owner_id=eq.${ownerId}&status=not.in.(completed,cancelled,expired)`
+    + `&select=id,status,display_number,expires_at,created_at,box_dismissed_at,last_extension_activity_at&order=created_at.desc`,
+  );
+  const batch = batches[0];
+  if (!batch) return null;
+  const classification = classifyBatchForRecovery(
+    { status: batch.status, expiresAt: batch.expires_at, lastExtensionActivityAt: batch.last_extension_activity_at, boxDismissedAt: batch.box_dismissed_at },
+    Date.now(),
+  );
+  return {
+    batchId: batch.id, displayNumber: batch.display_number, status: batch.status,
+    expiresAt: batch.expires_at, boxDismissedAt: batch.box_dismissed_at, lastExtensionActivityAt: batch.last_extension_activity_at,
+    isHidden: classification.isHidden, isStale: classification.isStale,
+  };
 }
 
 /**
@@ -176,9 +259,18 @@ export async function POST(request: Request) {
       created = row;
     } catch (error) {
       if (isDraftAlreadyActiveConflict(error)) {
+        // Error-message improvement (orphaned extension batch recovery) —
+        // the RPC only ever reports THAT a conflict exists, not which
+        // batch — re-derived here with a plain, owner-scoped query over
+        // the SAME draft ids just submitted (never trusting/parsing the
+        // RPC error's own `detail` text, whose exact shape isn't a
+        // guaranteed stable contract). Scoped to this owner throughout, so
+        // another owner's batch can never be named or exposed here.
+        const blockingBatch = await findBlockingBatch(user.id, foundIds);
         return NextResponse.json({
           error: "One or more selected listings are already part of another active batch. Wait for that batch to finish, or choose different listings.",
           rejected: [],
+          blockingBatch,
         }, { status: 409 });
       }
       throw error;

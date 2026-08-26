@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { isSelectableForCancellation, matchesSalesStatusFilter, parseSalesStatusFilter, salesStatusFilters } from "@/lib/sales/status-filter";
 
 describe("salesStatusFilters — shape and default", () => {
-  it("REQUIREMENT: Completed, Cancelled, All — in that order", () => {
-    expect(salesStatusFilters.map(option => option.value)).toEqual(["completed", "cancelled", "all"]);
-    expect(salesStatusFilters.map(option => option.label)).toEqual(["Completed", "Cancelled", "All"]);
+  it("REQUIREMENT: Pending, Completed, Cancelled, All — in that order", () => {
+    expect(salesStatusFilters.map(option => option.value)).toEqual(["pending", "completed", "cancelled", "all"]);
+    expect(salesStatusFilters.map(option => option.label)).toEqual(["Pending", "Completed", "Cancelled", "All"]);
   });
 
   it("REQUIREMENT: parseSalesStatusFilter defaults to 'completed' for anything unrecognised, missing, or null", () => {
@@ -14,13 +14,18 @@ describe("salesStatusFilters — shape and default", () => {
     expect(parseSalesStatusFilter("bogus")).toBe("completed");
   });
 
-  it("parseSalesStatusFilter recognises cancelled and all", () => {
+  it("parseSalesStatusFilter recognises pending, cancelled and all", () => {
+    expect(parseSalesStatusFilter("pending")).toBe("pending");
     expect(parseSalesStatusFilter("cancelled")).toBe("cancelled");
     expect(parseSalesStatusFilter("all")).toBe("all");
   });
 });
 
 describe("matchesSalesStatusFilter", () => {
+  it("treats pending as financially active before process-status filtering", () => {
+    expect(matchesSalesStatusFilter({ status: "completed" }, "pending")).toBe(true);
+    expect(matchesSalesStatusFilter({ status: "cancelled" }, "pending")).toBe(false);
+  });
   it("REQUIREMENT: Completed shows only completed sales", () => {
     expect(matchesSalesStatusFilter({ status: "completed" }, "completed")).toBe(true);
     expect(matchesSalesStatusFilter({ status: "cancelled" }, "completed")).toBe(false);

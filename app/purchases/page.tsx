@@ -16,7 +16,7 @@ import { matchesStockFilter, parseStockFilter, stockFilters, type StockFilter } 
 import { buildPurchaseSearchText, matchesPurchaseSearchText, normalizeSearchTerms } from "@/lib/purchase-search";
 import { pruneMissingIds, resolveRowClick, selectionSummary, toggleId, toggleVisiblePage } from "@/lib/purchases-selection";
 import { deletionConfirmLabel, deletionDialogMessage, deletionDialogTitle, type DeletionEligibility } from "@/lib/purchases-delete-copy";
-import { comparePurchasesForDisplay, compareSkuDescending } from "@/lib/purchase-order";
+import { comparePurchasesBySkuSequence, comparePurchasesForDisplay } from "@/lib/purchase-order";
 import type { DeletePurchasesResult, PurchaseListItem, StockStatus } from "@/lib/types";
 
 const PURCHASES_PAGE_SIZE_KEY = "trotters:purchases-page-size";
@@ -82,6 +82,11 @@ function PurchasesPageInner() {
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteError, setBulkDeleteError] = useState("");
+  const [bulkStockStatus, setBulkStockStatus] = useState<"" | StockStatus>("");
+  const [bulkArrivalStatus, setBulkArrivalStatus] = useState<"" | "arrived" | "not_arrived">("");
+  const [bulkUpdating, setBulkUpdating] = useState(false);
+  const [bulkUpdateError, setBulkUpdateError] = useState("");
+  const [bulkUpdateToast, setBulkUpdateToast] = useState<string | null>(null);
 
   function changeStockFilter(next: StockFilter) {
     setStockFilter(next);
@@ -254,21 +259,18 @@ function PurchasesPageInner() {
       : searchIndex.filter(entry => matchesPurchaseSearchText(entry.searchText, searchTerms)).map(entry => entry.row),
     [stockFilteredRows, searchIndex, searchTerms],
   );
-  // The default view (order_date, desc — this page's initial sort state)
-  // uses the SAME authoritative multi-key comparator as GET /api/purchases
-  // itself (see lib/purchase-order.ts): order_date desc, then numeric SKU
-  // desc, then created_at desc, then id — never just the array's incoming
-  // order. The SKU column also delegates to that same numeric-safe (BigInt)
-  // comparator, rather than a separate localeCompare-based one, so there is
-  // only ever one definition of "numeric SKU order" on this page. Every
-  // other column keeps its existing generic comparator, unchanged.
+  // The approved default is chronological: newest purchase date first, then
+  // the numeric/prefixed SKU sequence within that date. This keeps purchases
+  // without a SKU in their correct dated position instead of pushing them to
+  // the end of the complete list. The SKU column remains available when the
+  // user explicitly wants a SKU-first view.
   const sortedRows = useMemo(() => {
     if (sort.key === "order_date") {
       const base = [...filteredRows].sort(comparePurchasesForDisplay);
       return sort.direction === "asc" ? base.reverse() : base;
     }
     if (sort.key === "sku") {
-      const base = [...filteredRows].sort((a, b) => compareSkuDescending(a.sku, b.sku));
+      const base = [...filteredRows].sort(comparePurchasesBySkuSequence);
       return sort.direction === "asc" ? base.reverse() : base;
     }
     return [...filteredRows].sort((a, b) => {
@@ -332,6 +334,35 @@ function PurchasesPageInner() {
   function clearSelection() {
     setSelectedIds(new Set());
     setRangeAnchor(null);
+    setBulkStockStatus("");
+    setBulkArrivalStatus("");
+    setBulkUpdateError("");
+  }
+
+  async function applyBulkUpdate() {
+    if (bulkUpdating || selectedIds.size === 0 || (!bulkStockStatus && !bulkArrivalStatus)) return;
+    setBulkUpdating(true);
+    setBulkUpdateError("");
+    const ids = [...selectedIds];
+    const payload: { ids: string[]; stockStatus?: StockStatus; arrived?: boolean } = { ids };
+    if (bulkStockStatus) payload.stockStatus = bulkStockStatus;
+    if (bulkArrivalStatus) payload.arrived = bulkArrivalStatus === "arrived";
+    try {
+      const response = await fetch("/api/purchases/bulk-update", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null) as { error?: string; updatedCount?: number } | null;
+      if (!response.ok) { setBulkUpdateError(body?.error || "Could not update the selected purchases. Try again."); return; }
+      const changed = new Set(ids);
+      setRows(current => current.map(row => changed.has(row.id) ? {
+        ...row,
+        ...(bulkStockStatus ? { stock_status: bulkStockStatus } : {}),
+        ...(bulkArrivalStatus ? { arrived: bulkArrivalStatus === "arrived" } : {}),
+      } : row));
+      const count = body?.updatedCount ?? ids.length;
+      clearSelection();
+      setBulkUpdateToast(`${count.toLocaleString("en-GB")} purchase${count === 1 ? "" : "s"} updated.`);
+      void load();
+    } catch { setBulkUpdateError("Could not update the selected purchases. Try again."); }
+    finally { setBulkUpdating(false); }
   }
   // Priority order: Shift+click always ranges (never clears); a plain click
   // clears the whole selection if anything is selected; only with nothing
@@ -433,8 +464,6 @@ function PurchasesPageInner() {
           {stockFilters.map(option => <button key={option.value} type="button" className={stockFilter === option.value ? "period-active" : ""} onClick={() => changeStockFilter(option.value)}>{option.label}</button>)}
         </div>
         <div className="grid-toolbar-actions">
-          {selectedIds.size > 0 && <span className="selection-hint">Shift-click rows to select a range</span>}
-          {selectedIds.size > 0 && <button type="button" className="button-secondary" onClick={clearSelection}>Clear selection</button>}
           {rows.length > 0 && <button className="button-danger" onClick={() => setConfirmation({ type: "all" })}>Clear all</button>}
         </div>
       </div>
@@ -454,6 +483,13 @@ function PurchasesPageInner() {
         </div>
         {hasActiveSearch && <span className="purchase-search-count" role="status">{matchingRowsLabel}</span>}
       </div>
+      {selectedIds.size > 0 && <div className="purchase-bulk-update-bar" aria-label="Bulk update selected purchases">
+        <strong className="purchase-bulk-count" role="status" aria-live="polite">{selectedIds.size.toLocaleString("en-GB")} purchase{selectedIds.size === 1 ? "" : "s"} selected</strong>
+        <label className="purchase-bulk-field"><span className="purchase-bulk-icon" aria-hidden="true">◇</span><span>Stock status</span><select value={bulkStockStatus} onChange={event => setBulkStockStatus(event.target.value as "" | StockStatus)} disabled={bulkUpdating}><option value="">Choose status…</option><option value="in_stock">In stock</option><option value="no_longer_in_stock">No longer in stock</option></select></label>
+        <label className="purchase-bulk-field"><span className="purchase-bulk-icon" aria-hidden="true">✓</span><span>Arrival status</span><select value={bulkArrivalStatus} onChange={event => setBulkArrivalStatus(event.target.value as "" | "arrived" | "not_arrived")} disabled={bulkUpdating}><option value="">Choose status…</option><option value="arrived">Arrived</option><option value="not_arrived">Not arrived</option></select></label>
+        <div className="purchase-bulk-actions"><button type="button" className="button" disabled={bulkUpdating || (!bulkStockStatus && !bulkArrivalStatus)} onClick={applyBulkUpdate}>{bulkUpdating ? "Applying…" : "Apply changes"}</button><button type="button" className="purchase-bulk-clear" onClick={clearSelection} disabled={bulkUpdating}>Clear selection</button></div>
+        {bulkUpdateError && <div className="purchase-bulk-error" role="alert">{bulkUpdateError}</div>}
+      </div>}
       <div className="table-scroll purchase-grid-scroll"><table className="purchase-grid"><thead><tr>
         <th className="purchase-checkbox-cell"><input ref={selectAllRef} type="checkbox" aria-label={selection.someSelected ? `${selection.selectedCount} of ${pageRows.length} purchases on this page selected` : "Select all purchases on this page"} checked={selection.allSelected} onChange={toggleSelectAllVisible} /></th>
         {columns.map(column => <th key={column.key}><button type="button" onClick={() => changeSort(column.key)}><span>{column.label}</span><i className={sort.key === column.key ? "sort-active" : ""}>{sort.key === column.key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}</i></button></th>)}
@@ -465,7 +501,7 @@ function PurchasesPageInner() {
           <td className="description-cell">{row.item_description}</td>
           <td>{row.item_size}</td>
           <td className="numeric-cell">{Number(row.price_purchased).toFixed(2)}</td>
-          <td><span className="sku-pill">{row.sku}</span></td>
+          <td>{row.sku ? <span className="sku-pill">{row.sku}</span> : <span aria-label="No SKU">—</span>}</td>
           <td><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
           <td><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
           <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); if (row.protectedSaleId) setProtectedNoticeSaleId(row.protectedSaleId); else setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
@@ -522,5 +558,6 @@ function PurchasesPageInner() {
     {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
     {stockToast && <TaskToast message={stockToast} onDismiss={() => setStockToast(null)} position="bottom-right" />}
     {deleteToast && <TaskToast message={deleteToast} onDismiss={() => setDeleteToast(null)} />}
+    {bulkUpdateToast && <TaskToast message={bulkUpdateToast} onDismiss={() => setBulkUpdateToast(null)} />}
   </section>;
 }

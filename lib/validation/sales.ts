@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const salesPlatforms = ["vinted", "ebay", "depop", "other"] as const;
+export const salesProcessStatuses = ["awaiting_dispatch", "sent", "delivered_awaiting_payout", "completed", "return_in_process", "cancelled", "returned_cancelled"] as const;
 // "itemised" — supabase-sales-v2.sql / lib/sales/allocation.ts's Stage 4
 // addition: per-line revenue for mixed-product baskets, instead of an equal
 // split across every selected purchase. "total"/"average" are the original
@@ -102,6 +103,13 @@ export const cancelSalesInputSchema = z.object({
   });
 
 export type CancelSalesInputParsed = z.infer<typeof cancelSalesInputSchema>;
+
+/** PATCH /api/sales/[id]/process-status — operational state only. */
+export const updateSalesProcessStatusSchema = z.object({
+  processStatus: z.enum(salesProcessStatuses),
+}).strict();
+
+export type UpdateSalesProcessStatusParsed = z.infer<typeof updateSalesProcessStatusSchema>;
 
 /**
  * GET /api/sales/reports query-string validation — a light shape check

@@ -5,7 +5,7 @@ import { safeApiError } from "@/lib/auth/api";
 import { uploadSessionRequestSchema } from "@/lib/validation/listing-studio-uploads";
 import { buildDraftImageStoragePath, LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import { createSignedUploadUrl, StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
-import { MAX_BATCH_SIZE_BYTES, MAX_GROUPS_IN_WORKSPACE, MAX_INDIVIDUAL_FILE_SIZE_BYTES, MAX_TOTAL_ACTIVE_UPLOAD_FILES } from "@/lib/listing-studio/upload-limits";
+import { MAX_BATCH_SIZE_BYTES, MAX_FILES_PER_SELECTION, MAX_GROUPS_IN_WORKSPACE, MAX_INDIVIDUAL_FILE_SIZE_BYTES, MAX_TOTAL_ACTIVE_UPLOAD_FILES } from "@/lib/listing-studio/upload-limits";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -21,6 +21,20 @@ const UNSORTED_TITLE = "Unsorted";
 
 type Row = { id: string };
 
+// Machine-readable failure reasons the client (GroupingWorkspace.tsx via
+// lib/listing-studio/upload-error-messages.ts) uses to decide whether a
+// chunk-registration failure is systemic (stop registering further chunks,
+// show one clear global explanation) or scoped to just this chunk (mark
+// only these files failed, keep going) — see that module's own top comment
+// for the full classification. Every branch below that can fail returns one
+// of these alongside its human-readable `error` message; nothing here
+// changes an existing check's logic, only how it's reported.
+type UploadFailureReason = "too_many_files" | "file_too_large" | "batch_too_large" | "workspace_capacity_exceeded" | "group_limit_exceeded" | "storage_unavailable";
+
+function failure(status: number, reason: UploadFailureReason, error: string) {
+  return NextResponse.json({ error, reason }, { status });
+}
+
 /**
  * Creates (or reuses) a product group and registers N images against it —
  * server-generated ids and Storage paths, a signed upload URL per image,
@@ -34,21 +48,37 @@ export async function POST(request: Request) {
   let cleanupNewlyCreatedDraftId: string | null = null;
   try {
     const user = await requireOwner();
-    const { draftId, files } = uploadSessionRequestSchema.parse(await request.json());
+    const rawBody = await request.json().catch(() => ({}));
+
+    // Defensive only — the browser now always chunks a large selection into
+    // requests of at most MAX_FILES_PER_SELECTION files each (see
+    // lib/listing-studio/upload-chunk-planner.ts), so a real client should
+    // never hit this. Checked BEFORE the strict zod parse below purely so
+    // this one specific, well-understood failure mode gets a clear,
+    // structured reason instead of falling through to zod's generic
+    // "Invalid request." — this is the exact failure this whole fix exists
+    // to eliminate for genuine users; keeping it caught here too means even
+    // a misbehaving future caller gets a useful answer, not a mystery.
+    if (Array.isArray((rawBody as { files?: unknown })?.files) && (rawBody as { files: unknown[] }).files.length > MAX_FILES_PER_SELECTION) {
+      return failure(400, "too_many_files", `A single upload request can register at most ${MAX_FILES_PER_SELECTION} files. Please try again — large selections are chunked automatically.`);
+    }
+
+    const { draftId, files } = uploadSessionRequestSchema.parse(rawBody);
 
     for (const file of files) {
       if (file.fileSize > MAX_INDIVIDUAL_FILE_SIZE_BYTES) {
-        return NextResponse.json({ error: `"${file.filename}" is too large. Maximum file size is ${Math.round(MAX_INDIVIDUAL_FILE_SIZE_BYTES / (1024 * 1024))}MB.` }, { status: 400 });
+        return failure(400, "file_too_large", `${file.filename} exceeds the ${Math.round(MAX_INDIVIDUAL_FILE_SIZE_BYTES / (1024 * 1024))}MB file limit.`);
       }
     }
     const totalBytes = files.reduce((sum, file) => sum + file.fileSize, 0);
     if (totalBytes > MAX_BATCH_SIZE_BYTES) {
-      return NextResponse.json({ error: `This batch is too large in total. Maximum is ${Math.round(MAX_BATCH_SIZE_BYTES / (1024 * 1024))}MB per upload.` }, { status: 400 });
+      return failure(400, "batch_too_large", `This group exceeds the ${Math.round(MAX_BATCH_SIZE_BYTES / (1024 * 1024))}MB batch limit.`);
     }
 
     const activeImages = await supabaseRequestAll<Row>(`listing_draft_images?owner_id=eq.${user.id}&select=id`);
     if (activeImages.length + files.length > MAX_TOTAL_ACTIVE_UPLOAD_FILES) {
-      return NextResponse.json({ error: `This workspace already has ${activeImages.length} photos. The maximum is ${MAX_TOTAL_ACTIVE_UPLOAD_FILES}.` }, { status: 400 });
+      const remaining = Math.max(0, MAX_TOTAL_ACTIVE_UPLOAD_FILES - activeImages.length);
+      return failure(400, "workspace_capacity_exceeded", `Only ${remaining} more photo${remaining === 1 ? "" : "s"} can be added because this workspace allows ${MAX_TOTAL_ACTIVE_UPLOAD_FILES} active photos.`);
     }
 
     let targetDraftId = draftId ?? null;
@@ -64,7 +94,7 @@ export async function POST(request: Request) {
       } else {
         const groupCount = await supabaseRequestAll<Row>(`listing_drafts?owner_id=eq.${user.id}&status=neq.archived&select=id`);
         if (groupCount.length >= MAX_GROUPS_IN_WORKSPACE) {
-          return NextResponse.json({ error: `This workspace already has ${groupCount.length} groups. The maximum is ${MAX_GROUPS_IN_WORKSPACE}.` }, { status: 400 });
+          return failure(400, "group_limit_exceeded", `This workspace already has ${groupCount.length} groups. The maximum is ${MAX_GROUPS_IN_WORKSPACE}.`);
         }
         const created = await (await supabaseRequest("listing_drafts", {
           method: "POST",
@@ -130,7 +160,7 @@ export async function POST(request: Request) {
     if (cleanupNewlyCreatedDraftId) {
       await supabaseRequest(`listing_drafts?id=eq.${cleanupNewlyCreatedDraftId}`, { method: "DELETE" }).catch(() => {});
     }
-    if (error instanceof StorageBucketMissingError) return NextResponse.json({ error: error.message }, { status: 503 });
+    if (error instanceof StorageBucketMissingError) return failure(503, "storage_unavailable", error.message);
     return safeApiError(error, "Could not start the upload. Please try again.");
   }
 }

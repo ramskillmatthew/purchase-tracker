@@ -181,9 +181,9 @@ export type StockFilter = "all" | "in-stock" | "waiting-on-arrival" | "physicall
 export const stockFilters: { value: StockFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "in-stock", label: "In stock" },
+  { value: "no-longer-in-stock", label: "No longer in stock" },
   { value: "waiting-on-arrival", label: "Waiting on arrival" },
   { value: "physically-here", label: "Physically here" },
-  { value: "no-longer-in-stock", label: "No longer in stock" },
 ];
 
 // Reads the ?stock= query param the Home cards deep-link to (in-stock /

@@ -68,6 +68,24 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
     }
 
     const nowIso = new Date().toISOString();
+
+    // Follow-up correction (orphaned extension batch recovery) — every
+    // genuine item-result report IS, by definition, genuine extension
+    // activity for this batch. Best-effort (never blocks or fails the real
+    // report below on its own account) — see lib/listing-studio/
+    // extension-batch-recovery.ts's own top comment on why this is
+    // deliberately never touched by any owner-authenticated polling route.
+    //
+    // `status=neq.completed` is written BEFORE `id=eq.${batchId}` in this
+    // one PATCH's own query string (PostgREST filters are unordered — this
+    // is purely which literal filter comes first) so this call's path
+    // never collides with the batch-completion PATCH further down, which
+    // filters on `id=eq.${batchId}` first — keeping the two independently
+    // greppable/mockable in tests, never just "whichever ran first".
+    await supabaseRequest(`vinted_extension_batches?status=neq.completed&id=eq.${batchId}`, {
+      method: "PATCH", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ last_extension_activity_at: nowIso }),
+    }).catch(() => {});
     const patchBody: Record<string, unknown> = { status: body.status };
     if (body.status === "preparing") patchBody.attempt_count = item.attempt_count + 1;
     if (!item.started_at && body.status !== "queued") patchBody.started_at = nowIso;

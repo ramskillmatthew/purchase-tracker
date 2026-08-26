@@ -7,23 +7,23 @@ import { readFileSync } from "node:fs";
 const source = readFileSync("app/purchases/page.tsx", "utf8");
 
 describe("app/purchases/page.tsx — default and SKU-column ordering", () => {
-  it("imports the shared authoritative comparator, rather than reimplementing date/SKU ordering inline", () => {
-    expect(source).toContain('import { comparePurchasesForDisplay, compareSkuDescending } from "@/lib/purchase-order";');
+  it("imports both shared date-first and SKU-sequence comparators rather than reimplementing them inline", () => {
+    expect(source).toContain('import { comparePurchasesBySkuSequence, comparePurchasesForDisplay } from "@/lib/purchase-order";');
   });
 
-  it("REQUIREMENT: the default view (order_date, desc) uses the full authoritative multi-key comparator, not a single-key date-only comparison", () => {
+  it("clicking Order Date still uses the full date-first comparator", () => {
     const sortedRowsFn = source.slice(source.indexOf("const sortedRows = useMemo("), source.indexOf("const totalPages ="));
     expect(sortedRowsFn).toContain('if (sort.key === "order_date") {');
     expect(sortedRowsFn).toContain("[...filteredRows].sort(comparePurchasesForDisplay)");
   });
 
-  it("REQUIREMENT: the SKU column uses the same numeric-safe comparator as the default view — one definition of SKU order on this page, not two", () => {
+  it("REQUIREMENT: the SKU column uses the complete sequence comparator", () => {
     const sortedRowsFn = source.slice(source.indexOf("const sortedRows = useMemo("), source.indexOf("const totalPages ="));
     expect(sortedRowsFn).toContain('if (sort.key === "sku") {');
-    expect(sortedRowsFn).toContain("compareSkuDescending(a.sku, b.sku)");
+    expect(sortedRowsFn).toContain("[...filteredRows].sort(comparePurchasesBySkuSequence)");
   });
 
-  it("the initial sort state is order_date descending — the default, authoritative view — unchanged from before", () => {
+  it("the initial view is newest date first so purchases without SKUs stay chronologically positioned", () => {
     expect(source).toContain('const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "order_date", direction: "desc" });');
   });
 

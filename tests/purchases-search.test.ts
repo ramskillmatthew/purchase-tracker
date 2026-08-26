@@ -391,10 +391,10 @@ describe("app/purchases/page.tsx — URL query-parameter behaviour", () => {
   });
 });
 
-describe("app/purchases/page.tsx — existing behaviour is unchanged", () => {
+describe("app/purchases/page.tsx — surrounding behaviour remains intact", () => {
   const source = readFileSync("app/purchases/page.tsx", "utf8");
 
-  it("REGRESSION: default sort remains order_date descending (most recent first)", () => {
+  it("REQUIREMENT: default sort is chronological so purchases without SKUs remain in their dated position", () => {
     expect(source).toContain('useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "order_date", direction: "desc" })');
   });
 

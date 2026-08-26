@@ -231,10 +231,9 @@ describe("GET /api/listing-studio/extension-batches — multi-batch resume: ever
   it("returns every non-box-dismissed batch id and display number, not just one", async () => {
     supabaseRequestAll.mockImplementation(async (path: string) => {
       expect(path).toContain("owner_id=eq.owner-1");
-      expect(path).toContain("box_dismissed_at=is.null");
       return [
-        { id: BATCH_ID, status: "claimed", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), display_number: 1 },
-        { id: "batch-2", status: "in_progress", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), display_number: 2 },
+        { id: BATCH_ID, status: "claimed", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), display_number: 1, box_dismissed_at: null },
+        { id: "batch-2", status: "in_progress", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), display_number: 2, box_dismissed_at: null },
       ];
     });
     const response = await listVisibleBatchesRoute();
@@ -244,7 +243,7 @@ describe("GET /api/listing-studio/extension-batches — multi-batch resume: ever
 
   it("includes a terminal (e.g. completed) batch that hasn't been box-dismissed, even if its expiry is long past", async () => {
     supabaseRequestAll.mockImplementation(async () => [
-      { id: BATCH_ID, status: "completed", expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), display_number: 1 },
+      { id: BATCH_ID, status: "completed", expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), display_number: 1, box_dismissed_at: null },
     ]);
     const response = await listVisibleBatchesRoute();
     const body = await response.json();
@@ -260,11 +259,25 @@ describe("GET /api/listing-studio/extension-batches — multi-batch resume: ever
 
   it("REGRESSION: never resurrects a still-non-terminal batch whose real expires_at has already passed, even if its status column hasn't been flipped to 'expired' yet", async () => {
     supabaseRequestAll.mockImplementation(async () => [
-      { id: BATCH_ID, status: "pending_claim", expires_at: new Date(Date.now() - 60 * 1000).toISOString(), display_number: 1 },
+      { id: BATCH_ID, status: "pending_claim", expires_at: new Date(Date.now() - 60 * 1000).toISOString(), display_number: 1, box_dismissed_at: null },
     ]);
     const response = await listVisibleBatchesRoute();
     const body = await response.json();
     expect(body.batchIds).toEqual([]);
+  });
+
+  it("follow-up correction (orphaned extension batch recovery): a box-dismissed-but-still-nonterminal batch is excluded from batchIds but reported in the new `recoverable` field as hidden", async () => {
+    supabaseRequestAll.mockImplementation(async () => [
+      { id: BATCH_ID, status: "in_progress", expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), display_number: 1, box_dismissed_at: "2026-08-19T09:00:00.000Z", last_extension_activity_at: null, listing_count: 3 },
+    ]);
+    const response = await listVisibleBatchesRoute();
+    const body = await response.json();
+    expect(body.batchIds).toEqual([]);
+    expect(body.recoverable).toEqual([{
+      batchId: BATCH_ID, displayNumber: 1, status: "in_progress", listingCount: 3,
+      expiresAt: expect.any(String), boxDismissedAt: "2026-08-19T09:00:00.000Z", lastExtensionActivityAt: null,
+      isHidden: true, isStale: true,
+    }]);
   });
 
   it("catches everything through safeApiError", async () => {

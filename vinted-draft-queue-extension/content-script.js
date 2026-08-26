@@ -130,6 +130,13 @@ if (!window.__vintedDraftQueueContentScriptLoaded) {
         sendResponse({ vintedDraftId });
         return;
       }
+      // Clean-create-form boundary — read-only inspection only, see
+      // shared/form-steps.js's inspectPageState and messages.js's own
+      // comment on this message type.
+      if (message?.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) {
+        sendResponse(formSteps.inspectPageState(document, window.location));
+        return;
+      }
       if (message?.type === WORKER_TO_CONTENT.PROCESS_ITEM) {
         const { item } = message;
         // A per-item deps object (a shallow copy — never mutates the

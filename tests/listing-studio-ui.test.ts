@@ -154,8 +154,8 @@ describe("components/listing-studio/UploadQueue.tsx — collapse/expand behaviou
     expect(source).toContain("useState(false)");
   });
 
-  it("is forced expanded while anything is pending/uploading/failed, regardless of the manual toggle", () => {
-    expect(source).toContain('item.state === "pending" || item.state === "uploading" || item.state === "failed"');
+  it("is forced expanded while anything is active/failed/rejected, regardless of the manual toggle", () => {
+    expect(source).toContain("const hasActiveOrFailed = activeItems.length > 0 || failedItems.length > 0 || rejectedItems.length > 0;");
     expect(source).toContain("const expanded = hasActiveOrFailed || manualExpanded;");
   });
 
@@ -411,13 +411,92 @@ describe("components/listing-studio/GroupingWorkspace.tsx — empty state, uploa
     expect(source).toContain("listing-group-${draftId}");
   });
 
-  it("uploads the whole batch via one /api/listing-studio/uploads request, never one request per file", () => {
+  it("registers one CHUNK per /api/listing-studio/uploads request — one call site in source, invoked sequentially per chunk at runtime, never one request per file", () => {
     expect(source).toContain('fetch("/api/listing-studio/uploads"');
     expect(source.match(/fetch\("\/api\/listing-studio\/uploads"/g)?.length).toBe(1);
   });
 
+  it("large-batch upload fix: a selection is planned into safe chunks via the pure planUploadChunks helper, never sent as one unbounded request", () => {
+    expect(source).toContain('import { planUploadChunks, type PlannableFile } from "@/lib/listing-studio/upload-chunk-planner";');
+    expect(source).toContain("const plan = planUploadChunks(plannable);");
+  });
+
+  it("REQUIREMENT: chunk registrations are sequential — the queue processor awaits one chunk's full registerAndUploadChunk before planning the next, never Promise.all across chunks", () => {
+    const fn = source.slice(source.indexOf("async function processUploadQueue"), source.indexOf("async function registerAndUploadChunk"));
+    expect(fn).toContain("const outcome = await registerAndUploadChunk(plan.chunks[0].map(entry => entry.item));");
+    expect(fn).not.toMatch(/Promise\.all/);
+  });
+
+  it("REQUIREMENT: a single queue processor guard prevents two competing processors from uploading the same items", () => {
+    expect(source).toContain("const uploadProcessorRunningRef = useRef(false);");
+    expect(source).toContain("if (uploadProcessorRunningRef.current) return;");
+  });
+
   it("limits concurrent PUTs rather than uploading an unbounded batch all at once", () => {
-    expect(source).toContain("runWithConcurrencyLimit(paired, 3,");
+    expect(source).toContain("runWithConcurrencyLimit(paired, UPLOAD_CONCURRENCY,");
+    expect(source).toContain("const UPLOAD_CONCURRENCY = 3;");
+  });
+
+  it("bounds preview-generation concurrency too — HEIC conversion is CPU-heavy and previews must not run unbounded across a 120+ photo selection", () => {
+    expect(source).toContain("const PREVIEW_CONCURRENCY = 4;");
+    expect(source).toContain("runWithConcurrencyLimit(items, PREVIEW_CONCURRENCY,");
+  });
+
+  it("REQUIREMENT: order fidelity — chunk items are paired with the server's returned images by array INDEX, never by re-matching filenames", () => {
+    const fn = source.slice(source.indexOf("async function registerAndUploadChunk"), source.indexOf("async function uploadOneFile"));
+    expect(fn).toContain("const paired = chunkItems.map((item, index) => ({ item, server: serverImages[index] }));");
+  });
+
+  it("REQUIREMENT: a hard-stop chunk-registration failure (workspace capacity, auth, missing bucket, a chunking bug) stops registering further chunks and shows one global explanation, without touching earlier successful chunks", () => {
+    const fn = source.slice(source.indexOf("async function registerAndUploadChunk"), source.indexOf("async function uploadOneFile"));
+    expect(fn).toContain('if (failure.classification === "hard_stop") {');
+    expect(fn).toContain("setUploadGlobalError(failure.message);");
+    expect(fn).toContain('return "hard_stop";');
+  });
+
+  it("REQUIREMENT: fixes the confirmed retry bug — retrying an item that failed BEFORE registration (no imageId yet) re-queues it through the normal bounded flow instead of silently doing nothing", () => {
+    const fn = source.slice(source.indexOf("async function handleRetryUpload"), source.indexOf("function handleRetryAllFailed"));
+    expect(fn).toContain("if (!item.imageId) {");
+    expect(fn).toContain('state: "waiting"');
+    expect(fn).toContain("processUploadQueue();");
+  });
+
+  it("retrying an item that DOES have an imageId still reuses the existing retry-signed-URL flow", () => {
+    const fn = source.slice(source.indexOf("async function handleRetryUpload"), source.indexOf("function handleRetryAllFailed"));
+    expect(fn).toContain("/retry`, { method: \"POST\" }");
+  });
+
+  it("REQUIREMENT: prevents double-click duplicate retries by ignoring a retry click while the item is already in flight", () => {
+    const fn = source.slice(source.indexOf("async function handleRetryUpload"), source.indexOf("function handleRetryAllFailed"));
+    expect(fn).toContain("if (UPLOAD_ACTIVE_STATES.has(item.state)) return;");
+  });
+
+  it("'Retry all failed' re-queues every failed item through the same bounded processUploadQueue flow, never 126 simultaneous retries", () => {
+    const fn = source.slice(source.indexOf("function handleRetryAllFailed"), source.indexOf("async function handleRemoveUploadItem"));
+    expect(fn).toContain('item.state === "failed"');
+    expect(fn).toContain("processUploadQueue();");
+    expect(fn).not.toContain("Promise.all");
+  });
+
+  it("releases every still-live preview blob: URL on unmount, not just on individual removal", () => {
+    expect(source).toMatch(/return \(\) => \{ for \(const item of uploadItemsRef\.current\) releaseImagePreview\(item\.previewUrl\); \};/);
+  });
+
+  it("REGRESSION (confirmed live against the dev server): every upload-queue mutation updates uploadItemsRef.current SYNCHRONOUSLY via updateUploadItems, never a bare setUploadItems call that only reaches the ref on React's next render", () => {
+    // The one legitimate setUploadItems call is inside updateUploadItems's own body — every other call site in the file must go through the wrapper.
+    expect(source).toContain("function updateUploadItems(updater: (current: UploadItem[]) => UploadItem[]) {");
+    expect(source).toContain("uploadItemsRef.current = next;\n    setUploadItems(next);");
+    const outsideHelper = source.replace("uploadItemsRef.current = next;\n    setUploadItems(next);", "");
+    expect(outsideHelper).not.toMatch(/setUploadItems\(/); // "updateUploadItems(" does not contain this substring, so this only catches a real remaining bare call
+  });
+
+  it("REGRESSION: handleFilesSelected updates the queue via updateUploadItems BEFORE calling processUploadQueue, so the processor's first read of uploadItemsRef.current already includes the newly-added items", () => {
+    const fn = source.slice(source.indexOf("async function handleFilesSelected"), source.indexOf("async function preparePreviewsBounded"));
+    expect(fn).toContain("updateUploadItems(current => [...current, ...newItems]);");
+    const addIndex = fn.indexOf("updateUploadItems(current => [...current, ...newItems]);");
+    const processIndex = fn.indexOf("processUploadQueue();");
+    expect(addIndex).toBeGreaterThan(-1);
+    expect(processIndex).toBeGreaterThan(addIndex);
   });
 
   it("never marks an upload item 'uploaded' until the confirm call itself succeeds", () => {
@@ -1018,7 +1097,7 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
   });
 
   it("REGRESSION: disables the 'Clear all' trigger while an upload is active, while auto-grouping is running, while a clear is already running, or while listings are generating", () => {
-    expect(source).toContain("const uploadsActive = uploadItems.some(item => item.state === \"pending\" || item.state === \"uploading\");");
+    expect(source).toContain("const uploadsActive = uploadItems.some(item => UPLOAD_ACTIVE_STATES.has(item.state));");
     expect(source).toContain("const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;");
     const bar = source.slice(source.indexOf('<div className="listing-sticky-bar"'), source.indexOf("{moveDialogGroupId &&"));
     expect(bar).toContain("disabled={clearWorkspaceDisabled}");
@@ -1052,7 +1131,7 @@ describe("components/listing-studio/GroupingWorkspace.tsx — 'Clear all' worksp
   it("on success, clears selection, the whole upload queue, every auto-group UI state field (progress/error/summary/proposals), every open dialog, the shared save indicator, and the load error, then closes its own dialog", () => {
     const fn = handlerFn();
     for (const call of [
-      "setSelectedIds(new Set());", "setUploadItems([]);", "setUploadNotice(\"\");", "setUploadSuccessMessage(\"\");",
+      "setSelectedIds(new Set());", "updateUploadItems(() => []);", "setUploadNotice(\"\");", "setUploadSuccessMessage(\"\");",
       "setAutoGroupRunning(false);", "setAutoGroupProgress(null);", "setAutoGroupError(null);", "setAutoGroupSummary(null);",
       "setAutoGroupProposals([]);", "setApplyingProposalId(null);",
       "setMoveDialogGroupId(null);", "setMergeDialogGroupId(null);", "setDeleteGroupTarget(null);", "setBulkDeleteConfirmOpen(false);",

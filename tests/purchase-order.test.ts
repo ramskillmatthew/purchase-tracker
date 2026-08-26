@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comparePurchasesForDisplay, compareSkuDescending, sortPurchasesForDisplay } from "@/lib/purchase-order";
+import { comparePurchasesBySkuSequence, comparePurchasesForDisplay, compareSkuDescending, sortPurchasesForDisplay } from "@/lib/purchase-order";
 import type { Purchase } from "@/lib/types";
 
 function purchase(overrides: Partial<Purchase> & { id: string }): Purchase {
@@ -44,16 +44,36 @@ describe("compareSkuDescending", () => {
     expect(compareSkuDescending("1801", "1810")).toBeGreaterThan(0);
   });
 
-  it("equal numeric SKUs compare equal", () => {
+  it("equal plain numeric SKUs compare equal", () => {
     expect(compareSkuDescending("1500", "1500")).toBe(0);
+  });
+
+  it("REQUIREMENT: a letter-prefixed SKU participates in the same numeric sequence", () => {
+    expect(compareSkuDescending("AA1714", "1713")).toBeLessThan(0);
+    expect(compareSkuDescending("1696", "AA1714")).toBeGreaterThan(0);
+  });
+
+  it("REQUIREMENT: when the numeric part matches, prefixed comes before plain", () => {
+    expect(compareSkuDescending("AA1705", "1705")).toBeLessThan(0);
+    expect(compareSkuDescending("1705", "AA1705")).toBeGreaterThan(0);
+  });
+
+  it("supports any letter-only prefix case-insensitively and preserves BigInt precision", () => {
+    expect(compareSkuDescending("z90071992547409915", "90071992547409914")).toBeLessThan(0);
+    expect(compareSkuDescending("aa1705", "AA1705")).toBe(0);
+  });
+
+  it("uses descending prefix text as a deterministic tie-break between prefixed variants", () => {
+    expect(compareSkuDescending("BB1705", "AA1705")).toBeLessThan(0);
   });
 
   it("leading zeros don't distort numeric magnitude", () => {
     expect(compareSkuDescending("0100", "99")).toBeLessThan(0); // 100 > 99
   });
 
-  it("REQUIREMENT: numeric SKUs always rank before non-numeric/blank ones", () => {
+  it("REQUIREMENT: recognised numeric-sequence SKUs rank before unrecognised/blank ones", () => {
     expect(compareSkuDescending("1500", "ABC")).toBeLessThan(0);
+    expect(compareSkuDescending("AA1500", "ABC")).toBeLessThan(0);
     expect(compareSkuDescending("ABC", "1500")).toBeGreaterThan(0);
     expect(compareSkuDescending("1500", "")).toBeLessThan(0);
     expect(compareSkuDescending("", "1500")).toBeGreaterThan(0);
@@ -74,7 +94,7 @@ describe("compareSkuDescending", () => {
     expect(compareSkuDescending(null, "1500")).toBeGreaterThan(0);
   });
 
-  it("a decimal-looking or negative-looking SKU is treated as non-numeric (only pure digit strings are numeric)", () => {
+  it("a decimal-looking or negative-looking SKU is unrecognised rather than forced into the numeric sequence", () => {
     expect(compareSkuDescending("12.5", "1500")).toBeGreaterThan(0);
     expect(compareSkuDescending("-5", "1500")).toBeGreaterThan(0);
   });
@@ -89,6 +109,33 @@ describe("comparePurchasesForDisplay / sortPurchasesForDisplay", () => {
       purchase({ id: "d", sku: "1801" }),
     ];
     expect(sortPurchasesForDisplay(rows).map(row => row.sku)).toEqual(["1810", "1807", "1803", "1801"]);
+  });
+
+  it("REQUIREMENT: mixed prefixed and plain SKUs use the extracted numeric sequence", () => {
+    const rows = [
+      purchase({ id: "plain-1715", sku: "1715" }),
+      purchase({ id: "prefixed-1714", sku: "AA1714" }),
+      purchase({ id: "plain-1705", sku: "1705" }),
+      purchase({ id: "prefixed-1705", sku: "AA1705" }),
+      purchase({ id: "plain-1696", sku: "1696" }),
+    ];
+    expect(sortPurchasesForDisplay(rows).map(row => row.sku)).toEqual(["1715", "AA1714", "AA1705", "1705", "1696"]);
+  });
+
+  it("EXACT APPROVED EXAMPLE: visible top-to-bottom order is newest/highest first with a prefix immediately above its matching plain number", () => {
+    const bottomToTop = ["12", "AA12", "13", "A13", "14", "15", "AA15", "16", "17", "18", "AA18"];
+    const rows = bottomToTop.map((sku, index) => purchase({ id: `approved-${index}`, sku }));
+    expect(sortPurchasesForDisplay(rows).map(row => row.sku)).toEqual([
+      "AA18", "18", "17", "16", "AA15", "15", "14", "A13", "13", "AA12", "12",
+    ]);
+  });
+
+  it("EXACT APPROVED LARGE-SKU EXAMPLE follows the same top-to-bottom rule", () => {
+    const rows = ["1704", "1705", "AA1705", "1706", "1707", "A1707", "1708", "1709", "AA1709"]
+      .map((sku, index) => purchase({ id: `large-${index}`, sku }));
+    expect(sortPurchasesForDisplay(rows).map(row => row.sku)).toEqual([
+      "AA1709", "1709", "1708", "A1707", "1707", "1706", "AA1705", "1705", "1704",
+    ]);
   });
 
   it("REQUIREMENT: a second example — 1808, 1809, 1810 displays as 1810, 1809, 1808", () => {
@@ -113,12 +160,51 @@ describe("comparePurchasesForDisplay / sortPurchasesForDisplay", () => {
     expect(forward).toEqual(["c", "b", "a", "d"]);
   });
 
-  it("REQUIREMENT: a newer order date always outranks an older one, even with a much lower SKU", () => {
+  it("the general recent-purchases comparator still keeps newer order dates first", () => {
     const rows = [
       purchase({ id: "old-high-sku", order_date: "2026-08-01", sku: "9999" }),
       purchase({ id: "new-low-sku", order_date: "2026-08-14", sku: "1" }),
     ];
     expect(sortPurchasesForDisplay(rows).map(row => row.id)).toEqual(["new-low-sku", "old-high-sku"]);
+  });
+
+  it("REQUIREMENT: purchases without SKUs remain in chronological position rather than falling to the end", () => {
+    const rows = [
+      purchase({ id: "dated-24", order_date: "2026-05-24", sku: "1608" }),
+      purchase({ id: "blank-22-a", order_date: "2026-05-22", sku: "" }),
+      purchase({ id: "blank-22-b", order_date: "2026-05-22", sku: null as unknown as string }),
+      purchase({ id: "dated-21", order_date: "2026-05-21", sku: "AA1607" }),
+      purchase({ id: "blank-19", order_date: "2026-05-19", sku: "" }),
+      purchase({ id: "dated-17", order_date: "2026-05-17", sku: "1607" }),
+    ];
+    expect(sortPurchasesForDisplay(rows).map(row => row.id)).toEqual([
+      "dated-24", "blank-22-b", "blank-22-a", "dated-21", "blank-19", "dated-17",
+    ]);
+  });
+
+  it("REGRESSION: differing dates never place plain 1714 above AA1714", () => {
+    const rows = [
+      purchase({ id: "plain", order_date: "2026-06-07", sku: "1714" }),
+      purchase({ id: "prefixed", order_date: "2026-06-05", sku: "AA1714" }),
+      purchase({ id: "next", order_date: "2026-06-05", sku: "1713" }),
+    ];
+    expect([...rows].sort(comparePurchasesBySkuSequence).map(row => row.sku)).toEqual(["AA1714", "1714", "1713"]);
+  });
+
+  it("REGRESSION: a whole prefixed run is interleaved with its matching plain sequence regardless of dates", () => {
+    const rows = [
+      purchase({ id: "p24", order_date: "2026-06-05", sku: "1624" }),
+      purchase({ id: "p23", order_date: "2026-06-05", sku: "1623" }),
+      purchase({ id: "p22", order_date: "2026-06-05", sku: "1622" }),
+      purchase({ id: "aa24", order_date: "2026-06-02", sku: "AA1624" }),
+      purchase({ id: "aa23", order_date: "2026-06-02", sku: "AA1623" }),
+      purchase({ id: "aa22", order_date: "2026-06-02", sku: "AA1622" }),
+      purchase({ id: "aa21", order_date: "2026-06-02", sku: "AA1621" }),
+      purchase({ id: "p21", order_date: "2026-06-05", sku: "1621" }),
+    ];
+    expect([...rows].sort(comparePurchasesBySkuSequence).map(row => row.sku)).toEqual([
+      "AA1624", "1624", "AA1623", "1623", "AA1622", "1622", "AA1621", "1621",
+    ]);
   });
 
   it("REQUIREMENT: duplicate SKUs remain separate rows, ordered deterministically by created_at then id", () => {

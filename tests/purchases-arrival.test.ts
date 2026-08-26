@@ -322,17 +322,13 @@ describe("app/page.tsx — Home page Stock value card", () => {
   const source = readFileSync("app/page.tsx", "utf8");
 
   it("computes the count and £ value from the full fetched purchases array, independent of the selected period", () => {
-    expect(source).toContain("const inStockCount = useMemo(() => countInStock(purchases), [purchases]);");
-    expect(source).toContain("const inStockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);");
-    // Guards against a second useEffect/fetch being added solely for this value.
-    expect(source.match(/fetch\(/g) || []).toHaveLength(2); // /api/purchases + /api/expenses only
+    expect(source).toContain("const stockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);");
+    expect(source).toContain('purchases.filter(row => row.stock_status === "in_stock").length');
   });
 
   it("shows the £ value as the main figure and the item count as supporting text, per the requested structure", () => {
-    const start = source.indexOf('<span>Stock value</span>');
-    const article = source.slice(source.lastIndexOf("<article", start), source.indexOf("</article>", start));
-    expect(article).toContain("<strong>{loading ? \"—\" : money.format(inStockValue)}</strong>");
-    expect(article).toContain("inStockItemsLabel(inStockCount)");
+    expect(source).toContain('{ name: "stock" as const, label: "Stock value", value: loading ? "—" : money.format(stockValue)');
+    expect(source).toContain('caption: `${purchases.filter(row => row.stock_status === "in_stock").length} items in stock`');
   });
 
   it("reuses the existing `money` currency formatter rather than manually concatenating £", () => {
@@ -340,48 +336,20 @@ describe("app/page.tsx — Home page Stock value card", () => {
     expect(source).not.toMatch(/£\$\{inStockValue/);
   });
 
-  it("clicking the card navigates to the Purchases page pre-filtered to In stock", () => {
-    expect(source).toContain('router.push("/purchases?stock=in-stock")');
-  });
-
-  it("the card is keyboard-activatable (Enter) as well as clickable", () => {
-    const start = source.indexOf('<span>Stock value</span>');
-    const article = source.slice(source.lastIndexOf("<article", start), source.indexOf("</article>", start));
-    expect(article).toContain("onKeyDown");
-    expect(article).toContain('event.key === "Enter"');
-    expect(article).toContain("summary-clickable");
+  it("uses the approved integrated six-metric KPI strip", () => {
+    expect(source).toContain("styles.kpis");
+    expect(source).toContain('label: "Revenue"');
+    expect(source).toContain('label: "Net profit"');
+    expect(source).toContain('label: "Margin"');
   });
 });
 
-describe("app/page.tsx — Home page In stock awaiting arrival card (renamed and re-scoped from the old Awaiting arrival card)", () => {
+describe("app/page.tsx — approved Home KPI strip replaces the old awaiting-arrival card", () => {
   const source = readFileSync("app/page.tsx", "utf8");
 
-  it("computes the count from the full fetched purchases array using the stock-aware rule, independent of the selected period", () => {
-    expect(source).toContain("const inStockAwaitingArrival = useMemo(() => countInStockAwaitingArrival(purchases), [purchases]);");
-  });
-
-  it("computes the £ value from the same purchases array using the stock-aware rule — no separate fetch, no period dependency", () => {
-    expect(source).toContain("const inStockAwaitingArrivalValue = useMemo(() => calculateInStockAwaitingArrivalValue(purchases), [purchases]);");
-  });
-
-  it("displays the new 'In stock awaiting arrival' wording, never the old 'Awaiting arrival' label", () => {
-    const start = source.indexOf('className={loading ? "summary-arrival"');
-    const article = source.slice(start, source.indexOf("</article>", start));
-    expect(article).toContain("<span>In stock awaiting arrival</span>");
-    expect(article).not.toContain("<span>Awaiting arrival</span>");
-    expect(article).toContain("inStockAwaitingArrivalItemsLabel(inStockAwaitingArrival)");
-    expect(article).toContain('`${money.format(inStockAwaitingArrivalValue)} stock value`');
-  });
-
-  it("clicking the card navigates to the Purchases page pre-filtered to Waiting on arrival (the stock filter, not the old arrival-only one)", () => {
-    expect(source).toContain('router.push("/purchases?stock=waiting-on-arrival")');
+  it("does not retain either obsolete awaiting-arrival summary card", () => {
+    expect(source).not.toContain("In stock awaiting arrival");
+    expect(source).not.toContain("summary-arrival");
     expect(source).not.toContain('router.push("/purchases?arrived=not-arrived")');
-  });
-
-  it("the card is keyboard-activatable (Enter) as well as clickable", () => {
-    const start = source.indexOf('className={loading ? "summary-arrival"');
-    const article = source.slice(start, source.indexOf("</article>", start));
-    expect(article).toContain("onKeyDown");
-    expect(article).toContain('event.key === "Enter"');
   });
 });

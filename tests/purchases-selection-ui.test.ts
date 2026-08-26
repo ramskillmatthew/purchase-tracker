@@ -101,14 +101,16 @@ describe("app/purchases/page.tsx — Shift-click range selection and click-to-cl
     expect(source).toContain("onKeyDown={event => { if (event.key === \"Enter\") router.push(`/purchases/${row.id}`); }}");
   });
 
-  it("provides a discoverable Shift-click hint only while a selection is active", () => {
-    expect(source).toContain('{selectedIds.size > 0 && <span className="selection-hint">Shift-click rows to select a range</span>}');
+  it("keeps Shift-click range selection implemented without cluttering the compact action bar", () => {
+    expect(source).toContain("shiftKey: event.shiftKey");
+    expect(source).not.toContain('className="selection-hint"');
   });
 });
 
 describe("app/purchases/page.tsx — Clear selection action", () => {
   it("REQUIREMENT: a compact, explicit Clear selection control is shown only while something is selected", () => {
-    expect(source).toContain('{selectedIds.size > 0 && <button type="button" className="button-secondary" onClick={clearSelection}>Clear selection</button>}');
+    expect(source).toContain('{selectedIds.size > 0 && <div className="purchase-bulk-update-bar"');
+    expect(source).toContain('className="purchase-bulk-clear" onClick={clearSelection}');
   });
 
   it("REGRESSION: the unrelated 'Clear all' control is still present, unchanged, and still wired to the confirmation dialog", () => {

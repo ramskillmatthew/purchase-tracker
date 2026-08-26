@@ -72,6 +72,20 @@ const WATCHDOG_TIMEOUT_MS = 3 * 60 * 1000;
 // enough for Vinted's real redirect + full page render, including at
 // least one periodic recovery tick's worth of margin.
 const SAVE_DRAFT_CONFIRMATION_TIMEOUT_MS = 90 * 1000;
+// Follow-up correction (native browser reload-confirmation bug) — how long
+// a same-tab navigation (chrome.tabs.update, used to reset a dirty Vinted
+// tab back to a fresh Create Listing form) is given to reach "complete"
+// before it's treated as stuck. returnTabToCreateListing used to await
+// chrome.tabs.onUpdated's "complete" event with NO bound at all — if the
+// browser's own native "Reload site? Changes that you made may not be
+// saved." confirmation appeared (chrome-internal UI, never part of the
+// page's own DOM — this extension can never query, click, or otherwise
+// resolve it programmatically), that wait hung forever, and since it
+// happens BEFORE the item is ever marked "preparing", the generic watchdog
+// (which only measures elapsed time since an item's own lastProgressAt)
+// could never recover it either. Generous enough for an ordinary page
+// load, short enough that a genuinely stuck dialog is recognised quickly.
+const TAB_NAVIGATION_TIMEOUT_MS = 8000;
 
 // Follow-up correction (photo-download CORS bug) — the extension-facing
 // photo route always serves already-converted output (see
@@ -728,20 +742,280 @@ async function requestDraftConfirmationCheck(tabId) {
   });
 }
 
-/** Navigates the given tab back to a fresh Create Listing form and waits for it to finish loading — mirrors createFreshCreateListingTab()'s own wait pattern. Used once a save is confirmed, so the tab is left in a clean, predictable state for the next queued item (whose own stepOpenForm() would eventually get there anyway if this were ever skipped — this is a proactive, immediate version of that same recovery, not a replacement for it). */
+/**
+ * Navigates the given tab back to a fresh Create Listing form and waits
+ * (bounded by TAB_NAVIGATION_TIMEOUT_MS) for it to finish loading — mirrors
+ * createFreshCreateListingTab()'s own wait pattern, but never unbounded.
+ * Used both once a save is confirmed (so the tab is left in a clean,
+ * predictable state for the next queued item) and by ensureCleanCreateForm
+ * to reset a dirty tab before dispatching an item.
+ *
+ * Returns `{ ok: true }` once the navigation is confirmed complete;
+ * `{ ok: false, reason: "UPDATE_FAILED" }` if chrome.tabs.update itself
+ * threw (e.g. the tab was already closed); `{ ok: false, reason:
+ * "NAVIGATION_TIMEOUT" }` if the update call succeeded but no "complete"
+ * event ever arrived within the bound — most plausibly because the
+ * browser's own native unsaved-changes confirmation is blocking it (see
+ * TAB_NAVIGATION_TIMEOUT_MS's own comment for why the two can never be
+ * told apart with certainty). Callers that need to react specifically to a
+ * possibly-stuck dialog (ensureCleanCreateForm) key off `reason`; callers
+ * that only ever fire this best-effort (attemptPendingSaveConfirmation,
+ * checkSavedDraftAgain) may ignore the return value entirely, exactly as
+ * before.
+ */
 async function returnTabToCreateListing(tabId) {
   try {
     await chrome.tabs.update(tabId, { url: "https://www.vinted.co.uk/items/new" });
   } catch (error) {
     console.warn("Vinted Draft Queue: could not navigate the selected tab back to a fresh Create Listing form —", error?.message || error);
-    return;
+    return { ok: false, reason: "UPDATE_FAILED" };
   }
-  await new Promise(resolve => {
+  const completed = await new Promise(resolve => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(false);
+    }, TAB_NAVIGATION_TIMEOUT_MS);
     function listener(id, info) {
-      if (id === tabId && info.status === "complete") { chrome.tabs.onUpdated.removeListener(listener); resolve(); }
+      if (id !== tabId || info.status !== "complete" || settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(true);
     }
     chrome.tabs.onUpdated.addListener(listener);
   });
+  if (!completed) {
+    console.warn(
+      "Vinted Draft Queue: navigating the selected tab back to a fresh Create Listing form did not complete within",
+      TAB_NAVIGATION_TIMEOUT_MS, "ms — the browser's own unsaved-changes confirmation may be blocking it.",
+    );
+    return { ok: false, reason: "NAVIGATION_TIMEOUT" };
+  }
+  return { ok: true };
+}
+
+// ---- Clean-create-form boundary (BUG FIX: a failed item's leftover photos/
+// fields contaminating the next item) ---------------------------------------
+//
+// Confirmed root cause: nothing ever reset the Vinted tab between a failed
+// item (e.g. one that fails at SET_MATERIALS after its photos already
+// uploaded) and the next dispatch — neither the next queued item nor a
+// manual Retry of the same one. The next runItem() call's stepUploadPhotos
+// then ran against a page that already carried a DIFFERENT photo count,
+// tripping PHOTO_COUNT_MISMATCH (a correct, deliberately-preserved
+// safeguard reacting to a contamination it never caused — see
+// shared/form-steps.js's stepUploadPhotos, untouched by this fix).
+//
+// ensureCleanCreateForm is the ONE reusable boundary the queue goes
+// through — see startItem() below, its sole call site — rather than
+// scattering ad-hoc reload calls across the codebase. It owns the
+// DECISION (ask the content script to inspect, reset only if needed,
+// verify the reset actually worked); shared/form-steps.js's
+// inspectPageState owns the narrow, read-only DOM classification the
+// decision is based on.
+
+/** Asks whichever content-script instance is CURRENTLY running on `tabId` for a read-only inspection of its own page — never throws, resolves `null` (indistinguishable from "not clean yet" to the caller) if the content script can't be reached at all or gives no response. */
+function requestPageStateInspection(tabId) {
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tabId, { type: WORKER_TO_CONTENT.INSPECT_PAGE_STATE }, response => {
+      if (chrome.runtime.lastError) {
+        console.warn("Vinted Draft Queue: page-state inspection got no response —", chrome.runtime.lastError.message);
+        resolve(null);
+        return;
+      }
+      resolve(response ?? null);
+    });
+  });
+}
+
+// How long a just-reset tab is given to actually render a confirmed-clean
+// form before giving up — Vinted's own client-side rendering isn't
+// necessarily complete the instant chrome.tabs.onUpdated reports "complete"
+// (that's the browser's own load event, not React finishing its first
+// render), so this polls rather than trusting a single immediate check.
+const CLEAN_FORM_POLL_TIMEOUT_MS = 8000;
+const CLEAN_FORM_POLL_INTERVAL_MS = 300;
+
+async function pollUntilClean(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  for (;;) {
+    last = await requestPageStateInspection(tabId);
+    if (last?.state === "clean") return { ok: true };
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, CLEAN_FORM_POLL_INTERVAL_MS));
+  }
+  return {
+    ok: false,
+    reason: `PAGE_NOT_CLEAN: the Create Listing form did not confirm a clean state after resetting (last observed: ${last ? JSON.stringify(last) : "no response"}).`,
+  };
+}
+
+/**
+ * The single gate startItem() must pass through before it may EVER
+ * dispatch PROCESS_ITEM. Sequence:
+ *   1. Confirm the content script is ready (never inspects/resets blind).
+ *   2. Ask it to inspect the CURRENT page. Already clean -> done, no
+ *      reload — "avoid an unnecessary reload if safe".
+ *   3. Anything else (dirty / a confirmed saved draft / unrecognised /
+ *      no response at all) -> navigate the SAME selected tab to a fresh
+ *      /items/new (never a new tab — reuses returnTabToCreateListing, the
+ *      same navigation already used after a confirmed save) and wait for
+ *      it to finish loading.
+ *   4. Re-confirm the content script is ready on the NEW page (a
+ *      navigation destroys and re-injects it) — PROCESS_ITEM is never
+ *      sent until this succeeds, satisfying "avoid races between
+ *      navigation, content-script reinjection/readiness and queue
+ *      dispatch".
+ *   5. Poll (bounded) until the reset page actually confirms clean before
+ *      ever returning ok — never assumes a reload alone was sufficient.
+ *
+ * Never removes/alters anything on a page it finds is a confirmed saved
+ * draft — that state only ever causes a NAVIGATION AWAY from it (to a
+ * fresh, unrelated /items/new), never any interaction with the draft
+ * page's own content (see inspectPageState's own comment on
+ * PAGE_STATE.SAVED_DRAFT).
+ *
+ * Follow-up correction (native browser reload-confirmation bug) — a reset
+ * navigation that could not be confirmed complete (returnTabToCreateListing
+ * returning `{ ok: false, reason: "NAVIGATION_TIMEOUT" }`) is reported back
+ * as the distinct `{ ok: false, reason: "NAVIGATION_UNCONFIRMED", tabId }`
+ * shape, rather than the generic NAVIGATION_FAILED this function used to
+ * return for every reset failure alike. startItem() keys off that specific
+ * reason to enter the durable waiting-for-manual-reload state instead of a
+ * hard, retryable-only-by-the-user failure — see enterManualReloadWait's
+ * own comment for why a stuck reload must never be treated as an ordinary
+ * item failure.
+ */
+async function ensureCleanCreateForm(tabId) {
+  // No readiness check here at the top — the sole caller (startItem)
+  // already just confirmed the content script is ready moments earlier,
+  // and nothing between that call and this one can have navigated the tab
+  // away, so re-pinging here would only be a redundant round trip. Ready
+  // is re-verified below ONLY after an actual reset navigation, since
+  // that's the one thing that can genuinely destroy/require re-injecting
+  // the content script.
+  const inspection = await requestPageStateInspection(tabId);
+  if (inspection?.state === "clean") return { ok: true };
+
+  const navigated = await returnTabToCreateListing(tabId);
+  if (!navigated.ok) {
+    if (navigated.reason === "NAVIGATION_TIMEOUT") return { ok: false, reason: "NAVIGATION_UNCONFIRMED", tabId };
+    return { ok: false, reason: "NAVIGATION_FAILED: could not reset the selected tab to a fresh Create Listing form." };
+  }
+
+  const readyAfterReset = await ensureContentScriptReady(tabId);
+  if (!readyAfterReset) return { ok: false, reason: "CONTENT_SCRIPT_UNAVAILABLE: the Vinted page did not respond after resetting to a clean Create Listing form." };
+
+  return pollUntilClean(tabId, CLEAN_FORM_POLL_TIMEOUT_MS);
+}
+
+// ---- Manual browser reload (native browser reload-confirmation bug, follow-up) --------
+//
+// See shared/queue-state.js's own top comment on this section for the full
+// root-cause explanation and the durable manualReload record's shape.
+// Everything here is the thin chrome.* orchestration around that pure
+// state, mirroring the durable Save Draft confirmation section above
+// (attemptPendingSaveConfirmation/beginSaveDraft) as closely as possible:
+// ONE reusable recovery function called from three places (the persistent
+// tab-navigation listener's fast path, every triggerTick's periodic pass,
+// and the explicit "Try reload again" side-panel action), never anything
+// that queries, clicks, or otherwise resolves the browser's own dialog —
+// only ever a read-only page-state inspection of whatever the tab is
+// showing right now.
+
+/**
+ * The manual-reload entry point — called ONLY when ensureCleanCreateForm
+ * couldn't confirm a same-tab reload navigation completed. Marks the item
+ * WAITING_FOR_MANUAL_RELOAD (never FAILED — a human hasn't done anything
+ * wrong, and the item hasn't either; it is simply blocked on a browser
+ * dialog this extension is required to never touch) and pauses the batch
+ * so nothing else is ever dispatched while unresolved.
+ *
+ * Reports the SAME "paused" status the app's own schema already accepts
+ * (lib/listing-studio/extension-batch-schema.ts's EXTENSION_BATCH_ITEM_STATUSES
+ * is a closed list with no dedicated value for this local-only wait state)
+ * carrying the required warning text in its existing free-text
+ * currentStep/detail fields — no app-side schema or migration change
+ * needed for this local, extension-only recovery state.
+ */
+async function enterManualReloadWait(itemId, tabId) {
+  await updateState(s => QueueState.applyManualReloadNeeded(s, { itemId, tabId }, nowIso()));
+  await postResultToApp(itemId, "paused", { currentStep: "WAITING_FOR_MANUAL_RELOAD", detail: QueueState.MANUAL_RELOAD_WARNING_MESSAGE });
+}
+
+/**
+ * The core manual-reload recovery/confirmation attempt — mirrors
+ * attemptPendingSaveConfirmation's own structure and three call sites
+ * exactly. Never itself clicks or navigates anything — only ever INSPECTS
+ * the tab's current page (via the SAME requestPageStateInspection
+ * ensureCleanCreateForm already uses) and decides whether the wait is
+ * resolved. A confirmed clean form resumes the waiting item back to QUEUED
+ * (no Retry needed) and lets the caller continue the queue; anything else
+ * (still dirty, a confirmed saved draft, or no response at all) leaves the
+ * wait exactly as it is — the warning stays up, nothing is dispatched, and
+ * this is simply tried again on the next signal. Never repeats the actual
+ * navigation attempt itself — that only ever happens once automatically
+ * (inside ensureCleanCreateForm) and, beyond that, only via the explicit,
+ * one-shot "Try reload again" action (retryManualReload below).
+ */
+async function attemptManualReloadRecovery() {
+  const state = await getState();
+  const pending = state.batch?.manualReload;
+  if (!pending) return;
+
+  let tabId = pending.tabId;
+  if (tabId == null) {
+    // Restart recovery — mirrors attemptPendingSaveConfirmation's own
+    // reacquire-via-ensureVintedTab pattern exactly (see that function's
+    // own comment). If a tab genuinely can't be reacquired, ensureVintedTab
+    // already pauses the batch with its own clear, retryable "tab lost"
+    // recovery message — the "unavailable" case this feature's own
+    // requirements describe — and this attempt is simply skipped for now;
+    // the manualReload record itself is left completely untouched, so a
+    // later attempt (once the tab-lost pause is resolved) picks up exactly
+    // where this one left off.
+    tabId = await ensureVintedTab();
+    if (!tabId) return;
+    await updateState(s => QueueState.applyManualReloadTabReacquired(s, tabId, nowIso()));
+  }
+
+  const inspection = await requestPageStateInspection(tabId);
+  if (inspection?.state !== "clean") return; // still dirty / a saved-draft page / no response — remain waiting, warning stays up
+
+  await updateState(s => QueueState.applyManualReloadResolved(s, nowIso()));
+}
+
+/**
+ * PANEL_TO_WORKER.RETRY_MANUAL_RELOAD — the "Try reload again" side-panel
+ * action, the ONLY sanctioned way to trigger another same-tab navigation
+ * attempt while a manual reload is pending. Issues EXACTLY ONE new
+ * chrome.tabs.update via returnTabToCreateListing (never a loop) — if the
+ * tab is still dirty, this will simply show the browser's own native
+ * confirmation again for the user to resolve; if the user had already
+ * clicked Reload in the browser itself, this call is typically a no-op
+ * against an already-clean page, immediately confirmed as such by the
+ * inspection this function runs afterward.
+ */
+async function retryManualReload() {
+  const state = await getState();
+  const pending = state.batch?.manualReload;
+  if (!pending) return { error: "No manual reload is currently pending." };
+
+  let tabId = pending.tabId;
+  if (tabId == null) {
+    tabId = await ensureVintedTab();
+    if (!tabId) return { state: await getState() }; // ensureVintedTab already paused with its own recovery message
+    await updateState(s => QueueState.applyManualReloadTabReacquired(s, tabId, nowIso()));
+  }
+
+  await updateState(s => QueueState.applyManualReloadAttempt(s, nowIso()));
+  await returnTabToCreateListing(tabId); // exactly ONE new attempt — never looped or retried automatically
+  await attemptManualReloadRecovery();
+  return { state: await getState() };
 }
 
 /**
@@ -811,22 +1085,38 @@ async function attemptPendingSaveConfirmation() {
 // Vinted tab), and (c) the destination matches one of the two real
 // observed post-save shapes (never /items/new itself, which the tab also
 // legitimately sits on before and immediately after the click).
+// Follow-up correction (native browser reload-confirmation bug) — extended
+// to ALSO recognise the manual-reload tab reaching a fresh Create Listing
+// form, so the moment a user manually clicks Reload in the browser's own
+// dialog and the navigation genuinely completes, the wait is resolved
+// immediately rather than only on the next periodic tick (up to a minute
+// away). Deliberately the SAME single listener as the pendingSave
+// confirmation above — one persistent tab-navigation observer, not a
+// second uncoordinated one (see this file's own "single reusable
+// clean-form boundary" / "no scattered uncoordinated reload calls"
+// architecture goal).
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
   const url = changeInfo.url ?? tab?.url;
-  if (!url || !POST_SAVE_CONFIRMATION_TAB_PATTERN.test(url)) return;
+  if (!url) return;
   getState().then(async state => {
-    if (state.batch?.pendingSave?.vintedTabId !== tabId) return;
-    await attemptPendingSaveConfirmation();
-    // Follow-up correction (durable Save Draft confirmation) — a
-    // confirmation reached via this listener (rather than a periodic
-    // triggerTick() recovery pass, which already continues the queue as
-    // part of its own normal flow) would otherwise leave the batch
-    // sitting idle even after a successful confirmation clears the way
-    // for the next queued item — this is what actually starts it.
-    await triggerTick();
+    if (POST_SAVE_CONFIRMATION_TAB_PATTERN.test(url) && state.batch?.pendingSave?.vintedTabId === tabId) {
+      await attemptPendingSaveConfirmation();
+      // Follow-up correction (durable Save Draft confirmation) — a
+      // confirmation reached via this listener (rather than a periodic
+      // triggerTick() recovery pass, which already continues the queue as
+      // part of its own normal flow) would otherwise leave the batch
+      // sitting idle even after a successful confirmation clears the way
+      // for the next queued item — this is what actually starts it.
+      await triggerTick();
+      return;
+    }
+    if (CREATE_LISTING_TAB_PATTERN.test(url) && state.batch?.manualReload?.tabId === tabId) {
+      await attemptManualReloadRecovery();
+      await triggerTick();
+    }
   }).catch(error => {
-    console.warn("Vinted Draft Queue: tab-navigation Save Draft confirmation attempt failed —", error?.message || error);
+    console.warn("Vinted Draft Queue: tab-navigation recovery attempt failed —", error?.message || error);
   });
 });
 
@@ -1040,6 +1330,31 @@ async function reportItemResult(itemId, status, extra = {}) {
 // ---- Queue driving -------------------------------------------------------------
 
 /**
+ * Follow-up correction (orphaned extension batch recovery) — a bounded,
+ * best-effort heartbeat: once per triggerTick() (the same ~1-minute
+ * chrome.alarms cadence the queue's own watchdog already uses), while a
+ * batch is genuinely still running, tells the app "the extension is still
+ * genuinely here" — see app/api/extension/batch/heartbeat/route.ts's own
+ * comment for exactly why this exists. Every other extension-facing route
+ * (item-result, batch payload fetch) already records this same signal as
+ * a side effect of doing real work; this covers the one gap those don't —
+ * a long WAITING_FOR_MANUAL_RELOAD stretch, which can legitimately last
+ * minutes with nothing else to report. Never blocks or fails triggerTick's
+ * own queue-driving logic on its own account — a missed heartbeat just
+ * means this one tick's activity isn't recorded, nothing more.
+ */
+async function sendExtensionHeartbeat() {
+  const state = await getState();
+  if (!state.pairing?.batchToken) return;
+  const { appBaseUrl } = await getSettings();
+  try {
+    await fetch(`${appBaseUrl}/api/extension/batch/heartbeat`, {
+      method: "POST", headers: { Authorization: `Bearer ${state.pairing.batchToken}` },
+    });
+  } catch { /* best-effort — see this function's own top comment */ }
+}
+
+/**
  * Follow-up correction (queue-stalling bug) — every tick now also checks
  * for a stalled in-flight item BEFORE (and independent of) the normal
  * "start the next queued item" logic, so a stuck item is recovered into a
@@ -1050,6 +1365,8 @@ async function triggerTick() {
   const now = nowIso();
   let state = await getState();
   if (!state.batch) return;
+
+  if (QueueState.isBatchActive(state)) await sendExtensionHeartbeat();
 
   // Follow-up correction (durable Save Draft confirmation) — recovery,
   // every tick: covers a missed/delayed chrome.tabs.onUpdated event (e.g.
@@ -1068,6 +1385,19 @@ async function triggerTick() {
     } else {
       await attemptPendingSaveConfirmation();
     }
+    state = await getState();
+  }
+
+  // Follow-up correction (native browser reload-confirmation bug) —
+  // recovery, every tick: covers a missed/delayed chrome.tabs.onUpdated
+  // event, a service-worker restart while a manual reload was still
+  // pending, and simply gives the periodic tick a chance to notice the
+  // user has already resolved the browser's own dialog even if the
+  // navigation-listener's own fast path (below) somehow missed it. Never
+  // itself a source of a repeated reload ATTEMPT — see
+  // attemptManualReloadRecovery's own comment; this only ever inspects.
+  if (state.batch.manualReload) {
+    await attemptManualReloadRecovery();
     state = await getState();
   }
 
@@ -1124,6 +1454,33 @@ async function startItem(item) {
 
   const stateAfterDetection = await getState();
   if (stateAfterDetection.batch.paused) return; // account change (or a manual pause) — wait for the side panel's own explicit resume
+
+  // Clean-create-form boundary (BUG FIX) — every item, whether it's the
+  // very next queued item after a failure, a manual Retry of the same
+  // item, normal progression after a success, or recovery after a
+  // watchdog/content-script failure, goes through this SAME gate before
+  // PROCESS_ITEM is ever sent. A page already left clean by a successful
+  // item's own returnTabToCreateListing() call is recognised as such here
+  // and costs nothing extra; a page contaminated by a failed attempt is
+  // reset first. See ensureCleanCreateForm's own top comment for the full
+  // sequence.
+  const cleanForm = await ensureCleanCreateForm(tabId);
+  if (!cleanForm.ok) {
+    // Follow-up correction (native browser reload-confirmation bug) — a
+    // reset navigation that couldn't be confirmed complete is never a hard
+    // item failure: it's most plausibly the browser's own native
+    // unsaved-changes dialog blocking it, which only a human can resolve.
+    // See enterManualReloadWait's own comment.
+    if (cleanForm.reason === "NAVIGATION_UNCONFIRMED") {
+      await enterManualReloadWait(item.itemId, cleanForm.tabId ?? tabId);
+      return;
+    }
+    await reportItemResult(item.itemId, "failed", {
+      errorCode: "CLEAN_FORM_FAILED",
+      errorMessage: `Could not establish a clean Create Listing form before starting this item: ${cleanForm.reason}`,
+    });
+    return; // never dispatches PROCESS_ITEM into a page whose clean state couldn't be established
+  }
 
   const state = await reportItemResult(item.itemId, "preparing").then(getState);
   const payloadItem = state.batch.items.find(i => i.itemId === item.itemId);
@@ -1189,6 +1546,7 @@ async function handleMessage(message, sender) {
       return { state: next };
     }
     case PANEL_TO_WORKER.CHECK_SAVED_DRAFT: return checkSavedDraftAgain(message.itemId);
+    case PANEL_TO_WORKER.RETRY_MANUAL_RELOAD: return retryManualReload();
     case PANEL_TO_WORKER.CANCEL_REMAINING: return { state: await updateState(s => QueueState.applyCancelRemaining(s)) };
     case PANEL_TO_WORKER.CLEAR_BATCH: {
       const current = await getState();

@@ -29,6 +29,13 @@ export const PANEL_TO_WORKER = Object.freeze({
   // deliberate action" the live investigation's follow-up requires before
   // another Save Draft click could ever occur again.
   CHECK_SAVED_DRAFT: "CHECK_SAVED_DRAFT",
+  // Follow-up correction (native browser reload-confirmation bug) — the
+  // ONLY sanctioned way to trigger another same-tab reload attempt while
+  // state.batch.manualReload is pending (see shared/queue-state.js's own
+  // top comment on that section). Issues EXACTLY ONE new navigation
+  // attempt — never a loop, never automatic — matching "never repeatedly
+  // trigger reload requests while unresolved."
+  RETRY_MANUAL_RELOAD: "RETRY_MANUAL_RELOAD",
 });
 
 // Service worker -> content script (vinted.co.uk tab).
@@ -45,6 +52,14 @@ export const WORKER_TO_CONTENT = Object.freeze({
   // observed Vinted success marker on the page it's sitting on right now
   // and report back the numeric Vinted draft id, or null if not found yet.
   CHECK_DRAFT_CONFIRMATION: "CHECK_DRAFT_CONFIRMATION",
+  // Clean-create-form boundary (fixes: a failed item's leftover
+  // photos/fields contaminating the next item) — asks whichever
+  // content-script instance is currently running on the selected tab to
+  // read-only inspect its own current page (see shared/form-steps.js's
+  // inspectPageState) and report back one of PAGE_STATE's four values.
+  // Never itself resets anything — see service-worker.js's
+  // ensureCleanCreateForm, the sole caller, for the actual reset decision.
+  INSPECT_PAGE_STATE: "INSPECT_PAGE_STATE",
 });
 
 // Content script -> service worker.

@@ -9,6 +9,8 @@ import {
   applyPendingSaveStarted, applyPendingSaveConfirmed, applyPendingSaveCheckAttempted, applyPendingSaveExpired,
   isPendingSaveExpired, SAVE_DRAFT_UNCONFIRMED_ERROR_CODE, SAVE_DRAFT_UNCONFIRMED_MESSAGE,
   applyPendingSaveTabReacquired,
+  applyManualReloadNeeded, applyManualReloadAttempt, applyManualReloadTabReacquired, applyManualReloadResolved,
+  isManualReloadPause, MANUAL_RELOAD_WARNING_MESSAGE,
 } from "../vinted-draft-queue-extension/shared/queue-state.js";
 
 const T0 = "2026-08-05T10:00:00.000Z";
@@ -677,5 +679,129 @@ describe("applyPendingSaveTabReacquired — restart-recovery gap fix: records a 
   it("is a safe no-op when nothing is pending", () => {
     const state = applyBatchPayload(createInitialState(), payload(), T0);
     expect(applyPendingSaveTabReacquired(state, 42, T1)).toBe(state);
+  });
+});
+
+describe("Manual browser reload (native browser reload-confirmation bug) — applyManualReloadNeeded / isManualReloadPause / applyManualReloadAttempt / applyManualReloadTabReacquired / applyManualReloadResolved", () => {
+  it("REQUIREMENT: marks the item WAITING_FOR_MANUAL_RELOAD (never FAILED) and pauses the batch with the dedicated reason", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+
+    const item = state.batch!.items.find((i: any) => i.itemId === "item-1")!;
+    expect(item.status).toBe(ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+    expect(item.status).not.toBe(ITEM_STATUSES.FAILED);
+    expect(state.batch!.paused).toBe(true);
+    expect(isManualReloadPause(state)).toBe(true);
+    expect(state.batch!.manualReload).toEqual({ itemId: "item-1", tabId: 7, startedAt: T0, attempts: 1, lastAttemptAt: T0 });
+  });
+
+  it("REQUIREMENT: exact warning text is exported as the single source of truth for the side panel banner and Live activity entry", () => {
+    expect(MANUAL_RELOAD_WARNING_MESSAGE).toBe("Browser needs manual reload — click Reload in the Vinted confirmation box to continue.");
+  });
+
+  it("a safe no-op when there is no active batch", () => {
+    expect(applyManualReloadNeeded(createInitialState(), { itemId: "item-1", tabId: 7 }, T0)).toEqual(createInitialState());
+  });
+
+  it("REGRESSION: calling it again for the SAME item (e.g. a later ensureCleanCreateForm attempt) bumps attempts/lastAttemptAt on the existing record instead of creating a second one or re-pausing what's already paused", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 9 }, T1);
+
+    expect(state.batch!.manualReload).toEqual({ itemId: "item-1", tabId: 9, startedAt: T0, attempts: 2, lastAttemptAt: T1 });
+    expect(state.batch!.pauseReason).toBe("manual_reload_required");
+  });
+
+  it("REGRESSION: never begins another item while waiting — computeProgressSummary reports the waiting item as currentItem, exactly like an in-flight one", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    const summary = computeProgressSummary(state);
+    expect(summary.currentItem?.itemId).toBe("item-1");
+  });
+
+  it("REGRESSION: never treated as stalled by the generic watchdog and never reset to QUEUED by a blanket in-flight restart-reset — findStalledItem/resumeAfterRestart both use a NARROWER in-flight set that excludes this status", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    const resumed = resumeAfterRestart(state, T1);
+    const item = resumed.batch!.items.find((i: any) => i.itemId === "item-1")!;
+    expect(item.status).toBe(ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD); // never reset to QUEUED, never FAILED
+    expect(resumed.batch!.paused).toBe(true); // the pause (and its warning) survive a restart untouched
+  });
+
+  it("REGRESSION (restart-recovery gap): resumeAfterRestart clears the manualReload record's OWN stale tabId (never trusted after a restart) but preserves everything else about the wait", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    const resumed = resumeAfterRestart(state, T1);
+    expect(resumed.batch!.manualReload!.tabId).toBeNull();
+    expect(resumed.batch!.manualReload!.itemId).toBe("item-1");
+    expect(resumed.batch!.manualReload!.attempts).toBe(1);
+  });
+
+  it("applyManualReloadAttempt bumps attempts/lastAttemptAt only — never touches item status or the pause", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    state = applyManualReloadAttempt(state, T1);
+    expect(state.batch!.manualReload).toEqual({ itemId: "item-1", tabId: 7, startedAt: T0, attempts: 2, lastAttemptAt: T1 });
+    expect(state.batch!.items.find((i: any) => i.itemId === "item-1")!.status).toBe(ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+  });
+
+  it("applyManualReloadAttempt is a safe no-op when nothing is waiting", () => {
+    const state = applyBatchPayload(createInitialState(), payload(), T0);
+    expect(applyManualReloadAttempt(state, T1)).toBe(state);
+  });
+
+  it("applyManualReloadTabReacquired records a freshly reacquired tab id and refreshes the item's progress clock (mirrors applyPendingSaveTabReacquired)", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    state = resumeAfterRestart(state, T1); // clears the old tabId
+    expect(state.batch!.manualReload!.tabId).toBeNull();
+
+    const reacquired = applyManualReloadTabReacquired(state, 42, T1);
+    expect(reacquired.batch!.manualReload!.tabId).toBe(42);
+    expect(reacquired.batch!.items.find((i: any) => i.itemId === "item-1")!.lastProgressAt).toBe(T1);
+  });
+
+  it("applyManualReloadTabReacquired is a safe no-op when nothing is waiting", () => {
+    const state = applyBatchPayload(createInitialState(), payload(), T0);
+    expect(applyManualReloadTabReacquired(state, 42, T1)).toBe(state);
+  });
+
+  it("REQUIREMENT: applyManualReloadResolved (a freshly-observed clean page) clears the record, resumes the batch, and resets the waiting item back to QUEUED — no Retry needed", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    const resolved = applyManualReloadResolved(state, T1);
+
+    expect(resolved.batch!.manualReload).toBeNull();
+    expect(resolved.batch!.paused).toBe(false);
+    expect(resolved.batch!.pauseReason).toBeNull();
+    expect(isManualReloadPause(resolved)).toBe(false);
+    const item = resolved.batch!.items.find((i: any) => i.itemId === "item-1")!;
+    expect(item.status).toBe(ITEM_STATUSES.QUEUED);
+  });
+
+  it("REGRESSION: applyManualReloadResolved never steals a resume from a genuinely different, unrelated pause active at the same moment", () => {
+    let state = applyBatchPayload(createInitialState(), payload(), T0);
+    state = applyManualReloadNeeded(state, { itemId: "item-1", tabId: 7 }, T0);
+    // Simulate an unrelated pause reason somehow becoming active (e.g. a
+    // vinted-tab-lost pause layered on top) — applyManualReloadResolved
+    // must only ever resume the pause it itself owns.
+    state = { ...state, batch: { ...state.batch!, pauseReason: "vinted_tab_lost" } };
+    const resolved = applyManualReloadResolved(state, T1);
+    expect(resolved.batch!.paused).toBe(true); // NOT resumed — a different pause is still active
+    expect(resolved.batch!.pauseReason).toBe("vinted_tab_lost");
+    expect(resolved.batch!.manualReload).toBeNull(); // the record itself is still cleared
+    expect(resolved.batch!.items.find((i: any) => i.itemId === "item-1")!.status).toBe(ITEM_STATUSES.QUEUED);
+  });
+
+  it("applyManualReloadResolved is a safe no-op when nothing is waiting (idempotent against a second/late resolution)", () => {
+    const state = applyBatchPayload(createInitialState(), payload(), T0);
+    expect(applyManualReloadResolved(state, T1)).toBe(state);
+  });
+
+  it("isManualReloadPause is false for an ordinary pause (e.g. 'user') and for no pause at all", () => {
+    const noBatchPause = applyBatchPayload(createInitialState(), payload(), T0);
+    expect(isManualReloadPause(noBatchPause)).toBe(false);
+    const userPaused = applyPause(noBatchPause, "user");
+    expect(isManualReloadPause(userPaused)).toBe(false);
   });
 });

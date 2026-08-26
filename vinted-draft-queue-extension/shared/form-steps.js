@@ -598,6 +598,345 @@ async function waitThenRequireUniqueMatch(doc, candidateSelector, predicate, des
   return requireUnique(candidates, description);
 }
 
+// ---- Structure-agnostic multi-select option discovery (Material still
+// NOT_FOUND despite being visibly present — follow-up correction) ----------
+//
+// Confirmed regression: the PREVIOUS virtualised-scrolling fix reached the
+// correct open dropdown, but its option discovery still assumed ONE
+// specific guessed shape — [data-testid^="material-"][role="button"]
+// matched by computed ACCESSIBLE NAME — carried over unchanged from the
+// original verified capture. The live failure report ("NOT_FOUND ...
+// Suede ... searched the full scrollable dropdown ... no match", with
+// screenshots showing Suede genuinely visible and selectable) proves that
+// exact shape no longer reliably describes Vinted's real current Material
+// rows, or that the accessible-name computation no longer reflects what a
+// user actually sees.
+//
+// IMPORTANT LIMITATION, disclosed rather than silently worked around: no
+// authenticated Vinted session was available in this environment this
+// session, so the real current DOM could not be captured directly (see
+// this fix's own top-level report). Guessing a SECOND specific shape would
+// risk reproducing exactly this failure mode again the next time Vinted's
+// markup drifts. Discovery below is instead STRUCTURE-AGNOSTIC: any
+// visible role="button"/"checkbox"/"option" element inside the verified
+// OPEN dropdown's own content container counts as a candidate row,
+// matched by its own rendered VISIBLE TEXT (never solely the computed
+// accessible name, which can diverge from what a user reads if a nested
+// icon/badge/control contributes its own name) — see optionRowVisibleText.
+// The original, already-verified data-testid-prefixed shape is still
+// included as one of the candidate sources (findOptionRows), so nothing
+// about a still-correctly-shaped picker (e.g. Colour, if its own live
+// structure never drifted) changes in practice — it simply keeps matching
+// via the same broader collector.
+const OPTION_ROW_ROLE_SELECTOR = '[role="button"], [role="checkbox"], [role="option"]';
+
+/**
+ * The element's own VISIBLE label — a clone with any nested input/svg/
+ * aria-hidden content stripped first, so an embedded checkbox's own
+ * (often empty or generic, e.g. "checkbox") accessible name can never
+ * pollute the row's real, human-readable text. Falls back to the computed
+ * accessible name only when no visible text survives stripping at all.
+ */
+function optionRowVisibleText(el) {
+  const clone = el.cloneNode(true);
+  clone.querySelectorAll('input, svg, [aria-hidden="true"]').forEach(node => node.remove());
+  const text = (clone.textContent || "").trim();
+  return text || getAccessibleName(el);
+}
+
+/**
+ * The row's own checked/selected-state indicator, tried in order:
+ *   1. the row itself, if it directly carries role="checkbox" or IS a
+ *      checkbox/radio input;
+ *   2. a checkbox/radio/role="checkbox" NESTED inside the row;
+ *   3. the historically-verified SIBLING convention — a checkbox whose id
+ *      is derived from the matched row's own `${idPrefix}-<N>` id (e.g.
+ *      "material-149" -> "material-checkbox-149"). Preserved deliberately:
+ *      this is the ALREADY-VERIFIED live shape this feature originally
+ *      captured, and is exactly what Colour's own (never reported broken)
+ *      structure still uses — dropping it would have broken Colour
+ *      selection while "fixing" Material, the opposite of the explicit
+ *      "do not break Colour" requirement.
+ * Returns null only if none of the three apply — an honest, never-guessed
+ * UNVERIFIED signal, never a silent assumption.
+ */
+function findSelectionIndicator(doc, el, idPrefix) {
+  if (el.getAttribute("role") === "checkbox" || (el.matches && el.matches('input[type="checkbox"], input[type="radio"]'))) return el;
+  const nested = el.querySelector('input[type="checkbox"], input[type="radio"], [role="checkbox"]');
+  if (nested) return nested;
+  if (idPrefix && el.id) {
+    const match = new RegExp(`^${idPrefix}-(\\d+)$`).exec(el.id);
+    if (match) {
+      const sibling = doc.getElementById(`${idPrefix}-checkbox-${match[1]}`);
+      if (sibling) return sibling;
+    }
+  }
+  return null;
+}
+function isIndicatorChecked(el) {
+  if (!el) return false;
+  if ("checked" in el) return Boolean(el.checked);
+  return el.getAttribute("aria-checked") === "true";
+}
+
+/**
+ * Every candidate option row currently rendered inside `contentEl` — the
+ * verified data-testid-prefixed shape AND the broader role-based
+ * fallback, deduplicated by node identity (a row matching both never
+ * counts twice). Always a FRESH query against the live DOM, never
+ * cached — every caller (checked-state detection, the search below,
+ * post-click confirmation) sees the CURRENT render, including across a
+ * virtualised rerender that swaps every node out from under a stale
+ * reference.
+ */
+function findOptionRows(doc, contentEl, idPrefix) {
+  const legacy = Array.from(contentEl.querySelectorAll(`[data-testid^="${idPrefix}-"][role="button"]`));
+  const generic = Array.from(contentEl.querySelectorAll(OPTION_ROW_ROLE_SELECTOR));
+  const seen = new Set();
+  const rows = [];
+  for (const el of [...legacy, ...generic]) {
+    if (seen.has(el) || !isVisible(el)) continue;
+    seen.add(el);
+    rows.push(el);
+  }
+  return rows;
+}
+
+// ---- Duplicate-representation collapsing (follow-up correction: colour
+// AMBIGUOUS despite the two matches being the same logical colour) --------
+//
+// Confirmed regression: `AMBIGUOUS: color option exactly matching
+// "Mustard" (2 matches)` / "Light blue" (2 matches). Vinted renders the
+// SAME logical colour twice inside one open Colour dropdown — once in a
+// "Suggested" section, again in the full list — both genuine, real,
+// clickable rows with identical exact visible text. This was never a
+// fuzzy-matching problem: exact, normalised (trim/collapse-whitespace/
+// case-insensitive) matching is completely unchanged by this section. The
+// only thing that changes is what happens AFTER an exact-match search
+// legitimately finds more than one candidate.
+//
+// This mirrors the ALREADY-SHIPPED, verified-live Size fix exactly (see
+// resolveSizeOption/extractSizeOptionId above — confirmed live for UK size
+// "3": `size-suggestions-grid-option-56` vs `size-group-7-grid-option-56`,
+// both sharing the trailing underlying option id "56"). Vinted's own
+// consistent convention on this page is "one canonical numeric option id,
+// reused verbatim as the trailing segment of every UI wrapper's own
+// id/data-testid, however many places that value is rendered."
+//
+// IMPORTANT LIMITATION, disclosed rather than silently worked around: no
+// authenticated session available this session ever rendered a Colour
+// "Suggested" section — Vinted's photo-based colour suggestion appears to
+// be computed only once a draft is genuinely saved (never observed live
+// during editing, including after uploading test photos and waiting), and
+// creating a real saved draft purely to capture that one shape was outside
+// this fix's authorised scope ("do not save or publish"). The CURRENT
+// (non-suggested) Colour row shape WAS re-confirmed live this session —
+// `id="color-<N>"`, `data-testid="color-<N>"`, `role="button"` — and is
+// completely unchanged by this fix. The Suggested row's exact wrapper
+// naming is therefore never hardcoded as one single guess: the id
+// extraction below accepts ANY wrapper id/data-testid ending in
+// "-<digits>", checked against the row itself, the row's own data-testid,
+// AND its nearest data-testid-bearing ancestor — covering both a bare-id
+// shape (like Colour's own, confirmed live) and a wrapper-around-the-row
+// shape (like Size's, also confirmed live). If Vinted's real Suggested
+// shape ever encodes the id differently, two matches whose ids can't both
+// be extracted AND found equal correctly fall through to the same
+// AMBIGUOUS failure this always had — this can only ever fail safe, never
+// silently collapse two genuinely different colours.
+const DUPLICATE_OPTION_ID_PATTERN = /-(\d+)$/;
+const SUGGESTED_HINT_PATTERN = /suggest/i;
+
+/**
+ * The row's own underlying numeric option id — tried against the row's own
+ * `id`, the row's own `data-testid`, and its nearest data-testid-bearing
+ * ancestor, in that order. Never guessed beyond that: null (never a
+ * fabricated id) if none of the three end in "-<digits>".
+ */
+function extractOptionEntityId(el) {
+  const ownId = DUPLICATE_OPTION_ID_PATTERN.exec(el.id || "");
+  if (ownId) return ownId[1];
+  const ownTestId = DUPLICATE_OPTION_ID_PATTERN.exec(el.getAttribute("data-testid") || "");
+  if (ownTestId) return ownTestId[1];
+  const wrapper = el.closest("[data-testid]");
+  const wrapperTestId = wrapper ? DUPLICATE_OPTION_ID_PATTERN.exec(wrapper.getAttribute("data-testid") || "") : null;
+  return wrapperTestId ? wrapperTestId[1] : null;
+}
+
+/**
+ * Broad, text-based "is this the Suggested representation" hint, checked
+ * against the row's own id/data-testid and its nearest data-testid
+ * ancestor's own data-testid/class — since the exact wrapper shape Vinted
+ * uses for a Suggested chip was never directly observed live (see this
+ * section's own top comment). Only ever used to choose WHICH of two
+ * provably-identical rows to click — never to decide whether they ARE the
+ * same option; that decision is extractOptionEntityId's alone.
+ */
+function looksLikeSuggestedRow(el) {
+  const wrapper = el.closest("[data-testid]") || el;
+  const haystack = [el.id, el.getAttribute("data-testid"), wrapper.getAttribute("data-testid"), wrapper.className]
+    .filter(Boolean).join(" ");
+  return SUGGESTED_HINT_PATTERN.test(haystack);
+}
+
+/**
+ * Collapses `matches` (every row whose OWN visible text already exactly,
+ * normalised-matches the target — see optionRowVisibleText/normaliseText;
+ * completely untouched by this function) down to ONE row to act on:
+ *   - 0 or 1 matches: unchanged, exactly the pre-existing requireUnique
+ *     behaviour.
+ *   - >1 matches: collapsed to ONE only when EVERY match's own
+ *     extractOptionEntityId is known AND identical — proving they're
+ *     duplicate representations of one logical option (e.g. a Suggested
+ *     chip mirroring its own full-list entry). The Suggested
+ *     representation is preferred when exactly one match looks like it
+ *     (per requirement 5); otherwise the first match is used — with ids
+ *     already proven identical, it makes no functional difference which
+ *     literal DOM node is clicked. If the ids disagree, or any can't be
+ *     extracted at all, this is a genuine, unresolved ambiguity —
+ *     AMBIGUOUS, with full diagnostics for every candidate, exactly the
+ *     pre-existing failure mode for a real conflict.
+ */
+function resolveDuplicateOptionMatches(matches, description) {
+  if (matches.length <= 1) return requireUnique(matches, description);
+
+  const candidates = matches.map(el => ({ element: el, optionId: extractOptionEntityId(el), suggested: looksLikeSuggestedRow(el) }));
+  const ids = new Set(candidates.map(c => c.optionId));
+  const allIdsKnownAndEqual = !ids.has(null) && ids.size === 1;
+
+  if (!allIdsKnownAndEqual) {
+    const diagnostics = candidates.map(c =>
+      `[${c.element.closest("[data-testid]")?.getAttribute("data-testid") ?? c.element.id ?? "no-id"}] optionId=${c.optionId ?? "unknown"} suggested=${c.suggested}`,
+    ).join("; ");
+    return { ok: false, reason: `AMBIGUOUS: ${description} (${candidates.length} matches, not provably the same underlying option — ${diagnostics})` };
+  }
+
+  const suggestedOnes = candidates.filter(c => c.suggested);
+  const preferred = suggestedOnes.length === 1 ? suggestedOnes[0] : candidates[0];
+  return { ok: true, element: preferred.element };
+}
+
+// ---- Safe search diagnostics (never full page content, credentials or
+// tokens — only counts/booleans/scroll positions, per the explicit
+// diagnostics requirement) ---------------------------------------------
+function newSearchDiagnostics() {
+  return { dropdownFound: false, rowsInspected: 0, textObserved: false, controlResolved: false, startScrollTop: null, finalScrollTop: null };
+}
+function describeSearchDiagnostics(diag) {
+  return `dropdown_found=${diag.dropdownFound} rows_inspected=${diag.rowsInspected} text_observed=${diag.textObserved} `
+    + `control_resolved=${diag.controlResolved} start_scroll=${diag.startScrollTop ?? "n/a"} final_scroll=${diag.finalScrollTop ?? "n/a"}`;
+}
+
+const DROPDOWN_SCROLL_MAX_ATTEMPTS = 30;
+// Scrolled by a large fraction of the container's own visible height each
+// step (never a fixed pixel amount, which could be wildly wrong for a
+// picker taller or shorter than expected) — deliberately less than 100% so
+// two consecutive windows always overlap, and an option sitting exactly on
+// a step boundary can never be scrolled past without ever being rendered.
+const DROPDOWN_SCROLL_STEP_RATIO = 0.8;
+const DROPDOWN_SCROLL_MIN_STEP_PX = 100;
+// How long a rerender is given to settle after each scroll before the DOM
+// is re-queried — short, since this is "let a virtualised list's own
+// render commit", not a network wait.
+const DROPDOWN_SCROLL_SETTLE_MS = 200;
+const DROPDOWN_SCROLL_TIMEOUT_MS = 15000;
+
+/**
+ * Finds the element that actually scrolls within `root` (`root` itself, or
+ * the first descendant whose rendered content genuinely overflows its own
+ * box) — never the whole page. A real scroll container's `scrollHeight`
+ * exceeds its `clientHeight`; `root` itself is returned as a safe fallback
+ * if no descendant qualifies (scrollTop assignment on a non-overflowing
+ * element is a harmless no-op, never an error), so a caller never crashes
+ * on an unexpectedly non-scrollable picker — it simply won't find anything
+ * new by "scrolling" it, which the caller's own progress-detection already
+ * treats as reaching the end.
+ */
+function findScrollableDescendantOrSelf(root) {
+  const candidates = [root, ...Array.from(root.querySelectorAll("*"))];
+  for (const el of candidates) {
+    if (typeof el.scrollHeight === "number" && typeof el.clientHeight === "number" && el.scrollHeight > el.clientHeight + 1) return el;
+  }
+  return root;
+}
+
+/**
+ * Searches `contentEl` — the verified OPEN dropdown's own content
+ * container, never anything document-wide (per the explicit "search only
+ * inside the verified open Material dropdown" requirement) — for a row
+ * whose VISIBLE TEXT exactly matches `targetText` (case/whitespace
+ * normalised — never partial/fuzzy matching, never a substitute value).
+ * Inspects whatever's currently rendered FIRST (covers both a
+ * non-virtualised list and a virtualised one already scrolled to the
+ * right place); if nothing matches, scrolls the picker's own scroll
+ * container incrementally FROM THE TOP, re-querying fresh after every
+ * scroll (see findOptionRows), until the row appears or the genuine end
+ * of the list is reached. Bounded three independent ways: a fixed attempt
+ * ceiling, a wall-clock timeout, and progress detection (two consecutive
+ * no-progress scrolls end the search). On failure, the returned reason
+ * carries the full safe diagnostics (see describeSearchDiagnostics).
+ */
+async function findMultiSelectOptionRow(doc, contentEl, idPrefix, targetText) {
+  const diag = newSearchDiagnostics();
+  diag.dropdownFound = Boolean(contentEl) && isVisible(contentEl);
+  if (!diag.dropdownFound) {
+    return { ok: false, reason: `NOT_FOUND: ${idPrefix} option exactly matching "${targetText}" (${describeSearchDiagnostics(diag)}).` };
+  }
+
+  const target = normaliseText(targetText);
+  function inspectCurrent() {
+    const rows = findOptionRows(doc, contentEl, idPrefix);
+    diag.rowsInspected = Math.max(diag.rowsInspected, rows.length);
+    const matches = rows.filter(el => normaliseText(optionRowVisibleText(el)) === target);
+    if (matches.length > 0) diag.textObserved = true;
+    return matches;
+  }
+
+  let found = inspectCurrent();
+  if (found.length > 0) { diag.controlResolved = true; return resolveDuplicateOptionMatches(found, `${idPrefix} option exactly matching "${targetText}"`); }
+
+  const scrollEl = findScrollableDescendantOrSelf(contentEl);
+  diag.startScrollTop = scrollEl.scrollTop;
+
+  // Always start the search from the top — a dropdown left scrolled from a
+  // previous field/retry must not skip options above its current position.
+  if (scrollEl.scrollTop !== 0) {
+    scrollEl.scrollTop = 0;
+    scrollEl.dispatchEvent(new doc.defaultView.Event("scroll", { bubbles: true }));
+    await pause(DROPDOWN_SCROLL_SETTLE_MS);
+    found = inspectCurrent();
+    if (found.length > 0) { diag.controlResolved = true; diag.finalScrollTop = scrollEl.scrollTop; return resolveDuplicateOptionMatches(found, `${idPrefix} option exactly matching "${targetText}"`); }
+  }
+
+  const deadline = Date.now() + DROPDOWN_SCROLL_TIMEOUT_MS;
+  let lastScrollTop = scrollEl.scrollTop;
+  let noProgressStreak = 0;
+
+  for (let attempt = 0; attempt < DROPDOWN_SCROLL_MAX_ATTEMPTS; attempt++) {
+    if (Date.now() >= deadline) break;
+
+    const step = Math.max(scrollEl.clientHeight * DROPDOWN_SCROLL_STEP_RATIO, DROPDOWN_SCROLL_MIN_STEP_PX);
+    const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    scrollEl.scrollTop = Math.min(scrollEl.scrollTop + step, maxScrollTop);
+    scrollEl.dispatchEvent(new doc.defaultView.Event("scroll", { bubbles: true }));
+    await pause(DROPDOWN_SCROLL_SETTLE_MS);
+
+    found = inspectCurrent(); // fresh query every attempt — never a stale reference from before this scroll
+    if (found.length > 0) { diag.controlResolved = true; diag.finalScrollTop = scrollEl.scrollTop; return resolveDuplicateOptionMatches(found, `${idPrefix} option exactly matching "${targetText}"`); }
+
+    const newScrollTop = scrollEl.scrollTop;
+    if (newScrollTop <= lastScrollTop) {
+      noProgressStreak += 1;
+      if (noProgressStreak >= 2) break; // two consecutive no-progress scrolls — the genuine end of the list
+    } else {
+      noProgressStreak = 0;
+    }
+    lastScrollTop = newScrollTop;
+  }
+
+  diag.finalScrollTop = scrollEl.scrollTop;
+  return { ok: false, reason: `NOT_FOUND: ${idPrefix} option exactly matching "${targetText}" (searched the full scrollable dropdown from top to bottom, no match — ${describeSearchDiagnostics(diag)}).` };
+}
+
 // ---- Size — duplicate-representation collapsing (follow-up correction) ----
 //
 // Root cause: Vinted can render the SAME underlying size in more than one
@@ -682,12 +1021,6 @@ async function waitForSizeOption(doc, expectedSizeText) {
   const appeared = await waitFor(() => Array.from(doc.querySelectorAll('[role="checkbox"]')).some(el => isVisible(el) && normaliseText(getAccessibleName(el)) === target));
   if (!appeared) return { ok: false, reason: `NOT_FOUND: size option exactly matching "${expectedSizeText}"` };
   return resolveSizeOption(doc, expectedSizeText);
-}
-
-/** Derives a paired input's id from a matched option element's own verified `prefix-<N>` id (e.g. "brand-5827029" -> "brand-radio-5827029", "color-1" -> "color-checkbox-1") — never a hardcoded id table, since the numeric id itself always comes from whichever option actually matched. */
-function deriveSiblingInputId(elementId, prefix, middle) {
-  const match = new RegExp(`^${prefix}-(\\d+)$`).exec(elementId || "");
-  return match ? `${prefix}-${middle}-${match[1]}` : null;
 }
 
 /**
@@ -938,14 +1271,38 @@ async function stepSelectMultiOptions(root, config, values, { idPrefix, maxCount
   const opened = await openDialogPicker(root, config, deps, stepName);
   if (!opened.ok) return opened;
 
-  const currentlyCheckedTexts = () => Array.from(doc.querySelectorAll(`[id^="${idPrefix}-checkbox-"]`))
-    .filter(cb => cb.checked)
-    .map(cb => {
-      const optionId = cb.id.replace(`${idPrefix}-checkbox-`, `${idPrefix}-`);
-      const option = doc.getElementById(optionId);
-      return option ? normaliseText(getAccessibleName(option)) : null;
-    })
-    .filter(Boolean);
+  // Follow-up correction (Material still NOT_FOUND despite being visibly
+  // present) — content container resolved ONCE here and threaded through
+  // every helper below, so every discovery/reconciliation/confirmation
+  // step is explicitly scoped to the verified OPEN dropdown, never
+  // document-wide.
+  const contentEl = doc.querySelector(`[data-testid="${config.contentTestId}"]`);
+  if (!contentEl) return { ok: false, reason: `NOT_FOUND: ${idPrefix} dropdown content container not found after opening.` };
+
+  // Structure-agnostic — see findOptionRows/findSelectionIndicator's own
+  // top comments. Never derives a checkbox by guessing a sibling id from
+  // an option's own id; reads each row's OWN checked-state indicator
+  // directly, which is what makes this resilient to an id-naming change
+  // that would otherwise silently break reconciliation the same way it
+  // broke discovery.
+  // Follow-up correction (colour duplicate-representation collapsing) —
+  // deduplicated by TEXT (never by DOM node), since Vinted can render the
+  // same logical option twice (a Suggested chip mirroring its own
+  // full-list row — see resolveDuplicateOptionMatches's own top comment)
+  // and both representations reflect the SAME underlying checked state.
+  // Without this, a checked duplicate would appear twice in this list,
+  // and the deselect loop below would process — and click — the same
+  // logical option twice for one reconciliation pass, which
+  // resolveDuplicateOptionMatches's own collapsing would then have
+  // nothing left to legitimately resolve against on the second pass
+  // (having already been unchecked by the first). A plain Set is safe
+  // here precisely because exact text matching is otherwise unchanged —
+  // two DIFFERENT colours never share exactly the same normalised text.
+  const currentlyCheckedTexts = () => [...new Set(
+    findOptionRows(doc, contentEl, idPrefix)
+      .filter(el => isIndicatorChecked(findSelectionIndicator(doc, el, idPrefix)))
+      .map(el => normaliseText(optionRowVisibleText(el))),
+  )];
 
   const targetNormalised = values.map(normaliseText);
 
@@ -953,11 +1310,7 @@ async function stepSelectMultiOptions(root, config, values, { idPrefix, maxCount
   // this loop only ever un-checks entries already in the snapshot.
   for (const checkedText of currentlyCheckedTexts()) {
     if (targetNormalised.includes(checkedText)) continue;
-    const toRemove = await waitThenRequireUniqueMatch(
-      doc, `[data-testid^="${idPrefix}-"][role="button"]`,
-      el => normaliseText(getAccessibleName(el)) === checkedText,
-      `${idPrefix} option currently selected ("${checkedText}")`,
-    );
+    const toRemove = await findMultiSelectOptionRow(doc, contentEl, idPrefix, checkedText);
     if (!toRemove.ok) return toRemove;
     safeClick(toRemove.element, stepName);
     await pause(STABILITY_PAUSE_MS);
@@ -965,22 +1318,27 @@ async function stepSelectMultiOptions(root, config, values, { idPrefix, maxCount
 
   // Select anything wanted that isn't already checked — re-checked fresh
   // each iteration so a value selected earlier this same loop is never
-  // clicked again.
+  // clicked again. findMultiSelectOptionRow inspects what's currently
+  // rendered first, then falls back to scrolling the picker's own options
+  // container when the option isn't among it (the confirmed root cause of
+  // the reported "NOT_FOUND: material option exactly matching
+  // 'Suede'/'Mesh'" failures — both genuinely exist, just not discoverable
+  // via the old fixed selector shape).
   for (const value of values) {
     const target = normaliseText(value);
     if (currentlyCheckedTexts().includes(target)) continue;
-    const resolved = await waitThenRequireUniqueMatch(
-      doc, `[data-testid^="${idPrefix}-"][role="button"]`,
-      el => normaliseText(getAccessibleName(el)) === target,
-      `${idPrefix} option exactly matching "${value}"`,
-    );
+    const resolved = await findMultiSelectOptionRow(doc, contentEl, idPrefix, value);
     if (!resolved.ok) return resolved;
     safeClick(resolved.element, stepName);
 
-    const checkboxId = deriveSiblingInputId(resolved.element.id, idPrefix, "checkbox");
-    if (!checkboxId) return { ok: false, reason: `UNVERIFIED: matched ${idPrefix} option has no recognisable ${idPrefix}-<id>.` };
-    const confirmed = await waitFor(() => doc.getElementById(checkboxId)?.checked === true);
-    if (!confirmed) return { ok: false, reason: `UNVERIFIED: ${idPrefix} checkbox #${checkboxId} did not confirm selection.` };
+    // Never trusts the (possibly now-stale, post-rerender) `resolved.element`
+    // reference — re-resolves fresh on every poll, exactly like discovery
+    // itself, and accepts either a genuine checkbox/radio's `.checked` or
+    // a role="checkbox" row's own `aria-checked`.
+    const confirmed = await waitFor(() => findOptionRows(doc, contentEl, idPrefix)
+      .filter(el => normaliseText(optionRowVisibleText(el)) === target)
+      .some(el => isIndicatorChecked(findSelectionIndicator(doc, el, idPrefix))));
+    if (!confirmed) return { ok: false, reason: `UNVERIFIED: ${idPrefix} option "${value}" did not confirm as selected after clicking.` };
     await pause(STABILITY_PAUSE_MS);
   }
 
@@ -1045,6 +1403,100 @@ export function findConfirmedDraftId(doc, location) {
   if (directMatch) return directMatch[1];
   const link = findConfirmedDraftLink(doc);
   return link ? link.draftId : null;
+}
+
+// ---- Clean-create-form inspection (confirmed root cause of BUG: a failed
+// item's leftover photos/fields contaminate the NEXT item) ----------------
+//
+// Confirmed root cause: a failed item (e.g. failing at SET_MATERIALS after
+// its photos already uploaded) left its own unsaved Create Listing form
+// exactly as-is. Nothing ever reset it before the queue moved on — neither
+// to the next queued item nor to a manual Retry of the same one — so the
+// next runItem() call started stepUploadPhotos against a page that ALREADY
+// had a different item's photo count on it, tripping
+// PHOTO_COUNT_MISMATCH (a correct, deliberately-preserved safeguard —
+// see stepUploadPhotos's own comment — reacting correctly to a genuinely
+// contaminated precondition it was never responsible for creating).
+//
+// inspectPageState is the one pure, narrowly-scoped boundary the service
+// worker uses (see service-worker.js's ensureCleanCreateForm) to decide,
+// BEFORE ever dispatching PROCESS_ITEM, whether the current page is safe
+// to start a fresh item on. It never mutates anything — purely read-only
+// DOM inspection — and never itself removes a photo or clears a field;
+// the actual reset (a navigation) is the service worker's job once this
+// reports the page isn't already clean.
+export const PAGE_STATE = Object.freeze({
+  // A confirmed, empty /items/new form — no uploaded photos, no open
+  // picker, the photo input is resolvable. Safe to dispatch PROCESS_ITEM
+  // immediately, no reset needed.
+  CLEAN: "clean",
+  // A Create Listing form IS present, but it isn't the fresh state above —
+  // leftover photos and/or fields from a previous item, and/or a picker
+  // dialog left open. Must be reset before the next item starts.
+  DIRTY: "dirty",
+  // The current page is a CONFIRMED saved draft (the same durable marker
+  // stepSaveDraft's own confirmation flow already uses — see
+  // findConfirmedDraftId above). This is NEVER treated as an unsaved form
+  // to clear — its photos are a real, already-saved Vinted draft, not
+  // debris — but it also isn't a form a new item can be started on, so the
+  // caller still navigates AWAY from it (to a fresh /items/new), never
+  // interacting with anything on this page itself.
+  SAVED_DRAFT: "saved_draft",
+  // Not recognisably either of the above — not on the Create Listing page
+  // at all (per CREATE_LISTING_FORM_SELECTORS), or not at the required
+  // fresh /items/new URL specifically (e.g. still sitting on
+  // /items/<id>/edit, or mid-navigation). Treated the same as DIRTY by the
+  // caller (needs a reset), kept distinct here purely for diagnostics.
+  UNAVAILABLE: "unavailable",
+});
+
+const FRESH_CREATE_FORM_PATH_PATTERN = /^\/items\/new(?:[/?#]|$)/;
+
+/** True if ANY of the six dialog pickers (category/brand/size/condition/colour/material) currently has its content container open — a stale open picker left over from a failed attempt is exactly as contaminating as a leftover photo, and must trigger a reset the same way. */
+function isAnyDialogPickerOpen(doc) {
+  return Object.values(VINTED_FIELD_STRATEGIES).some(config => {
+    if (!config.contentTestId) return false;
+    const content = doc.querySelector(`[data-testid="${config.contentTestId}"]`);
+    return Boolean(content) && isVisible(content);
+  });
+}
+
+/**
+ * Read-only inspection of the CURRENT page — never navigates, never clicks,
+ * never removes anything. Returns `{ state, ...diagnostics }`:
+ *  - SAVED_DRAFT is checked FIRST, unconditionally — a confirmed saved
+ *    draft is never reclassified as dirty regardless of what else is on
+ *    the page (see PAGE_STATE.SAVED_DRAFT's own comment).
+ *  - CLEAN requires ALL of: the page is genuinely at /items/new (never
+ *    /items/<id>/edit — retrying/advancing always targets a truly fresh
+ *    form, never an existing draft's own edit page); zero uploaded photo
+ *    cards (countUploadedPhotoCards — the exact same verified marker
+ *    stepUploadPhotos itself already trusts); the hidden photo input
+ *    resolves (resolvePhotoInput — proves the page has actually finished
+ *    rendering the upload area, not just the URL having changed); and no
+ *    dialog picker is left open.
+ *  - Zero photos is deliberately the sole field-contamination signal
+ *    checked (rather than separately re-verifying title/description/etc.
+ *    are blank) — runItem's own VERIFIED step order always uploads photos
+ *    FIRST, before touching any other field (see runItem's own top
+ *    comment), so no field is ever set on a page that still shows zero
+ *    photos; a photo count of zero is therefore already conclusive proof
+ *    nothing else has been touched either.
+ */
+export function inspectPageState(doc, location) {
+  const confirmedDraftId = findConfirmedDraftId(doc, location);
+  if (confirmedDraftId) return { state: PAGE_STATE.SAVED_DRAFT, vintedDraftId: confirmedDraftId };
+
+  const onCreateListingPage = CREATE_LISTING_FORM_SELECTORS.some(selector => doc.querySelector(selector));
+  const isFreshFormUrl = FRESH_CREATE_FORM_PATH_PATTERN.test(location?.pathname || "");
+  if (!onCreateListingPage || !isFreshFormUrl) return { state: PAGE_STATE.UNAVAILABLE, onCreateListingPage, isFreshFormUrl };
+
+  const photoCount = countUploadedPhotoCards(doc);
+  const photoInputResolvable = resolvePhotoInput(doc).ok;
+  const dialogOpen = isAnyDialogPickerOpen(doc);
+
+  if (photoCount === 0 && photoInputResolvable && !dialogOpen) return { state: PAGE_STATE.CLEAN };
+  return { state: PAGE_STATE.DIRTY, photoCount, photoInputResolvable, dialogOpen };
 }
 
 /**

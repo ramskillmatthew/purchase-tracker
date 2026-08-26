@@ -111,11 +111,11 @@ function SaleBuilder() {
     for (const line of itemisedLines) map[line.purchaseId] = line.revenuePence;
     return map;
   }, [itemisedLines]);
-  const unitAllocations = useMemo(() => {
+  const unitAllocations = (() => {
     const units = items.map(item => ({ purchaseId: item.id, costPence: poundsToPence(Number(item.price_purchased)) }));
     const allocations = computeBasketAllocation(units, revenueMode, revenuePence, feesPence, postagePence, itemisedRevenueByPurchaseId);
     return new Map<string, UnitAllocation>(allocations.map(allocation => [allocation.purchaseId, allocation]));
-  }, [items, revenueMode, revenuePence, feesPence, postagePence, itemisedRevenueByPurchaseId]);
+  })();
 
   const otherPlatformNameValid = platform !== "other" || customPlatformName.trim().length > 0;
   const revenueEntered = revenueMode === "itemised" ? itemisedLines.some(line => line.revenuePence > 0) || groups.every(group => (unitPrices[group.key] ?? "") !== "") : revenueValue.trim() !== "" && Number(revenueValue) >= 0;
@@ -181,6 +181,7 @@ function SaleBuilder() {
       <div className={styles.modeSwitch} role="group" aria-label="Sale type">
         <button type="button" className={mode === "quick" ? styles.modeSwitchActive : ""} onClick={() => setMode("quick")}>Quick Sale</button>
         <button type="button" className={mode === "order" ? styles.modeSwitchActive : ""} onClick={() => setMode("order")}>Order Sale (basket)</button>
+        <button type="button" onClick={() => router.push("/sales/bulk")}>Bulk Sales</button>
       </div>
     </header>
 
@@ -188,7 +189,7 @@ function SaleBuilder() {
       <div className={styles.builderMain}>
         <PurchaseSearchPanel onAdd={addUnit} onAddAll={addAll} selectedIds={new Set(basket.keys())} />
         {mode === "quick" && groups.length > 1 && <p className={styles.resultHint}>
-          This basket now has {groups.length} different products. Switch to Order Sale for accurate per-product pricing, or keep going with Quick Sale's total/average revenue.
+          This basket now has {groups.length} different products. Switch to Order Sale for accurate per-product pricing, or keep going with Quick Sale&apos;s total/average revenue.
         </p>}
 
         <div className={styles.searchPanel}>
@@ -220,7 +221,7 @@ function SaleBuilder() {
 
             <label className="field"><span className="label">Platform fees (£, order total)</span><input className="input" type="number" min="0" step="0.01" inputMode="decimal" value={fees} onChange={event => setFees(event.target.value)} placeholder="0.00" /></label>
             <label className="field"><span className="label">Postage (£, order total)</span><input className="input" type="number" min="0" step="0.01" inputMode="decimal" value={postage} onChange={event => setPostage(event.target.value)} placeholder="0.00" /></label>
-            <p className={styles.helperNote + " " + styles.detailsGridWide}>Fees and postage are order totals, not per-unit amounts — they're allocated across items automatically.</p>
+            <p className={styles.helperNote + " " + styles.detailsGridWide}>Fees and postage are order totals, not per-unit amounts — they&apos;re allocated across items automatically.</p>
           </div>
         </div>
 

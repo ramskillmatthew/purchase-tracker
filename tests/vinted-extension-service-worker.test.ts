@@ -131,6 +131,15 @@ function createChromeMock(options: {
   // something else entirely; the dedicated "host not permitted" tests
   // override this to prove the opposite.
   permissionsGranted?: boolean;
+  // Follow-up correction (native browser reload-confirmation bug) — when
+  // true, chrome.tabs.update() never fires its own "complete" event at
+  // all, simulating the browser's native unsaved-changes confirmation
+  // blocking the navigation indefinitely (the real-world scenario this
+  // whole feature exists to recover from). The persistent, module-level
+  // chrome.tabs.onUpdated listener is completely unaffected — a test can
+  // still simulate the user later resolving that dialog by calling the
+  // returned fireTabUpdated() helper manually at any point.
+  tabsUpdateStuck?: boolean;
 }) {
   const storageData: Record<string, unknown> = { state: options.initialState, settings: { appBaseUrl: APP_BASE_URL } };
   const messageListeners: Array<(message: any, sender: any, sendResponse: (r: any) => void) => boolean> = [];
@@ -148,7 +157,26 @@ function createChromeMock(options: {
   };
 
   const sendMessage = vi.fn((tabId: number, message: any, callback: (r: any) => void) => {
-    const result = options.sendMessageHandler(tabId, message);
+    let result = options.sendMessageHandler(tabId, message);
+    // Clean-create-form fix — every PRE-EXISTING test's sendMessageHandler
+    // above falls through to some generic catch-all response (`{}`,
+    // `{ started: true }`, etc — several slightly different shapes are
+    // used throughout this file) for any message type it isn't
+    // specifically testing. For INSPECT_PAGE_STATE specifically, any
+    // response that doesn't itself carry a `state` field is reinterpreted
+    // here as "this test doesn't care about the clean-form gate — assume
+    // the page is already clean", so every one of the ~40 pre-existing
+    // tests exercising startItem()/PROCESS_ITEM keeps passing completely
+    // unchanged, with zero reload round trip. A test that DOES care
+    // returns a real `{ state: "dirty" | "saved_draft" | "unavailable" }`
+    // shape for this type from its own handler and is entirely unaffected.
+    if (
+      message?.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE
+      && result && !result.lastError && !result.noCallback
+      && (!result.response || typeof result.response !== "object" || !("state" in result.response))
+    ) {
+      result = { response: { state: "clean" } };
+    }
     if (result.noCallback) return;
     if (result.lastError) {
       runtime.lastError = { message: result.lastError };
@@ -218,7 +246,9 @@ function createChromeMock(options: {
     // macrotask away, guaranteeing every microtask (including listener
     // registration) has already drained first.
     const url = updateInfo.url ?? "https://www.vinted.co.uk/items/new";
-    setTimeout(() => fireTabUpdated(tabId, { status: "complete", url }, { id: tabId, url }), 0);
+    if (!options.tabsUpdateStuck) {
+      setTimeout(() => fireTabUpdated(tabId, { status: "complete", url }, { id: tabId, url }), 0);
+    }
     return { id: tabId, url };
   });
 
@@ -412,6 +442,563 @@ describe("service worker — content-script readiness gate (queue-stalling fix)"
     );
   });
 
+});
+
+// ---- Clean-create-form boundary (BUG FIX: a failed item's leftover
+// photos/fields contaminating the next item) ---------------------------------
+//
+// Confirmed root cause: nothing ever reset the Vinted tab between a failed
+// item and the next dispatch. ensureCleanCreateForm() is the one gate
+// startItem() now goes through before EVER sending PROCESS_ITEM — see
+// service-worker.js's own top comment on that function. These tests drive
+// it through its only public surface (chrome.runtime.onMessage), exactly
+// like every other test in this file.
+describe("service worker — clean-create-form boundary (BUG FIX: leftover photos/fields contaminating the next item)", () => {
+  function twoItemPayload() {
+    return {
+      schemaVersion: "vinted-extension-batch-v1", batchId: "batch-1", expiresAt: "2026-08-05T10:30:00.000Z",
+      items: [
+        { itemId: "item-1", draftId: "draft-1", queuePosition: 0, title: "Item One — 10 photos" },
+        { itemId: "item-2", draftId: "draft-2", queuePosition: 1, title: "Item Two — 8 photos" },
+      ],
+    };
+  }
+  function seededTwoItemRunningState() {
+    let state = QueueState.applyBatchPayload(QueueState.createInitialState(), twoItemPayload(), T0);
+    state = QueueState.applyClaim(state, { batchId: "batch-1", batchToken: "test-batch-token", expiresAt: "2026-08-05T10:30:00.000Z", claimedAt: T0 });
+    state = QueueState.applyAccountDetected(state, { memberId: "1", displayName: "shopfront_uk" }, T0);
+    state = QueueState.applyAccountConfirmed(state, T0);
+    state = QueueState.applySelectedVintedTab(state, 1);
+    return QueueState.applyStart(state);
+  }
+
+  it("REQUIREMENT: a dirty page (leftover photos from a previous failed item) is reset to a fresh /items/new BEFORE PROCESS_ITEM is ever sent, and only sent once the reset page confirms clean", async () => {
+    let inspectCalls = 0;
+    const order: string[] = [];
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") { order.push("PING"); return { response: { ready: true } }; }
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) {
+          inspectCalls += 1;
+          order.push(`INSPECT(${inspectCalls})`);
+          if (inspectCalls === 1) return { response: { state: "dirty", photoCount: 10 } }; // leftover from a previous item
+          return { response: { state: "clean" } }; // confirmed clean after the reset
+        }
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) { order.push("PROCESS_ITEM"); return { response: { started: true } }; }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect(tabsUpdate).toHaveBeenCalledWith(1, { url: "https://www.vinted.co.uk/items/new" });
+    expect(inspectCalls).toBe(2); // dirty, then re-checked clean after the reset — never assumed
+    // The reset navigation and its own re-confirmation happen strictly
+    // BEFORE PROCESS_ITEM — never races ahead of it.
+    expect(order.indexOf("INSPECT(1)")).toBeLessThan(order.indexOf("PROCESS_ITEM"));
+    expect(order.indexOf("INSPECT(2)")).toBeLessThan(order.indexOf("PROCESS_ITEM"));
+  });
+
+  it("REQUIREMENT: an already-clean page costs nothing extra — no reset navigation, PROCESS_ITEM still dispatched normally", async () => {
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "clean" } };
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) return { response: { started: true } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect(tabsUpdate).not.toHaveBeenCalled(); // "avoid an unnecessary reload if safe"
+  });
+
+  it("REQUIREMENT: a confirmed saved-draft page is navigated AWAY from (to start the next item), never treated as dirty content to clear", async () => {
+    let inspectCalls = 0;
+    const { chromeMock, storageData, messageListeners, tabsUpdate, sendMessage } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) {
+          inspectCalls += 1;
+          if (inspectCalls === 1) return { response: { state: "saved_draft", vintedDraftId: "555" } };
+          return { response: { state: "clean" } };
+        }
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) return { response: { started: true } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect(tabsUpdate).toHaveBeenCalledWith(1, { url: "https://www.vinted.co.uk/items/new" }); // navigated away...
+    // ...but the ONLY messages ever sent to the tab are the standard
+    // readiness/inspection/dispatch ones — nothing that could interact with
+    // (let alone modify) the saved draft's own content.
+    const sentTypes = new Set(sendMessage.mock.calls.map(([, message]: [number, any, (r: any) => void]) => message.type));
+    expect(sentTypes).toEqual(new Set(["PING", WORKER_TO_CONTENT.DETECT_ACCOUNT, WORKER_TO_CONTENT.INSPECT_PAGE_STATE, WORKER_TO_CONTENT.PROCESS_ITEM]));
+  });
+
+  it("REQUIREMENT: if the reset page never confirms clean, the item fails clearly and retryably — PROCESS_ITEM is NEVER sent", async () => {
+    let processItemSent = false;
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } }; // never becomes clean, even after the reset
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) { processItemSent = true; return { response: { started: true } }; }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("failed"), { timeout: 12000 });
+
+    const item = currentItem(storageData);
+    expect(item.errorCode).toBe("CLEAN_FORM_FAILED");
+    expect(item.errorMessage).toMatch(/could not establish a clean create listing form/i);
+    expect(tabsUpdate).toHaveBeenCalled(); // a reset WAS attempted...
+    expect(processItemSent).toBe(false); // ...but the item was never dispatched into the still-contaminated page
+  }, 15000);
+
+  it("REQUIREMENT: manual Retry of a failed item goes through the SAME reset gate — never resumes on the page the failed attempt left behind", async () => {
+    let state = seededRunningState();
+    state = QueueState.applyItemFailed(state, "item-1", "SET_MATERIALS", 'NOT_FOUND: material option exactly matching "Suede"', T0, "UPLOAD_PHOTOS");
+
+    let inspectCalls = 0;
+    const order: string[] = [];
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: state,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) {
+          inspectCalls += 1;
+          order.push(`INSPECT(${inspectCalls})`);
+          if (inspectCalls === 1) return { response: { state: "dirty", photoCount: 10 } }; // the failed attempt's own leftover photos
+          return { response: { state: "clean" } };
+        }
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) { order.push("PROCESS_ITEM"); return { response: { started: true } }; }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.RETRY_ITEM, itemId: "item-1" });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect(tabsUpdate).toHaveBeenCalledWith(1, { url: "https://www.vinted.co.uk/items/new" });
+    expect(order.indexOf("INSPECT(1)")).toBeLessThan(order.indexOf("PROCESS_ITEM"));
+    expect(order.indexOf("INSPECT(2)")).toBeLessThan(order.indexOf("PROCESS_ITEM"));
+  });
+
+  it("REQUIREMENT: races between navigation/content-script reinjection and dispatch are avoided — PROCESS_ITEM only sent once the content script re-confirms ready on the RESET page", async () => {
+    let pingsAfterReset = 0;
+    let resetHappened = false;
+    const order: string[] = [];
+    const { chromeMock, storageData, messageListeners, executeScript } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") {
+          order.push("PING");
+          if (resetHappened) {
+            pingsAfterReset += 1;
+            // The navigation "destroyed" the old content script — the
+            // first post-reset PING gets no receiver, exactly like a fresh
+            // page load, requiring re-injection before it succeeds.
+            return pingsAfterReset === 1 ? { lastError: "no receiver" } : { response: { ready: true } };
+          }
+          return { response: { ready: true } };
+        }
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) {
+          if (!resetHappened) { resetHappened = true; return { response: { state: "dirty", photoCount: 10 } }; }
+          return { response: { state: "clean" } };
+        }
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) { order.push("PROCESS_ITEM"); return { response: { started: true } }; }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect(executeScript).toHaveBeenCalled(); // re-injected after the reset navigation
+    expect(pingsAfterReset).toBeGreaterThanOrEqual(2); // failed once, then succeeded after injection
+    expect(order[order.length - 1]).toBe("PROCESS_ITEM"); // dispatch is always the LAST thing, never ahead of readiness
+  });
+
+  it("REQUIREMENT: queue order and one-item-at-a-time processing remain intact through a reset — item 2 never starts until item 1 fully resolves AND its own reset completes", async () => {
+    const dispatchedItemIds: string[] = [];
+    let item1Inspected = false;
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      initialState: seededTwoItemRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "clean" } };
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM) {
+          dispatchedItemIds.push(message.item.itemId);
+          if (message.item.itemId === "item-1") item1Inspected = true;
+          return { response: { started: true } };
+        }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    await dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.waitFor(() => expect(dispatchedItemIds).toContain("item-1"));
+    expect(dispatchedItemIds).not.toContain("item-2"); // never dispatched while item-1 is still in flight
+
+    // item-1 fails (e.g. leaves photos behind) — the queue must move to
+    // item-2 next, never re-dispatch item-1 out of order.
+    await dispatch(messageListeners, { type: CONTENT_TO_WORKER.ITEM_RESULT, itemId: "item-1", status: "failed", errorCode: "SET_MATERIALS", errorMessage: "NOT_FOUND" });
+    await vi.waitFor(() => expect(dispatchedItemIds).toContain("item-2"));
+
+    expect(item1Inspected).toBe(true);
+    expect(dispatchedItemIds).toEqual(["item-1", "item-2"]); // strict order, never interleaved or duplicated
+  });
+});
+
+// Follow-up correction (native browser reload-confirmation bug) — the
+// browser's own native "Reload site? Changes that you made may not be
+// saved." confirmation can block ensureCleanCreateForm's reset navigation
+// indefinitely; this extension can never detect/click/bypass it (chrome-
+// internal UI, never part of the page DOM). These tests drive the
+// waiting_for_manual_reload state machine through the same public surface
+// as every other test in this file, simulating the stuck dialog via
+// tabsUpdateStuck (chrome.tabs.update never completing) and fake timers
+// bounded by TAB_NAVIGATION_TIMEOUT_MS (8000ms).
+describe("service worker — manual browser reload (native browser reload-confirmation bug)", () => {
+  const TAB_NAVIGATION_TIMEOUT_MS = 8000;
+
+  function twoItemPayload() {
+    return {
+      schemaVersion: "vinted-extension-batch-v1", batchId: "batch-1", expiresAt: "2026-08-05T10:30:00.000Z",
+      items: [
+        { itemId: "item-1", draftId: "draft-1", queuePosition: 0, title: "Item One" },
+        { itemId: "item-2", draftId: "draft-2", queuePosition: 1, title: "Item Two" },
+      ],
+    };
+  }
+  function seededTwoItemRunningState() {
+    let state = QueueState.applyBatchPayload(QueueState.createInitialState(), twoItemPayload(), T0);
+    state = QueueState.applyClaim(state, { batchId: "batch-1", batchToken: "test-batch-token", expiresAt: "2026-08-05T10:30:00.000Z", claimedAt: T0 });
+    state = QueueState.applyAccountDetected(state, { memberId: "1", displayName: "shopfront_uk" }, T0);
+    state = QueueState.applyAccountConfirmed(state, T0);
+    state = QueueState.applySelectedVintedTab(state, 1);
+    return QueueState.applyStart(state);
+  }
+
+  it("REQUIREMENT: a contaminated form whose reset navigation never completes (native dialog blocking it) enters WAITING_FOR_MANUAL_RELOAD — never FAILED — after exactly one reload attempt", async () => {
+    vi.useFakeTimers();
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+
+    const item = currentItem(storageData);
+    expect(item.status).toBe(QueueState.ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+    expect(item.status).not.toBe("failed");
+    expect((storageData.state as any).batch.paused).toBe(true);
+    expect((storageData.state as any).batch.pauseReason).toBe("manual_reload_required");
+    expect((storageData.state as any).batch.manualReload).toMatchObject({ itemId: "item-1", attempts: 1 });
+    expect(tabsUpdate).toHaveBeenCalledTimes(1); // exactly one reload attempt, never a loop
+  });
+
+  it("REQUIREMENT: the exact required warning text is reported to the app using the existing 'paused' status + currentStep/detail fields — no app-side schema change needed", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { chromeMock, messageListeners } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+
+    const resultPost = fetchMock.mock.calls.find(call => String(call[0]).includes("/api/extension/batch/items/item-1/result"));
+    expect(resultPost).toBeDefined();
+    const body = JSON.parse((resultPost![1] as RequestInit).body as string);
+    expect(body.status).toBe("paused");
+    expect(body.currentStep).toBe("WAITING_FOR_MANUAL_RELOAD");
+    expect(body.detail).toBe(QueueState.MANUAL_RELOAD_WARNING_MESSAGE);
+    expect(body.detail).toBe("Browser needs manual reload — click Reload in the Vinted confirmation box to continue.");
+  });
+
+  it("REQUIREMENT: never begins another item while waiting — item-2 is never dispatched", async () => {
+    vi.useFakeTimers();
+    let item2Dispatched = false;
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      initialState: seededTwoItemRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } };
+        if (message.type === WORKER_TO_CONTENT.PROCESS_ITEM && message.item.itemId === "item-2") item2Dispatched = true;
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+
+    expect((storageData.state as any).batch.items[0].status).toBe(QueueState.ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+    expect(item2Dispatched).toBe(false);
+    expect((storageData.state as any).batch.items[1].status).toBe("queued"); // untouched, never dispatched, never touched
+  });
+
+  it("REQUIREMENT: no repeated reload loop — subsequent periodic ticks only ever INSPECT while unresolved, never fire another chrome.tabs.update", async () => {
+    vi.useFakeTimers();
+    const { chromeMock, storageData, messageListeners, alarmListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } }; // remains dirty/unresolved throughout
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+    expect(tabsUpdate).toHaveBeenCalledTimes(1);
+
+    // Several more periodic alarm ticks pass — still unresolved.
+    for (let i = 0; i < 3; i++) {
+      alarmListeners[0]({ name: ALARM_NAME });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    expect(tabsUpdate).toHaveBeenCalledTimes(1); // still exactly one — never repeated automatically
+    expect(currentItem(storageData).status).toBe(QueueState.ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD); // still waiting, not failed
+  });
+
+  it("REQUIREMENT: once the user manually resolves the browser's dialog and the page is confirmed clean, the item resumes automatically — no Retry needed", async () => {
+    vi.useFakeTimers();
+    let reloadResolvedByUser = false;
+    const { chromeMock, storageData, messageListeners, fireTabUpdated } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: reloadResolvedByUser ? "clean" : "dirty", photoCount: reloadResolvedByUser ? 0 : 10 } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+    expect(currentItem(storageData).status).toBe(QueueState.ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+    vi.useRealTimers(); // the slow bounded wait is over — back to real timers so vi.waitFor's own polling below can progress
+
+    // The user clicks Reload in the browser's own native dialog — the
+    // navigation genuinely completes now, well after our own bounded wait
+    // already gave up. The SAME persistent tab-navigation listener that
+    // confirms Save Draft (never a second, uncoordinated one) is what
+    // notices this.
+    reloadResolvedByUser = true;
+    await fireTabUpdated(1, { status: "complete", url: "https://www.vinted.co.uk/items/new" });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect((storageData.state as any).batch.manualReload).toBeNull();
+    expect((storageData.state as any).batch.paused).toBe(false);
+  });
+
+  it("REQUIREMENT: if the page is still dirty after the navigation completes (Cancel, or genuinely unresolved), it remains paused and waiting — never continues on the contaminated form", async () => {
+    vi.useFakeTimers();
+    const { chromeMock, storageData, messageListeners, fireTabUpdated } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } }; // never becomes clean
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+    vi.useRealTimers(); // the slow bounded wait is over — back to real timers for the rest of this test
+
+    await fireTabUpdated(1, { status: "complete", url: "https://www.vinted.co.uk/items/new" });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    expect(currentItem(storageData).status).toBe(QueueState.ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD);
+    expect((storageData.state as any).batch.paused).toBe(true);
+    expect((storageData.state as any).batch.manualReload).not.toBeNull();
+  });
+
+  it('REQUIREMENT: "Try reload again" (RETRY_MANUAL_RELOAD) issues exactly one new chrome.tabs.update attempt', async () => {
+    vi.useFakeTimers();
+    const { chromeMock, storageData, messageListeners, tabsUpdate } = createChromeMock({
+      initialState: seededRunningState(),
+      tabsUpdateStuck: true,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.DETECT_ACCOUNT) return { response: { identity: { memberId: "1", displayName: "shopfront_uk" } } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "dirty", photoCount: 10 } };
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    const dispatchPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.START_BATCH });
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await dispatchPromise;
+    expect(tabsUpdate).toHaveBeenCalledTimes(1);
+
+    const retryPromise = dispatch(messageListeners, { type: PANEL_TO_WORKER.RETRY_MANUAL_RELOAD });
+    // The retried chrome.tabs.update is ALSO stuck (tabsUpdateStuck) —
+    // it goes through the SAME bounded TAB_NAVIGATION_TIMEOUT_MS wait as
+    // the original automatic attempt.
+    await vi.advanceTimersByTimeAsync(TAB_NAVIGATION_TIMEOUT_MS);
+    await retryPromise;
+
+    expect(tabsUpdate).toHaveBeenCalledTimes(2); // exactly one MORE attempt, never a loop
+    expect((storageData.state as any).batch.manualReload.attempts).toBe(2);
+  });
+
+  it("RETRY_MANUAL_RELOAD is a clear no-op error when nothing is actually pending", async () => {
+    const { chromeMock, messageListeners } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: () => ({ response: {} }),
+    });
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: PANEL_TO_WORKER.RETRY_MANUAL_RELOAD });
+    expect(result.error).toMatch(/no manual reload is currently pending/i);
+  });
+
+  it("REQUIREMENT: a service-worker restart while a manual reload is pending reacquires a tab and recovers safely — the item is never reset to QUEUED blindly, and never FAILED just because the extension restarted", async () => {
+    let state = seededRunningState();
+    state = QueueState.applyManualReloadNeeded(state, { itemId: "item-1", tabId: 1 }, T0);
+    let inspectCalls = 0;
+    const { chromeMock, storageData, startupListeners } = createChromeMock({
+      initialState: state,
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) { inspectCalls += 1; return { response: { state: "clean" } }; }
+        return { response: {} };
+      },
+    });
+
+    await loadWorker(chromeMock);
+    startupListeners[0]();
+    await vi.waitFor(() => expect(inspectCalls).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+
+    expect((storageData.state as any).batch.manualReload).toBeNull(); // resolved once genuinely confirmed clean
+  });
+
+});
+
+// Follow-up correction (orphaned extension batch recovery) — every
+// triggerTick() (the same ~1-minute chrome.alarms cadence the queue's own
+// watchdog already relies on) now also sends a bounded, best-effort
+// heartbeat while a batch is genuinely still running, so the app's own
+// last_extension_activity_at (see app/api/extension/batch/heartbeat/route.ts)
+// stays fresh through a long stretch with nothing else to report — most
+// notably a WAITING_FOR_MANUAL_RELOAD wait, which has no other genuine
+// activity to send.
+describe("service worker — heartbeat (orphaned extension batch recovery)", () => {
+  it("REQUIREMENT: every periodic tick sends a heartbeat while the batch is genuinely still running (non-terminal items present)", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { chromeMock, alarmListeners } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: () => ({ response: {} }),
+    });
+    await loadWorker(chromeMock);
+    alarmListeners[0]({ name: ALARM_NAME });
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(c => String(c[0]).includes("/api/extension/batch/heartbeat"))).toBe(true));
+
+    const heartbeatCall = fetchMock.mock.calls.find(c => String(c[0]).includes("/api/extension/batch/heartbeat"));
+    expect((heartbeatCall![1] as RequestInit).method).toBe("POST");
+    expect((heartbeatCall![1] as RequestInit).headers).toMatchObject({ Authorization: "Bearer test-batch-token" });
+  });
+
+  it("sends no heartbeat at all when there is no active batch (nothing to keep alive)", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { chromeMock, alarmListeners } = createChromeMock({
+      initialState: QueueState.createInitialState(),
+      sendMessageHandler: () => ({ response: {} }),
+    });
+    await loadWorker(chromeMock);
+    alarmListeners[0]({ name: ALARM_NAME });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(fetchMock.mock.calls.some(c => String(c[0]).includes("/api/extension/batch/heartbeat"))).toBe(false);
+  });
+
+  it("a failed heartbeat request never breaks the rest of triggerTick's own queue-driving logic", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes("/api/extension/batch/heartbeat")) throw new Error("network down");
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { chromeMock, storageData, alarmListeners } = createChromeMock({
+      initialState: seededRunningState(),
+      sendMessageHandler: (_tabId, message) => {
+        if (message.type === "PING") return { response: { ready: true } };
+        if (message.type === WORKER_TO_CONTENT.INSPECT_PAGE_STATE) return { response: { state: "clean" } };
+        return { response: { started: true } };
+      },
+    });
+    await loadWorker(chromeMock);
+    alarmListeners[0]({ name: ALARM_NAME });
+    await vi.waitFor(() => expect(currentItem(storageData).status).toBe("preparing"));
+  });
+});
+
+describe("service worker — watchdog", () => {
   it("watchdog: an in-flight item with no reported progress for the timeout window is moved to a retryable failed state on the next tick, and never left in preparing indefinitely", async () => {
     let state = seededRunningState();
     const staleProgressAt = new Date(Date.now() - 4 * 60 * 1000).toISOString(); // older than the 3-minute watchdog window

@@ -13,11 +13,13 @@ import ClearWorkspaceDialog from "./ClearWorkspaceDialog";
 import WorkflowSteps from "./WorkflowSteps";
 import TaskToast from "@/components/TaskToast";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import type { UploadItem } from "./upload-types";
+import { UPLOAD_ACTIVE_STATES, type UploadItem } from "./upload-types";
 import type { PhotoTileData } from "./SortablePhotoGrid";
 import { isAcceptedFile, partitionDuplicateFiles } from "@/lib/listing-studio/file-selection";
-import { CHUNK_OVERLAP_SIZE, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE } from "@/lib/listing-studio/upload-limits";
+import { CHUNK_OVERLAP_SIZE, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_SIZE, MAX_FILES_PER_SELECTION } from "@/lib/listing-studio/upload-limits";
 import { prepareImagePreview, releaseImagePreview } from "@/lib/listing-studio/client-image-processing";
+import { planUploadChunks, type PlannableFile } from "@/lib/listing-studio/upload-chunk-planner";
+import { parseRegistrationFailure } from "@/lib/listing-studio/upload-error-messages";
 
 type WorkspaceDraft = {
   id: string; title: string | null; status: string; created_at: string; updated_at: string;
@@ -99,6 +101,14 @@ type AutoGroupProgress = {
 // opposite call.
 type PendingUndo = { message: string; onAction: () => void; onDismiss: () => void };
 
+// Large-batch upload fix — bounded concurrency for the two independently
+// expensive per-file operations a big selection (120+ photos) triggers.
+// Kept low and named/documented (not inlined magic numbers) per the
+// explicit "do not run 120 uploads simultaneously" / "do not launch 120
+// HEIC conversions simultaneously" requirements.
+const UPLOAD_CONCURRENCY = 3; // unchanged from the existing single-batch behaviour this replaces.
+const PREVIEW_CONCURRENCY = 4; // HEIC->JPEG conversion (heic2any, WASM) is CPU-heavy; a handful at once keeps the tab responsive without serialising ordinary (non-HEIC) previews to a crawl.
+
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
   const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
@@ -131,6 +141,13 @@ export default function GroupingWorkspace() {
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploadNotice, setUploadNotice] = useState("");
   const [uploadSuccessMessage, setUploadSuccessMessage] = useState("");
+  // Large-batch upload fix — set only on a HARD-STOP chunk-registration
+  // failure (workspace capacity, auth, missing Storage bucket, a client
+  // chunking bug) that means every remaining chunk in this run would fail
+  // identically; cleared at the start of the next processUploadQueue run.
+  // Never set for a per-chunk/transient failure — those only mark their own
+  // files "failed" (see lib/listing-studio/upload-error-messages.ts).
+  const [uploadGlobalError, setUploadGlobalError] = useState<string | null>(null);
   // Visual redesign — client-side only, narrows the already-loaded `drafts`
   // array for display; never a new fetch, never sent to the server.
   const [searchQuery, setSearchQuery] = useState("");
@@ -196,8 +213,39 @@ export default function GroupingWorkspace() {
 
   const uploadItemsRef = useRef<UploadItem[]>([]);
   useEffect(() => { uploadItemsRef.current = uploadItems; }, [uploadItems]);
+  // REGRESSION FIX (large-batch upload): every upload-queue mutation goes
+  // through this instead of calling setUploadItems directly, so
+  // uploadItemsRef.current is updated SYNCHRONOUSLY, in the same tick.
+  // processUploadQueue is invoked immediately after adding new items
+  // (handleFilesSelected) or resetting failed ones (retry), and its very
+  // first line reads uploadItemsRef.current — the effect above only syncs
+  // the ref on React's NEXT render pass, which is too late: a fresh
+  // processUploadQueue() call could read the pre-update ref, see nothing
+  // "waiting", and exit immediately, silently stranding every newly-added
+  // photo in "waiting" forever with no processor left running to pick them
+  // up. Confirmed live against the real dev server with a 250-photo
+  // selection before this fix; unreachable by the (mocked) pure-function
+  // test suite, which never exercises React's actual render/effect timing.
+  function updateUploadItems(updater: (current: UploadItem[]) => UploadItem[]) {
+    const next = updater(uploadItemsRef.current);
+    uploadItemsRef.current = next;
+    setUploadItems(next);
+  }
   const pendingUndoRef = useRef<PendingUndo | null>(null);
   useEffect(() => { pendingUndoRef.current = pendingUndo; }, [pendingUndo]);
+  // Large-batch upload fix — guards against two competing queue processors:
+  // processUploadQueue() is a no-op re-entrant call while one instance is
+  // already draining the queue (selecting more files while an upload is
+  // active just appends "waiting" items the ALREADY-RUNNING loop's next
+  // iteration picks up naturally — see processUploadQueue's own comment).
+  const uploadProcessorRunningRef = useRef(false);
+
+  // Release every still-live preview blob: URL on unmount — large batches
+  // (120+ photos) can otherwise leak that many decoded-image blobs across a
+  // session if the user navigates away mid-upload.
+  useEffect(() => {
+    return () => { for (const item of uploadItemsRef.current) releaseImagePreview(item.previewUrl); };
+  }, []);
 
   // If another undo-able action starts while one is still pending, resolve
   // the earlier one right away (its own timeout would otherwise still fire
@@ -254,6 +302,13 @@ export default function GroupingWorkspace() {
   }
 
   // ---- Upload flow ----
+  // Large-batch upload fix: a selection of any size is queued in full, then
+  // planUploadChunks (lib/listing-studio/upload-chunk-planner.ts) splits it
+  // into safe registration chunks that processUploadQueue registers and
+  // uploads ONE AT A TIME, sequentially — this is what fixes the confirmed
+  // bug (a 126-file selection sent as one request, rejected by the 60-file
+  // server ceiling, with the resulting generic "Invalid request." applied
+  // to every file) without weakening that ceiling.
   async function handleFilesSelected(files: File[]) {
     setUploadNotice("");
     setUploadSuccessMessage("");
@@ -267,68 +322,173 @@ export default function GroupingWorkspace() {
     const notices: string[] = [];
     if (rejected.length) notices.push(`${rejected.length} file(s) skipped — unsupported type: ${rejected.map(f => f.name).join(", ")}`);
     if (duplicates.length) notices.push(`${duplicates.length} file(s) already added, skipped: ${duplicates.map(f => f.name).join(", ")}`);
+    if (unique.length > MAX_FILES_PER_SELECTION) notices.push(`This upload group contains too many files. It will be divided into smaller batches automatically.`);
     if (notices.length) setUploadNotice(notices.join(" "));
     if (!unique.length) return;
 
     const newItems: UploadItem[] = unique.map(file => ({
       clientId: crypto.randomUUID(), file, imageId: null, draftId: null,
-      previewUrl: null, previewAvailable: true, state: "pending", progress: 0, errorMessage: null,
+      previewUrl: null, previewAvailable: true, state: "waiting", progress: 0, errorMessage: null,
     }));
-    setUploadItems(current => [...current, ...newItems]);
-
-    newItems.forEach(item => {
-      prepareImagePreview(item.file).then(preview => {
-        setUploadItems(current => current.map(existing => existing.clientId === item.clientId ? { ...existing, previewUrl: preview.previewUrl, previewAvailable: preview.previewAvailable } : existing));
-      });
-    });
-
-    await runUploadBatch(newItems);
+    // Appended to the END of the existing queue array — this IS "add more
+    // files during an active upload" support: the running processor (if
+    // any) re-derives its "waiting" set from this same array every outer
+    // loop iteration (see processUploadQueue), so these are picked up
+    // automatically in this exact arrival order, never reordered ahead of
+    // what's already queued.
+    updateUploadItems(current => [...current, ...newItems]);
+    preparePreviewsBounded(newItems);
+    processUploadQueue();
   }
 
-  async function runUploadBatch(items: UploadItem[]) {
-    const ids = new Set(items.map(item => item.clientId));
-    setUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "uploading" } : item));
+  // Bounded preview generation — HEIC->JPEG conversion (heic2any) is real
+  // CPU work; firing all 120+ at once (the previous behaviour) could churn
+  // the tab for a long time and hold that many decoded images in memory
+  // simultaneously. Fire-and-forget from the caller's perspective (never
+  // gates upload start), same as before — only the concurrency changed.
+  async function preparePreviewsBounded(items: UploadItem[]) {
+    await runWithConcurrencyLimit(items, PREVIEW_CONCURRENCY, async item => {
+      const preview = await prepareImagePreview(item.file);
+      updateUploadItems(current => current.map(existing => existing.clientId === item.clientId ? { ...existing, previewUrl: preview.previewUrl, previewAvailable: preview.previewAvailable } : existing));
+    });
+  }
+
+  // The single queue processor. Re-entrant calls (from handleFilesSelected
+  // adding more files, or a retry action) while one is already running are
+  // a deliberate no-op — see uploadProcessorRunningRef's own comment — so
+  // two processors can never race to register/upload the same items.
+  //
+  // Each outer-loop pass re-reads the CURRENT full "waiting" set from
+  // uploadItemsRef (not a snapshot taken once at the start), plans exactly
+  // ONE chunk from it, and fully registers+uploads that one chunk before
+  // looping again. This is what guarantees chunk registrations are
+  // sequential (never Promise.all'd) — required because each registration
+  // request computes its base sort_order from the target group's current
+  // max sort_order; two concurrent requests could read the same base and
+  // corrupt ordering. It also means a file added mid-run is naturally
+  // folded into the NEXT loop iteration's freshly-planned chunk, and upload
+  // concurrency is bounded to at most UPLOAD_CONCURRENCY across the whole
+  // app at any moment (never one giant Promise.all of every file).
+  async function processUploadQueue() {
+    if (uploadProcessorRunningRef.current) return;
+    uploadProcessorRunningRef.current = true;
+    setUploadGlobalError(null);
     try {
-      const response = await fetch("/api/listing-studio/uploads", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: items.map(item => ({ filename: item.file.name, mimeType: item.file.type || "application/octet-stream", fileSize: item.file.size })) }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        setUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "failed", errorMessage: data.error || "Could not start upload." } : item));
-        return;
-      }
-      const { draftId, images: serverImages } = data as { draftId: string; images: { imageId: string; uploadUrl: string }[] };
-      const paired = items.map((item, index) => ({ item, server: serverImages[index] }));
-      setUploadItems(current => current.map(item => {
-        const pair = paired.find(p => p.item.clientId === item.clientId);
-        return pair ? { ...item, imageId: pair.server.imageId } : item;
-      }));
+      while (true) {
+        const waiting = uploadItemsRef.current.filter(item => item.state === "waiting");
+        if (waiting.length === 0) break;
 
-      await runWithConcurrencyLimit(paired, 3, ({ item, server }) => uploadOneFile(item.clientId, item.file, server.imageId, server.uploadUrl));
-      const fresh = await loadWorkspace();
+        type Plannable = PlannableFile & { item: UploadItem };
+        const plannable: Plannable[] = waiting.map(item => ({ name: item.file.name, size: item.file.size, item }));
+        // No client-side workspace-capacity preflight here, deliberately —
+        // see this function's own file-level context in the final report:
+        // the server re-checks capacity authoritatively on every single
+        // chunk registration already (app/api/listing-studio/uploads/route.ts),
+        // which also correctly protects against another tab adding photos
+        // between any client guess and this request landing. A stale local
+        // guess would only risk being WRONG; omitting it costs nothing but
+        // one extra round trip in the (rare) already-full-workspace case,
+        // and that round trip still produces a clear, structured error.
+        const plan = planUploadChunks(plannable);
 
-      // Upload-to-group transition (UX refinement spec §8): tell the user
-      // exactly what happened and where, then bring that group into view —
-      // never leave them wondering what to click next.
-      const succeeded = uploadItemsRef.current.filter(item => ids.has(item.clientId) && item.state === "uploaded").length;
-      if (succeeded > 0) {
-        const groupTitle = fresh?.drafts.find(draft => draft.id === draftId)?.title || "Unsorted";
-        setUploadSuccessMessage(`${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded and added to ${groupTitle}`);
-        requestAnimationFrame(() => {
-          document.getElementById(`listing-group-${draftId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-        });
+        if (plan.rejected.length > 0) {
+          const messageByClientId = new Map(plan.rejected.map(entry => [entry.file.item.clientId, entry.message]));
+          updateUploadItems(current => current.map(existing => messageByClientId.has(existing.clientId) ? { ...existing, state: "rejected", errorMessage: messageByClientId.get(existing.clientId) ?? null } : existing));
+        }
+        if (plan.chunks.length === 0) break; // everything in this pass was rejected client-side (oversized files) — nothing left to register.
+
+        const outcome = await registerAndUploadChunk(plan.chunks[0].map(entry => entry.item));
+        if (outcome === "hard_stop") break;
       }
-    } catch {
-      setUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "failed", errorMessage: "Network error — please retry." } : item));
+    } finally {
+      uploadProcessorRunningRef.current = false;
     }
   }
 
+  // Registers exactly one chunk (POST /api/listing-studio/uploads with at
+  // most MAX_FILES_PER_SELECTION files, always within MAX_BATCH_SIZE_BYTES —
+  // guaranteed by the planner), then uploads+confirms that chunk's files
+  // with bounded concurrency. Returns "hard_stop" when the failure is
+  // systemic (see lib/listing-studio/upload-error-messages.ts's
+  // classification) so processUploadQueue stops registering further
+  // chunks; returns "continue" for a per-chunk/transient failure so the
+  // run keeps going — successful earlier chunks are never rewritten or
+  // touched by a later chunk's failure either way.
+  async function registerAndUploadChunk(chunkItems: UploadItem[]): Promise<"continue" | "hard_stop"> {
+    const ids = new Set(chunkItems.map(item => item.clientId));
+    updateUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "registering" } : item));
+
+    let response: Response;
+    try {
+      response = await fetch("/api/listing-studio/uploads", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: chunkItems.map(item => ({ filename: item.file.name, mimeType: item.file.type || "application/octet-stream", fileSize: item.file.size })) }),
+      });
+    } catch {
+      const failure = parseRegistrationFailure(0, null);
+      updateUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "failed", errorMessage: failure.message } : item));
+      return "continue"; // a network blip trying THIS chunk doesn't mean the next one will also fail.
+    }
+
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const failure = parseRegistrationFailure(response.status, body);
+      updateUploadItems(current => current.map(item => ids.has(item.clientId) ? { ...item, state: "failed", errorMessage: failure.message } : item));
+      if (failure.classification === "hard_stop") {
+        setUploadGlobalError(failure.message);
+        return "hard_stop";
+      }
+      return "continue";
+    }
+
+    const { draftId, images: serverImages } = body as { draftId: string; images: { imageId: string; uploadUrl: string }[] };
+    // Order fidelity: `chunkItems` and `serverImages` are paired by INDEX,
+    // never by re-matching filenames — the server preserves request-array
+    // order end to end (see app/api/listing-studio/uploads/route.ts: signed
+    // URLs and the DB insert are both built via `files.map`/`signed.map`,
+    // never re-sorted), so index-pairing here is exact and this is what
+    // ultimately lets sort_order preserve the user's original selection
+    // order across every chunk boundary.
+    const paired = chunkItems.map((item, index) => ({ item, server: serverImages[index] }));
+    updateUploadItems(current => current.map(item => {
+      const pair = paired.find(p => p.item.clientId === item.clientId);
+      return pair ? { ...item, imageId: pair.server.imageId, draftId, state: "uploading" as const } : item;
+    }));
+
+    await runWithConcurrencyLimit(paired, UPLOAD_CONCURRENCY, ({ item, server }) => uploadOneFile(item.clientId, item.file, server.imageId, server.uploadUrl));
+    const fresh = await loadWorkspace();
+
+    // Upload-to-group transition (UX refinement spec §8): tell the user
+    // exactly what happened and where, then bring that group into view —
+    // never leave them wondering what to click next. Fires once per
+    // completed chunk (not once per whole selection) so a very large
+    // batch gives progressive feedback instead of one long silent wait.
+    const succeeded = uploadItemsRef.current.filter(item => ids.has(item.clientId) && item.state === "uploaded").length;
+    if (succeeded > 0) {
+      const groupTitle = fresh?.drafts.find(draft => draft.id === draftId)?.title || "Unsorted";
+      setUploadSuccessMessage(`${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded and added to ${groupTitle}`);
+      requestAnimationFrame(() => {
+        document.getElementById(`listing-group-${draftId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+    return "continue";
+  }
+
+  // Uploads one file's bytes to Storage, then confirms it — NEVER throws
+  // (both phases catch their own errors), which is what lets
+  // runWithConcurrencyLimit's worker loop keep processing the rest of the
+  // chunk after any single file fails.
   async function uploadOneFile(clientId: string, file: File, imageId: string, uploadUrl: string) {
     try {
       await putWithProgress(uploadUrl, file, progress => {
-        setUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, progress } : item));
+        updateUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, progress } : item));
       });
+    } catch {
+      updateUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, state: "failed", errorMessage: "Upload failed — please retry." } : item));
+      return;
+    }
+    updateUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, state: "confirming" } : item));
+    try {
       const current = uploadItemsRef.current.find(item => item.clientId === clientId);
       const confirmResponse = await fetch(`/api/listing-studio/uploads/${imageId}/confirm`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -336,41 +496,81 @@ export default function GroupingWorkspace() {
       });
       const body = await confirmResponse.json().catch(() => ({}));
       if (!confirmResponse.ok) {
-        setUploadItems(current2 => current2.map(item => item.clientId === clientId ? { ...item, state: "failed", errorMessage: body.error || "Could not confirm upload." } : item));
+        updateUploadItems(current2 => current2.map(item => item.clientId === clientId ? { ...item, state: "failed", errorMessage: body.error || "Could not confirm upload." } : item));
         return;
       }
-      setUploadItems(current2 => current2.map(item => item.clientId === clientId ? { ...item, state: "uploaded", progress: 100 } : item));
+      updateUploadItems(current2 => current2.map(item => item.clientId === clientId ? { ...item, state: "uploaded", progress: 100 } : item));
     } catch {
-      setUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, state: "failed", errorMessage: "Upload failed — please retry." } : item));
+      updateUploadItems(current => current.map(item => item.clientId === clientId ? { ...item, state: "failed", errorMessage: "Could not confirm upload — please retry." } : item));
     }
   }
 
+  // Fixes the confirmed retry bug: the previous implementation silently did
+  // nothing for an item that failed BEFORE registration (no imageId yet —
+  // e.g. a chunk that hard-stopped on a transient error). Now branches on
+  // whether an imageId already exists:
+  //  - has one: reuse the existing retry-signed-URL flow for that exact
+  //    same Storage path/row (unchanged behaviour).
+  //  - doesn't have one: safely re-queue the file through the normal
+  //    bounded registration flow — it gets a real imageId this time.
+  // Guards against double-click duplicate retries by ignoring the click
+  // outright while this item is already mid-flight.
   async function handleRetryUpload(clientId: string) {
     const item = uploadItemsRef.current.find(existing => existing.clientId === clientId);
-    if (!item?.imageId) return;
-    setUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "uploading", progress: 0, errorMessage: null } : existing));
+    if (!item) return;
+    if (UPLOAD_ACTIVE_STATES.has(item.state)) return; // already in flight — ignore a duplicate click.
+
+    if (!item.imageId) {
+      updateUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "waiting", errorMessage: null } : existing));
+      processUploadQueue();
+      return;
+    }
+
+    updateUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "uploading", progress: 0, errorMessage: null } : existing));
     try {
       const response = await fetch(`/api/listing-studio/uploads/${item.imageId}/retry`, { method: "POST" });
       const data = await response.json();
       if (!response.ok) {
-        setUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "failed", errorMessage: data.error || "Could not retry." } : existing));
+        updateUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "failed", errorMessage: data.error || "Could not retry." } : existing));
         return;
       }
       await uploadOneFile(clientId, item.file, item.imageId, data.uploadUrl);
       await loadWorkspace();
     } catch {
-      setUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "failed", errorMessage: "Network error — please retry." } : existing));
+      updateUploadItems(current => current.map(existing => existing.clientId === clientId ? { ...existing, state: "failed", errorMessage: "Network error — please retry." } : existing));
     }
+  }
+
+  // "Retry all failed" — re-queues every currently-failed item through the
+  // SAME bounded processUploadQueue flow a normal selection uses (never
+  // 126 simultaneous retries). Deliberately excludes "rejected" items
+  // (e.g. a file over the individual size limit) — nothing about the file
+  // has changed, so retrying it would just fail identically again.
+  function handleRetryAllFailed() {
+    const failedIds = new Set(uploadItemsRef.current.filter(item => item.state === "failed").map(item => item.clientId));
+    if (failedIds.size === 0) return;
+    updateUploadItems(current => current.map(item => failedIds.has(item.clientId) ? { ...item, state: "waiting", errorMessage: null } : item));
+    processUploadQueue();
   }
 
   async function handleRemoveUploadItem(clientId: string) {
     const item = uploadItemsRef.current.find(existing => existing.clientId === clientId);
     releaseImagePreview(item?.previewUrl ?? null);
-    setUploadItems(current => current.filter(existing => existing.clientId !== clientId));
+    updateUploadItems(current => current.filter(existing => existing.clientId !== clientId));
     if (item?.imageId) {
       await fetch(`/api/listing-studio/images/${item.imageId}`, { method: "DELETE" }).catch(() => {});
       await loadWorkspace();
     }
+  }
+
+  // "Remove failed" (large-queue presentation) — reuses handleRemoveUploadItem
+  // for each currently-failed item exactly as the existing per-row Remove
+  // button already does (same DELETE call, same rules), just bounded and
+  // applied to the whole failed set in one click rather than one at a time.
+  async function handleRemoveAllFailed() {
+    const failedIds = uploadItemsRef.current.filter(item => item.state === "failed").map(item => item.clientId);
+    if (!failedIds.length) return;
+    await runWithConcurrencyLimit(failedIds, 5, clientId => handleRemoveUploadItem(clientId));
   }
 
   // ---- Selection ----
@@ -840,9 +1040,14 @@ export default function GroupingWorkspace() {
 
       setPendingUndo(null);
       setSelectedIds(new Set());
-      setUploadItems([]);
+      // Release every still-live preview blob: URL before discarding the
+      // queue — see the unmount-cleanup effect's own comment for why this
+      // matters at the scale a full workspace clear implies.
+      for (const item of uploadItemsRef.current) releaseImagePreview(item.previewUrl);
+      updateUploadItems(() => []);
       setUploadNotice("");
       setUploadSuccessMessage("");
+      setUploadGlobalError(null);
       setAutoGroupRunning(false);
       setAutoGroupProgress(null);
       setAutoGroupError(null);
@@ -1034,7 +1239,7 @@ export default function GroupingWorkspace() {
   // "Clear all" is disabled while anything destructive/long-running of its
   // own is already in flight — an upload, an auto-group run, or another
   // clear — so it can never race with, or be raced by, one of those.
-  const uploadsActive = uploadItems.some(item => item.state === "pending" || item.state === "uploading");
+  const uploadsActive = uploadItems.some(item => UPLOAD_ACTIVE_STATES.has(item.state));
   const clearWorkspaceDisabled = autoGroupRunning || clearingWorkspace || uploadsActive || generatingListings;
   const generateListingsDisabled = generatingListings || autoGroupRunning || clearingWorkspace || uploadsActive;
 
@@ -1110,7 +1315,14 @@ export default function GroupingWorkspace() {
     {!hasAnyData && <>
       <UploadDropzone onFilesSelected={handleFilesSelected} />
       {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
-      <UploadQueue items={uploadItems} onRetry={handleRetryUpload} onRemove={handleRemoveUploadItem} />
+      <UploadQueue
+        items={uploadItems}
+        onRetry={handleRetryUpload}
+        onRemove={handleRemoveUploadItem}
+        onRetryAllFailed={handleRetryAllFailed}
+        onRemoveAllFailed={handleRemoveAllFailed}
+        globalError={uploadGlobalError}
+      />
       {loadError && <div className="home-error">{loadError}</div>}
       {!loading && <div className="listing-empty-workspace" role="status">No photos in this batch</div>}
     </>}
@@ -1118,7 +1330,14 @@ export default function GroupingWorkspace() {
     {hasAnyData && <>
       <UploadDropzone onFilesSelected={handleFilesSelected} compact />
       {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
-      <UploadQueue items={uploadItems} onRetry={handleRetryUpload} onRemove={handleRemoveUploadItem} />
+      <UploadQueue
+        items={uploadItems}
+        onRetry={handleRetryUpload}
+        onRemove={handleRemoveUploadItem}
+        onRetryAllFailed={handleRetryAllFailed}
+        onRemoveAllFailed={handleRemoveAllFailed}
+        globalError={uploadGlobalError}
+      />
 
       {uploadSuccessMessage && <div className="listing-upload-success" role="status">
         <strong>{uploadSuccessMessage}</strong>

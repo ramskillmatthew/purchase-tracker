@@ -6,6 +6,7 @@ import ListingsTable, { type ListingTableRow } from "./ListingsTable";
 import ListingDetailsPanel, { type ListingDetails } from "./ListingDetailsPanel";
 import DraftActivityPanel, { type ActivityEvent, type ActivityBatchFilter } from "./DraftActivityPanel";
 import ExtensionBatchGrid, { type BatchBoxViewModel } from "./ExtensionBatchGrid";
+import { RecoverStuckBatchDialog, type RecoverDialogBatch, type RecoverDialogListing } from "./RecoverStuckBatchDialog";
 import PhotoCarouselDialog from "./PhotoCarouselDialog";
 import EditListingFieldsDialog, { type ListingFieldsDraft } from "@/components/listing-studio/EditListingFieldsDialog";
 import PreviewListingDialog from "@/components/listing-studio/PreviewListingDialog";
@@ -23,6 +24,21 @@ import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-expor
 import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
+
+// Follow-up correction (orphaned extension batch recovery) — mirrors
+// GET /api/listing-studio/extension-batches's own `recoverable` entry
+// shape, and the POST route's own `blockingBatch` conflict-response
+// shape (which carries the same fields plus nothing else — both describe
+// exactly one owner-owned, nonterminal batch).
+type RecoverableBatchInfo = {
+  batchId: string; displayNumber: number; status: string; listingCount: number;
+  expiresAt: string; boxDismissedAt: string | null; lastExtensionActivityAt: string | null;
+  isHidden: boolean; isStale: boolean;
+};
+type BlockingBatchInfo = {
+  batchId: string; displayNumber: number; status: string; expiresAt: string;
+  boxDismissedAt: string | null; lastExtensionActivityAt: string | null; isHidden: boolean; isStale: boolean;
+};
 
 type ExtensionBatchItemStatusRow = {
   itemId: string; draftId: string; queuePosition: number; status: string; attemptCount: number;
@@ -203,6 +219,24 @@ export default function ListingsReviewWorkspace() {
   const [sendToExtensionRunning, setSendToExtensionRunning] = useState(false);
   const [sendToExtensionError, setSendToExtensionError] = useState("");
   const [sendToExtensionRejected, setSendToExtensionRejected] = useState<RejectedExportListing[]>([]);
+  // Follow-up correction (orphaned extension batch recovery) — the batch
+  // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
+  // response, if any, so the error can offer a real "View active batch" /
+  // "Recover stuck batch" action instead of just the generic message.
+  const [blockingBatch, setBlockingBatch] = useState<BlockingBatchInfo | null>(null);
+  // recoverableBatches — every nonterminal batch this owner has that is
+  // EITHER hidden (its box was dismissed) OR stale (no fresh genuine
+  // extension activity) — see GET /api/listing-studio/extension-batches's
+  // own `recoverable` field. Surfaced as the compact "Hidden active
+  // batch" section below the KPI row.
+  const [recoverableBatches, setRecoverableBatches] = useState<RecoverableBatchInfo[]>([]);
+  const [recoverDialogBatch, setRecoverDialogBatch] = useState<RecoverDialogBatch | null>(null);
+  const [recoverDialogListings, setRecoverDialogListings] = useState<RecoverDialogListing[]>([]);
+  const [recoverDialogLoading, setRecoverDialogLoading] = useState(false);
+  const [recoverStillActiveWarning, setRecoverStillActiveWarning] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverError, setRecoverError] = useState("");
+  const [recoverMessage, setRecoverMessage] = useState("");
   // visibleBatchIds — every batch currently shown in the box grid (i.e.
   // its box hasn't been dismissed). Membership here is the ONLY thing that
   // controls whether a batch is still being polled.
@@ -310,8 +344,10 @@ export default function ListingsReviewWorkspace() {
       try {
         const response = await fetch("/api/listing-studio/extension-batches");
         if (!response.ok || cancelled) return;
-        const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[] };
-        if (cancelled || body.batchIds.length === 0) return;
+        const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[]; recoverable?: RecoverableBatchInfo[] };
+        if (cancelled) return;
+        setRecoverableBatches(body.recoverable ?? []);
+        if (body.batchIds.length === 0) return;
         setVisibleBatchIds(current => {
           const next = new Set(current);
           for (const entry of body.batchIds) next.add(entry.batchId);
@@ -790,6 +826,7 @@ export default function ListingsReviewWorkspace() {
     setSendToExtensionRunning(true);
     setSendToExtensionError("");
     setSendToExtensionRejected([]);
+    setBlockingBatch(null);
     try {
       const response = await fetch("/api/listing-studio/extension-batches", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids }),
@@ -798,6 +835,7 @@ export default function ListingsReviewWorkspace() {
       if (!response.ok) {
         setSendToExtensionError(body.error || "Could not send these listings to the extension.");
         setSendToExtensionRejected(Array.isArray(body.rejected) ? body.rejected : []);
+        setBlockingBatch(body.blockingBatch ?? null);
         return;
       }
       const batchId: string = body.batchId;
@@ -874,6 +912,105 @@ export default function ListingsReviewWorkspace() {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_activity" }),
     }).catch(() => {});
   }, []);
+
+  // Follow-up correction (orphaned extension batch recovery) — best-effort
+  // refresh of the "recoverable" list alone (visibleBatchIds/batchMetaById
+  // are deliberately left untouched here — this never re-resumes a batch
+  // the session had already decided not to track).
+  const refreshRecoverableBatches = useCallback(async () => {
+    try {
+      const response = await fetch("/api/listing-studio/extension-batches");
+      if (!response.ok) return;
+      const body = await response.json() as { recoverable?: RecoverableBatchInfo[] };
+      setRecoverableBatches(body.recoverable ?? []);
+    } catch { /* best-effort */ }
+  }, []);
+
+  // Opens the recovery dialog for one batch — reuses the SAME owner-scoped
+  // batch-detail GET every live poll already uses, so the affected
+  // listings/completed/unfinished counts shown are always the batch's
+  // real, current, persisted state, never invented client-side.
+  const openRecoverDialog = useCallback(async (info: RecoverableBatchInfo | BlockingBatchInfo) => {
+    setRecoverError(""); setRecoverMessage(""); setRecoverStillActiveWarning(false);
+    setRecoverDialogLoading(true);
+    setRecoverDialogBatch({
+      batchId: info.batchId, displayNumber: info.displayNumber, status: info.status, isHidden: info.isHidden,
+      lastExtensionActivityAt: info.lastExtensionActivityAt, completedCount: 0, unfinishedCount: 0,
+    });
+    setRecoverDialogListings([]);
+    try {
+      const response = await fetch(`/api/listing-studio/extension-batches/${info.batchId}`);
+      if (!response.ok) { setRecoverError("Could not load this batch's current details."); return; }
+      const body = await response.json() as ExtensionBatchStatus;
+      const completedCount = body.items.filter(item => item.status === "completed").length;
+      const unfinishedCount = body.items.filter(item => item.status !== "completed" && item.status !== "failed" && item.status !== "cancelled").length;
+      setRecoverDialogBatch(current => current && current.batchId === info.batchId
+        ? { ...current, status: body.status, completedCount, unfinishedCount } : current);
+      setRecoverDialogListings(body.items.map(item => ({ draftId: item.draftId, title: item.generatedTitle ?? "", sku: item.sku })));
+    } catch {
+      setRecoverError("Could not load this batch's current details.");
+    } finally {
+      setRecoverDialogLoading(false);
+    }
+  }, []);
+
+  const closeRecoverDialog = useCallback(() => {
+    if (recovering) return; // never let a click-away close the dialog mid-request
+    setRecoverDialogBatch(null); setRecoverDialogListings([]); setRecoverError(""); setRecoverStillActiveWarning(false);
+  }, [recovering]);
+
+  // Confirmation text (verbatim, per this feature's own requirement):
+  // "Recover this stuck batch? Unfinished draft attempts will be released
+  // and can be sent again. Confirmed Vinted drafts will be preserved." —
+  // rendered by RecoverStuckBatchDialog itself; this handler only ever
+  // fires on an explicit button click, never automatically.
+  const handleRecoverBatch = useCallback(async (force: boolean) => {
+    if (!recoverDialogBatch || recovering) return;
+    setRecovering(true); setRecoverError("");
+    try {
+      const response = await fetch(`/api/listing-studio/extension-batches/${recoverDialogBatch.batchId}/recover`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 409 && body.stillActive) {
+          setRecoverStillActiveWarning(true);
+          setRecoverError(body.error || "This batch still shows genuine, recent extension activity.");
+          return;
+        }
+        setRecoverError(body.error || "Could not recover this batch.");
+        return;
+      }
+
+      const releasedCount: number = body.releasedCount ?? 0;
+      setRecoverMessage(body.wasNoop
+        ? "This batch was already recovered — nothing left to release."
+        : `${releasedCount} listing${releasedCount === 1 ? "" : "s"} released — you can send ${releasedCount === 1 ? "it" : "them"} to the extension again.`);
+
+      const recoveredBatchId = recoverDialogBatch.batchId;
+      // The recovered batch is now terminal — drop it from live tracking
+      // (mirroring handleDismissBatchBox's own cleanup) and clear any
+      // now-stale selection of the listings it was holding, so they can be
+      // selected and sent again immediately without a stray leftover pick.
+      setVisibleBatchIds(current => { if (!current.has(recoveredBatchId)) return current; const next = new Set(current); next.delete(recoveredBatchId); return next; });
+      setBatchStatusById(current => { if (!current.has(recoveredBatchId)) return current; const next = new Map(current); next.delete(recoveredBatchId); return next; });
+      const releasedDraftIds = new Set(recoverDialogListings.map(l => l.draftId));
+      setBulkSelectedIds(current => {
+        if (![...releasedDraftIds].some(id => current.has(id))) return current;
+        const next = new Set(current);
+        for (const id of releasedDraftIds) next.delete(id);
+        return next;
+      });
+      setBlockingBatch(current => (current && current.batchId === recoveredBatchId ? null : current));
+
+      await Promise.all([loadListings(), refreshRecoverableBatches()]);
+      setRecoverDialogBatch(null); setRecoverDialogListings([]); setRecoverStillActiveWarning(false);
+    } catch {
+      setRecoverError("Network error — could not recover this batch.");
+    } finally {
+      setRecovering(false);
+    }
+  }, [recoverDialogBatch, recoverDialogListings, recovering, loadListings, refreshRecoverableBatches]);
 
   // Multi-batch support — ONE owner-scoped poll loop drives every visible
   // batch (never one timer/subscription per batch — see this feature's own
@@ -1234,7 +1371,38 @@ export default function ListingsReviewWorkspace() {
       {sendToExtensionRejected.length > 0 && <ul className="lr-export-rejected">
         {sendToExtensionRejected.map(item => <li key={item.draftId}>{item.sku ?? item.draftId}: {item.reasons.join(", ")}</li>)}
       </ul>}
+      {/* Error-message improvement (orphaned extension batch recovery) —
+          identifies the actual owner-owned batch behind a
+          "already part of another active batch" conflict, and offers the
+          correct next step for it: a genuinely visible/active batch only
+          ever offers "View active batch" (scroll to its box); a
+          hidden/stale one offers "Recover stuck batch" directly. */}
+      {blockingBatch && <span className="lr-blocking-batch-actions">
+        {!blockingBatch.isHidden && !blockingBatch.isStale
+          ? <button type="button" onClick={() => document.querySelector(`[role="group"][aria-label="Batch ${blockingBatch.displayNumber}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>
+              View active batch #{blockingBatch.displayNumber}
+            </button>
+          : <button type="button" onClick={() => openRecoverDialog(blockingBatch)}>Recover stuck batch #{blockingBatch.displayNumber}</button>}
+      </span>}
     </div>}
+
+    {recoverMessage && <div className="lr-bulk-message" role="status">{recoverMessage}</div>}
+
+    {/* Follow-up correction (orphaned extension batch recovery) — an
+        active/nonterminal batch must never become permanently invisible
+        just because its box was dismissed, or silently unrecoverable just
+        because it went stale. Every batch GET /extension-batches reports
+        as `recoverable` (hidden, stale, or both) gets a row here — this is
+        the ONLY place a hidden active batch is ever surfaced again. */}
+    {recoverableBatches.length > 0 && <section className="lr-hidden-batches-section" aria-label="Hidden or stuck active batches">
+      <p className="lr-hidden-batches-title">Hidden active batch{recoverableBatches.length === 1 ? "" : "es"}</p>
+      {recoverableBatches.map(batch => <div key={batch.batchId} className="lr-hidden-batch-row">
+        <span className="lr-hidden-batch-label">
+          Batch #{batch.displayNumber} — {batch.status}{batch.isHidden ? ", hidden" : ""}{batch.isStale ? ", stale" : ""} — {batch.listingCount} listing{batch.listingCount === 1 ? "" : "s"}
+        </span>
+        <button type="button" className="lr-hidden-batch-recover-button" onClick={() => openRecoverDialog(batch)}>Recover stuck batch</button>
+      </div>)}
+    </section>}
 
     {/* Multi-batch support — replaces the old single pairing strip with a
         grid of independent batch boxes (one per batch this session is
@@ -1248,6 +1416,16 @@ export default function ListingsReviewWorkspace() {
       onDismissBox={handleDismissBatchBox}
       onCopyCode={handleCopyPairingCode}
     />
+
+    {recoverDialogBatch && !recoverDialogLoading && <RecoverStuckBatchDialog
+      batch={recoverDialogBatch}
+      listings={recoverDialogListings}
+      stillActiveWarning={recoverStillActiveWarning}
+      recovering={recovering}
+      error={recoverError}
+      onKeepWaiting={closeRecoverDialog}
+      onRecover={handleRecoverBatch}
+    />}
 
     {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
 

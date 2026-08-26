@@ -61,6 +61,18 @@ describe("POST /api/extension/batch/items/[itemId]/result", () => {
     expect(JSON.parse((patchCall![1] as RequestInit).body as string).status).toBe("filling");
   });
 
+  it("REGRESSION (orphaned extension batch recovery): every genuine item-result report also touches the batch's own last_extension_activity_at — this IS the genuine-activity signal recovery eligibility is based on", async () => {
+    const token = await signBatchToken(BATCH_ID, 600);
+    await itemResultRoute(await requestWith({ status: "filling" }, token), params());
+    const activityPatch = supabaseRequest.mock.calls.find(c =>
+      (c[0] as string).startsWith("vinted_extension_batches?") && (c[0] as string).includes(`id=eq.${BATCH_ID}`)
+      && JSON.parse((c[1] as RequestInit).body as string).last_extension_activity_at,
+    );
+    expect(activityPatch).toBeDefined();
+    const body = JSON.parse((activityPatch![1] as RequestInit).body as string);
+    expect(new Date(body.last_extension_activity_at).getTime()).toBeGreaterThan(Date.now() - 5000);
+  });
+
   it("REGRESSION: on 'completed' with a vintedDraftId, sets listing_drafts.vinted_draft_created_at — only now, never earlier", async () => {
     const token = await signBatchToken(BATCH_ID, 600);
     await itemResultRoute(await requestWith({ status: "completed", vintedDraftId: "987654" }, token), params());

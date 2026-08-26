@@ -1174,7 +1174,7 @@ describe("Correction pass, generalised for multi-batch — resume tracking after
 
   it("on mount, resumes EVERY visible batch from an earlier session (not just one) — populates visibleBatchIds and batchMetaById from every {batchId, displayNumber} entry the resume endpoint returns", () => {
     expect(source).toContain('fetch("/api/listing-studio/extension-batches")');
-    expect(source).toContain("const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[] };");
+    expect(source).toContain("const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[]; recoverable?: RecoverableBatchInfo[] };");
     expect(source).toContain("for (const entry of body.batchIds) next.add(entry.batchId);");
     expect(source).toContain("for (const entry of body.batchIds) if (!next.has(entry.batchId)) next.set(entry.batchId, { displayNumber: entry.displayNumber, browserLabel: null });");
   });
@@ -1717,5 +1717,70 @@ describe("Multi-batch support, follow-up correction — box dismissal now ALSO d
     const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start) + 8);
     expect(fn).toContain('method: "PATCH"');
     expect(fn).not.toContain('method: "DELETE"');
+  });
+});
+
+describe("Follow-up correction (orphaned extension batch recovery) — Hidden active batch section + Recover stuck batch dialog", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("renders a Hidden active batch section whenever recoverableBatches is non-empty, offering a Recover stuck batch button per entry", () => {
+    expect(workspaceSource).toContain('recoverableBatches.length > 0 && <section className="lr-hidden-batches-section"');
+    expect(workspaceSource).toContain("recoverableBatches.map(batch =>");
+    expect(workspaceSource).toContain('<button type="button" className="lr-hidden-batch-recover-button" onClick={() => openRecoverDialog(batch)}>Recover stuck batch</button>');
+  });
+
+  it("REQUIREMENT: the mount-resume fetch also captures the recoverable field into state, independent of whether any batch is visible", () => {
+    const effectStart = workspaceSource.indexOf('const response = await fetch("/api/listing-studio/extension-batches");');
+    const effectBody = workspaceSource.slice(effectStart, workspaceSource.indexOf("})();", effectStart));
+    expect(effectBody).toContain("setRecoverableBatches(body.recoverable ?? []);");
+    // Captured BEFORE the early-return for an empty batchIds list — a
+    // resumed session with only hidden/stale batches (no ordinary visible
+    // ones at all) must still see the Hidden active batch section.
+    expect(effectBody.indexOf("setRecoverableBatches")).toBeLessThan(effectBody.indexOf("if (body.batchIds.length === 0) return;"));
+  });
+
+  it("openRecoverDialog fetches the batch's own current detail (never invents listing titles/counts) and computes completed/unfinished from real item statuses", () => {
+    const start = workspaceSource.indexOf("const openRecoverDialog = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start) + 8);
+    expect(fn).toContain("fetch(`/api/listing-studio/extension-batches/${info.batchId}`)");
+    expect(fn).toContain('item.status === "completed"');
+    expect(fn).toContain('item.status !== "completed" && item.status !== "failed" && item.status !== "cancelled"');
+  });
+
+  it("REQUIREMENT: handleRecoverBatch POSTs to the batch's own /recover endpoint with the exact force flag, never defaulting to a forced recovery", () => {
+    const start = workspaceSource.indexOf("const handleRecoverBatch = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, [recoverDialogBatch", start));
+    expect(fn).toContain("fetch(`/api/listing-studio/extension-batches/${recoverDialogBatch.batchId}/recover`");
+    expect(fn).toContain('method: "POST"');
+    expect(fn).toContain("body: JSON.stringify({ force })");
+  });
+
+  it("REQUIREMENT: a 409 stillActive response re-arms the dialog for an explicit stronger confirmation — never silently retries or force-recovers on its own", () => {
+    const start = workspaceSource.indexOf("const handleRecoverBatch = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, [recoverDialogBatch", start));
+    expect(fn).toContain("if (response.status === 409 && body.stillActive)");
+    expect(fn).toContain("setRecoverStillActiveWarning(true)");
+  });
+
+  it("REQUIREMENT: after a successful recovery, releases the batch from live tracking, clears any now-stale selection of the released drafts, and refreshes listings — never resends anything automatically", () => {
+    const start = workspaceSource.indexOf("const handleRecoverBatch = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, [recoverDialogBatch", start));
+    expect(fn).toContain("setVisibleBatchIds(current =>");
+    expect(fn).toContain("setBatchStatusById(current =>");
+    expect(fn).toContain("setBulkSelectedIds(current =>");
+    expect(fn).toContain("await Promise.all([loadListings(), refreshRecoverableBatches()]);");
+    expect(fn).not.toMatch(/handleSendToExtension\(/);
+  });
+
+  it("REQUIREMENT: the create-conflict error offers View active batch (visible+fresh) or Recover stuck batch (hidden/stale) inline, scoped to the real blockingBatch the server named", () => {
+    expect(workspaceSource).toContain("{blockingBatch && <span className=\"lr-blocking-batch-actions\">");
+    expect(workspaceSource).toContain("!blockingBatch.isHidden && !blockingBatch.isStale");
+    expect(workspaceSource).toContain("openRecoverDialog(blockingBatch)");
+  });
+
+  it("closeRecoverDialog never closes mid-request (a click-away or Keep waiting during an in-flight recovery is a no-op)", () => {
+    const start = workspaceSource.indexOf("const closeRecoverDialog = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("[recovering]);", start) + 14);
+    expect(fn).toContain("if (recovering) return;");
   });
 });

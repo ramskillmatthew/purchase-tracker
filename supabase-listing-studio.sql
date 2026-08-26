@@ -1836,3 +1836,161 @@ do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from anon; end if;
   if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_create_extension_batch(uuid, text, timestamptz, uuid[]) from authenticated; end if;
 end $$;
+
+-- ---------------------------------------------------------------------
+-- Orphaned extension batch recovery (follow-up correction)
+--
+-- Confirmed root cause of "a listing stays locked forever even though the
+-- extension has genuinely stopped": nothing in this app ever proactively
+-- flips a claimed/in_progress batch's status once its extension goes
+-- silent. The batch payload/photo/item-result routes all 410 or 409 once
+-- expires_at has passed, but NONE of them write status='expired' for a
+-- claimed/in_progress row when that happens (only the claim route's own
+-- lazy check does that, and only for a still-pending_claim row someone
+-- actually tries to claim again). A batch can therefore sit in
+-- pending_claim/claimed/in_progress indefinitely, still fully satisfying
+-- listing_studio_create_extension_batch's own active-batch lock condition
+-- (status not in ('completed','cancelled','expired')) — genuinely
+-- orphaned but structurally indistinguishable, at the database level,
+-- from one still being worked on this very second.
+--
+-- last_extension_activity_at is the new, EXTENSION-REPORT-driven signal
+-- this recovery path uses to tell the two apart — see
+-- app/api/extension/batch/heartbeat/route.ts and the item-result route's
+-- own touch of this column. Deliberately never written by any
+-- owner-authenticated (Listings Review polling) route — closing a browser
+-- tab must never look like abandonment, and reopening one must never look
+-- like fresh activity.
+alter table public.vinted_extension_batches add column if not exists last_extension_activity_at timestamptz;
+
+-- ---------------------------------------------------------------------
+-- listing_studio_recover_stuck_extension_batch — the ONE atomic,
+-- owner-scoped repair path for an orphaned batch. Mirrors
+-- listing_studio_create_extension_batch's own conventions exactly: a
+-- per-owner advisory xact lock, `for update` row locking before any read
+-- feeds a decision, and a raised, named exception (never a generic error)
+-- for every recognised refusal.
+--
+-- Safety invariants enforced HERE, at the single point of mutation, never
+-- merely by the calling route:
+--   - Ownership: the initial `for update` is itself scoped to
+--     `owner_id = p_owner_id` — a batch id belonging to a different owner
+--     simply doesn't match any row, and is reported identically to a
+--     genuinely nonexistent batch (BATCH_NOT_FOUND) — never a distinct
+--     "exists but isn't yours" signal that would leak another owner's
+--     batch's existence.
+--   - Never revives a genuinely active batch: if the batch is still
+--     pending_claim/claimed/in_progress, has not yet reached its own
+--     expires_at, AND has reported genuine extension activity within the
+--     last 10 minutes, ordinary recovery (p_force = false) is refused
+--     with BATCH_STILL_ACTIVE. p_force = true is the ONE deliberate
+--     override — the caller (the API route) only ever sets it from an
+--     explicit second confirmation the owner made after being shown this
+--     exact refusal, never automatically.
+--   - Never fabricates or destroys a completed result: every UPDATE
+--     below is structurally scoped to `status not in ('completed',
+--     'failed','cancelled')` — a completed item (with or without a
+--     vinted_draft_id) is never touched, regardless of p_force.
+--   - Idempotent: calling this again on an already-recovered batch (or
+--     one that resolved itself normally in the meantime) finds nothing
+--     left to release and returns was_noop = true rather than erroring
+--     or double-writing — safe against a double-click or a retried
+--     request.
+create or replace function public.listing_studio_recover_stuck_extension_batch(
+  p_owner_id uuid,
+  p_batch_id uuid,
+  p_force boolean default false
+)
+returns table(released_item_count integer, preserved_completed_count integer, batch_status text, was_noop boolean)
+language plpgsql
+as $$
+declare
+  v_batch record;
+  v_now timestamptz := now();
+  v_genuinely_active boolean;
+  v_released integer := 0;
+  v_preserved integer := 0;
+  v_noop boolean := false;
+  v_final_status text;
+begin
+  perform pg_advisory_xact_lock(hashtext(p_owner_id::text));
+
+  select * into v_batch
+  from public.vinted_extension_batches
+  where id = p_batch_id and owner_id = p_owner_id
+  for update;
+
+  if not found then
+    raise exception 'BATCH_NOT_FOUND' using errcode = 'P0002', detail = p_batch_id::text;
+  end if;
+
+  -- Lock the item rows too, in the SAME transaction, before anything below
+  -- reads or mutates them — a concurrent late extension report (the
+  -- item-result route's own PATCH) is forced to wait for this transaction
+  -- to finish, never interleave with it.
+  perform 1 from public.vinted_extension_batch_items where batch_id = p_batch_id for update;
+
+  v_genuinely_active := v_batch.status in ('pending_claim', 'claimed', 'in_progress')
+    and v_batch.expires_at > v_now
+    and v_batch.last_extension_activity_at is not null
+    and v_batch.last_extension_activity_at > v_now - interval '10 minutes';
+
+  if v_genuinely_active and not p_force then
+    raise exception 'BATCH_STILL_ACTIVE' using errcode = 'P0002', detail = p_batch_id::text;
+  end if;
+
+  select count(*) into v_preserved
+  from public.vinted_extension_batch_items
+  where batch_id = p_batch_id and status = 'completed' and vinted_draft_id is not null;
+
+  select count(*) into v_released
+  from public.vinted_extension_batch_items
+  where batch_id = p_batch_id and status not in ('completed', 'failed', 'cancelled');
+
+  if v_released = 0 and v_batch.status in ('completed', 'cancelled', 'expired') then
+    v_noop := true;
+    v_final_status := v_batch.status;
+  else
+    if v_batch.status not in ('completed', 'cancelled') then
+      update public.vinted_extension_batches
+      set status = 'cancelled', completed_at = coalesce(completed_at, v_now)
+      where id = p_batch_id;
+      v_final_status := 'cancelled';
+    else
+      v_final_status := v_batch.status;
+    end if;
+
+    -- Every nonterminal item — queued, preparing, filling, saving, or
+    -- paused (which also covers "waiting for manual reload": the
+    -- extension reports that wait as status='paused' with
+    -- current_step='WAITING_FOR_MANUAL_RELOAD' — see
+    -- vinted-draft-queue-extension/service-worker.js's
+    -- enterManualReloadWait) — is cancelled here. current_step/step_detail
+    -- are cleared so a recovered item can never keep showing a stale
+    -- "Uploading photo 8 of 8" line; error_code/error_message are set to a
+    -- clear, distinct marker so a recovery-cancelled item is never
+    -- confused with a genuine extension-reported failure.
+    update public.vinted_extension_batch_items
+    set status = 'cancelled',
+        completed_at = coalesce(completed_at, v_now),
+        current_step = null,
+        step_detail = null,
+        error_code = 'BATCH_RECOVERED',
+        error_message = 'This batch was recovered as stuck by the owner — the associated extension had stopped without reporting a final result.'
+    where batch_id = p_batch_id
+      and status not in ('completed', 'failed', 'cancelled');
+  end if;
+
+  released_item_count := v_released;
+  preserved_completed_count := v_preserved;
+  batch_status := v_final_status;
+  was_noop := v_noop;
+  return next;
+end;
+$$;
+
+revoke all on function public.listing_studio_recover_stuck_extension_batch(uuid, uuid, boolean) from public;
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_recover_stuck_extension_batch(uuid, uuid, boolean) from anon; end if;
+  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_recover_stuck_extension_batch(uuid, uuid, boolean) from authenticated; end if;
+end $$;

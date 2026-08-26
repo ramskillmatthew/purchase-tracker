@@ -34,6 +34,7 @@ export type Task = { id: string; owner_id: string; title: string; notes: string 
 
 export type SalesPlatform = "vinted" | "ebay" | "depop" | "other";
 export type SalesStatus = "completed" | "refunded" | "cancelled";
+export type SalesProcessStatus = "awaiting_dispatch" | "sent" | "delivered_awaiting_payout" | "completed" | "return_in_process" | "cancelled" | "returned_cancelled";
 export type SalesRevenueInputMode = "total" | "average" | "itemised";
 /** What happened to the linked purchase units at the moment a sale was cancelled — see supabase-sales-v3.sql. Never re-derive this from a purchase's CURRENT stock_status, which can legitimately change again later. */
 export type CancellationStockAction = "returned_to_stock" | "kept_out_of_stock";
@@ -56,6 +57,11 @@ export type SalesOrder = {
   platform_fees: number;
   postage: number;
   status: SalesStatus;
+  // Operational fulfilment state, deliberately separate from the financial
+  // completed/cancelled status above. Optional until supabase-sales-v4-
+  // process-status.sql has been applied; null preserves ambiguous legacy
+  // cancellations without inventing a return event.
+  process_status?: SalesProcessStatus | null;
   // Both null until the order is cancelled, then set together and never
   // changed again — see supabase-sales-v3.sql's cancel_completed_sales.
   cancelled_at: string | null;

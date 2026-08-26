@@ -14,6 +14,7 @@ import { LISTING_PROMPT_VERSIONS } from "@/lib/listing-studio/prompt-versions";
 import { LISTING_SCHEMA_VERSIONS } from "@/lib/listing-studio/schema-versions";
 import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason } from "@/lib/listing-studio/vinted-category-assignment";
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
+import { canonicaliseVintedBrand } from "@/lib/listing-studio/vinted-brand-canonicalisation";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 import type { VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 
@@ -157,7 +158,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
     // persisted, displayed in Edit Fields, and re-derived from on every
     // future regeneration.
     const structuredFields: GeneratedListingFields = {
-      brand: fields.brand.value,
+      brand: canonicaliseVintedBrand(fields.brand.value),
       model: normaliseFootwearListingText(fields.model.value, draftItemFamily, finalVintedAudience),
       productType: normaliseFootwearListingText(fields.productType.value, draftItemFamily, finalVintedAudience),
       colours: fields.colours.value, material: fields.material.value, ukSize: finalUkSize, sku: fields.sku.value,

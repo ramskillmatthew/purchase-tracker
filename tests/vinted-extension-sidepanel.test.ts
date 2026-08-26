@@ -474,6 +474,100 @@ describe("Option 4 redesign — paused batch", () => {
   });
 });
 
+// Follow-up correction (native browser reload-confirmation bug) — proves
+// the REAL side panel, rendered against the REAL sidepanel.html/js, shows
+// the required prominent warning banner and "Waiting for manual reload"
+// item status whenever state.batch.pauseReason is "manual_reload_required"
+// (see shared/queue-state.js's own MANUAL_RELOAD_WARNING_MESSAGE /
+// isManualReloadPause), offers "Try reload again" (never the dead-end
+// generic Resume), and that clicking it sends exactly RETRY_MANUAL_RELOAD.
+describe("Option 4 redesign — manual browser reload (native browser reload-confirmation bug)", () => {
+  function manualReloadState(itemOverrides: Record<string, unknown> = {}) {
+    const items = [
+      { itemId: "i1", queuePosition: 0, title: "Hoka Clifton 9", sku: "AA1", status: ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD, errorCode: null, errorMessage: null, vintedDraftId: null, startedAt: "2026-08-11T10:00:00.000Z", completedAt: null, currentStep: null, lastCompletedStep: "UPLOAD_PHOTOS", attemptCount: 1, ...itemOverrides },
+    ];
+    return fullBatchState({
+      items,
+      batch: {
+        batchId: "batch-1", running: true, paused: true, pauseReason: "manual_reload_required",
+        account: { memberId: "1", displayName: "shopfront_uk" },
+        pendingConfirmation: null, accountIdentificationError: null, pendingAccountChange: null,
+        vintedTabId: 1, pendingSave: null, manualReload: { itemId: "i1", tabId: 1, startedAt: "2026-08-11T10:00:05.000Z", attempts: 1, lastAttemptAt: "2026-08-11T10:00:05.000Z" },
+        items,
+      },
+    });
+  }
+
+  it("REQUIREMENT: shows the exact required warning text, prominently, as a warning banner", async () => {
+    const { document } = await loadSidepanel(type => (type === PANEL_TO_WORKER.GET_STATE ? { state: manualReloadState() } : {}));
+    const banner = document.getElementById("manual-reload-banner") as HTMLElement;
+    expect(banner.hidden).toBe(false);
+    expect(document.getElementById("manual-reload-message")!.textContent).toBe("Browser needs manual reload — click Reload in the Vinted confirmation box to continue.");
+  });
+
+  it("the banner is hidden when no manual reload is pending", async () => {
+    const { document } = await loadSidepanel(type => (type === PANEL_TO_WORKER.GET_STATE ? { state: fullBatchState() } : {}));
+    expect((document.getElementById("manual-reload-banner") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("REQUIREMENT: the affected item's own status pill reads 'Waiting for manual reload' — never left showing a stale prior status", async () => {
+    const { document } = await loadSidepanel(type => (type === PANEL_TO_WORKER.GET_STATE ? { state: manualReloadState() } : {}));
+    expect(document.querySelector(".status-pill")!.textContent).toContain("Waiting for manual reload");
+  });
+
+  it("REQUIREMENT: never shown as FAILED — no Retry action, no error row, for the waiting item", async () => {
+    const { document } = await loadSidepanel(type => (type === PANEL_TO_WORKER.GET_STATE ? { state: manualReloadState() } : {}));
+    expect(document.querySelector(".queue-item-error-row")).toBeNull();
+    expect(document.querySelector(".queue-item-retry")).toBeNull();
+  });
+
+  it("the dead-end generic Resume button is not offered during a manual-reload pause — only 'Try reload again' is", async () => {
+    const { document } = await loadSidepanel(type => (type === PANEL_TO_WORKER.GET_STATE ? { state: manualReloadState() } : {}));
+    expect((document.getElementById("resume-button") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("retry-manual-reload") as HTMLElement).hidden).toBe(false);
+  });
+
+  it("REGRESSION: an ordinary pause (e.g. a lost Vinted tab) still offers the generic Resume button as before — this feature never hides it for an unrelated pause reason", async () => {
+    const items = [{ itemId: "i1", queuePosition: 0, title: "A", sku: "S1", status: ITEM_STATUSES.QUEUED, errorCode: null, errorMessage: null, vintedDraftId: null, startedAt: null, completedAt: null, currentStep: null, lastCompletedStep: null, attemptCount: 0 }];
+    const { document } = await loadSidepanel(type =>
+      type === PANEL_TO_WORKER.GET_STATE
+        ? { state: fullBatchState({ items, batch: { batchId: "batch-1", running: true, paused: true, pauseReason: "vinted_tab_lost", account: { memberId: "1", displayName: "shopfront_uk" }, pendingConfirmation: null, accountIdentificationError: null, pendingAccountChange: null, vintedTabId: null, pendingSave: null, manualReload: null, items } }) }
+        : {},
+    );
+    expect((document.getElementById("resume-button") as HTMLElement).hidden).toBe(false);
+    expect((document.getElementById("manual-reload-banner") as HTMLElement).hidden).toBe(true);
+  });
+
+  it('REQUIREMENT: clicking "Try reload again" sends exactly PANEL_TO_WORKER.RETRY_MANUAL_RELOAD, and nothing else', async () => {
+    const sent: string[] = [];
+    const { document } = await loadSidepanel(type => {
+      sent.push(type);
+      if (type === PANEL_TO_WORKER.GET_STATE) return { state: manualReloadState() };
+      if (type === PANEL_TO_WORKER.RETRY_MANUAL_RELOAD) return { state: manualReloadState() };
+      return {};
+    });
+    const button = document.getElementById("retry-manual-reload") as HTMLButtonElement;
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sent.filter(t => t === PANEL_TO_WORKER.RETRY_MANUAL_RELOAD).length).toBe(1);
+  });
+
+  it("REQUIREMENT: the Live activity feed shows the exact warning text as a prominent WARNING entry (tone-warning), never plain progress", async () => {
+    const queuedItems = [{ itemId: "i1", queuePosition: 0, title: "Hoka Clifton 9", sku: "AA1", status: ITEM_STATUSES.QUEUED, errorCode: null, errorMessage: null, vintedDraftId: null, startedAt: null, completedAt: null, currentStep: null, lastCompletedStep: null, attemptCount: 0 }];
+    const { document, fireStorageChanged } = await loadSidepanel(type =>
+      type === PANEL_TO_WORKER.GET_STATE
+        ? { state: fullBatchState({ items: queuedItems, batch: { batchId: "batch-1", running: true, paused: false, account: { memberId: "1", displayName: "shopfront_uk" }, pendingConfirmation: null, accountIdentificationError: null, pendingAccountChange: null, vintedTabId: 1, pendingSave: null, manualReload: null, items: queuedItems } }) }
+        : {},
+    );
+
+    fireStorageChanged(manualReloadState());
+    const warningEntry = Array.from(document.querySelectorAll(".activity-entry")).find(el => el.textContent!.includes("Browser needs manual reload"));
+    expect(warningEntry).toBeDefined();
+    expect(warningEntry!.className).toContain("tone-warning");
+    expect(warningEntry!.textContent).toContain("Browser needs manual reload — click Reload in the Vinted confirmation box to continue.");
+  });
+});
+
 describe("Option 4 redesign — completed batch (State D)", () => {
   function completedState(overrides: Array<Record<string, unknown>> = []) {
     const items = overrides.length > 0 ? overrides : [

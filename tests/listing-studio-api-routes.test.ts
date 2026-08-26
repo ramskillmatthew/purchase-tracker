@@ -24,7 +24,28 @@ describe("app/api/listing-studio/uploads/route.ts — upload session", () => {
   const source = read("app/api/listing-studio/uploads/route.ts");
 
   it("validates the request body with the strict zod schema", () => {
-    expect(source).toContain("uploadSessionRequestSchema.parse(await request.json())");
+    expect(source).toContain("uploadSessionRequestSchema.parse(rawBody)");
+  });
+
+  it("REQUIREMENT (large-batch upload fix): still safely rejects more than MAX_FILES_PER_SELECTION files in one direct request, with a clear structured reason rather than a raw Zod 'Invalid request.'", () => {
+    expect(source).toContain("MAX_FILES_PER_SELECTION");
+    expect(source).toContain('"too_many_files"');
+    const precheckBlock = source.slice(source.indexOf("rawBody as { files?: unknown }"), source.indexOf("const { draftId, files } = uploadSessionRequestSchema.parse"));
+    expect(precheckBlock).toContain("> MAX_FILES_PER_SELECTION");
+    expect(precheckBlock).toContain("failure(400,");
+  });
+
+  it("every structured failure response includes a machine-readable `reason` the client can classify (hard-stop vs. per-chunk), never just a bare message", () => {
+    for (const reason of ["too_many_files", "file_too_large", "batch_too_large", "workspace_capacity_exceeded", "group_limit_exceeded", "storage_unavailable"]) {
+      expect(source).toContain(`"${reason}"`);
+    }
+    expect(source).toContain("function failure(status: number, reason: UploadFailureReason, error: string) {");
+    expect(source).toContain("return NextResponse.json({ error, reason }, { status });");
+  });
+
+  it("the workspace-capacity message states exactly how many more photos fit, not just the current count", () => {
+    expect(source).toContain("const remaining = Math.max(0, MAX_TOTAL_ACTIVE_UPLOAD_FILES - activeImages.length);");
+    expect(source).toContain("Only ${remaining} more photo${remaining === 1 ? \"\" : \"s\"} can be added because this workspace allows ${MAX_TOTAL_ACTIVE_UPLOAD_FILES} active photos.");
   });
 
   it("enforces the individual file size, batch size, and workspace-wide active-file limits before creating anything", () => {
@@ -43,9 +64,9 @@ describe("app/api/listing-studio/uploads/route.ts — upload session", () => {
     expect(source).toContain("{ imageId: entry.imageId, uploadUrl: entry.uploadUrl, storagePath: entry.storagePath }");
   });
 
-  it("maps a missing bucket to a clear 503 setup message rather than a generic failure", () => {
+  it("maps a missing bucket to a clear 503 setup message (with a storage_unavailable reason) rather than a generic failure", () => {
     expect(source).toContain("StorageBucketMissingError");
-    expect(source).toMatch(/status:\s*503/);
+    expect(source).toContain('failure(503, "storage_unavailable", error.message)');
   });
 
   it("verifies a client-supplied draftId belongs to this owner before appending to it", () => {
@@ -607,6 +628,13 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
     for (const field of ["brand:", "model:", "productType:", "colours:", "material:", "ukSize:", "sku:", "generatedTitle,", "generatedDescription,"]) {
       expect(responseBlock).toContain(field);
     }
+  });
+
+  it("REGRESSION: canonicalises the AI-reported brand (e.g. 'On' -> 'On Running') deterministically before it is used for title/description/category/persistence — correctness must not depend solely on the prompt", () => {
+    expect(source).toContain('import { canonicaliseVintedBrand } from "@/lib/listing-studio/vinted-brand-canonicalisation";');
+    const structuredFieldsIndex = source.indexOf("const structuredFields: GeneratedListingFields = {");
+    const structuredFieldsBlock = source.slice(structuredFieldsIndex, source.indexOf("};", structuredFieldsIndex));
+    expect(structuredFieldsBlock).toContain("brand: canonicaliseVintedBrand(fields.brand.value),");
   });
 
   it("catches everything through safeApiError, matching every other route in this feature", () => {

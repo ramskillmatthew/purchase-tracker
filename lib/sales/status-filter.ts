@@ -14,20 +14,22 @@ import type { SalesOrder, SalesStatus } from "@/lib/types";
  * under "All" — never counted as "Completed" — so a future refund feature
  * can rely on that boundary already being correct.
  */
-export type SalesStatusFilter = "completed" | "cancelled" | "all";
+export type SalesStatusFilter = "pending" | "completed" | "cancelled" | "all";
 
 export const salesStatusFilters: { value: SalesStatusFilter; label: string }[] = [
+  { value: "pending", label: "Pending" },
   { value: "completed", label: "Completed" },
   { value: "cancelled", label: "Cancelled" },
   { value: "all", label: "All" },
 ];
 
 export function parseSalesStatusFilter(value: string | null | undefined): SalesStatusFilter {
-  return value === "cancelled" || value === "all" ? value : "completed";
+  return value === "pending" || value === "cancelled" || value === "all" ? value : "completed";
 }
 
 export function matchesSalesStatusFilter(order: Pick<SalesOrder, "status">, filter: SalesStatusFilter): boolean {
   if (filter === "all") return true;
+  if (filter === "pending") return order.status === "completed";
   if (filter === "cancelled") return order.status === "cancelled";
   return order.status === "completed";
 }

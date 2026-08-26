@@ -315,8 +315,224 @@ function buildMultiField(doc: Document, container: HTMLElement, { idPrefix, open
 function buildColourField(doc: Document, container: HTMLElement, colours: Array<{ id: number; name: string }>) {
   return buildMultiField(doc, container, { idPrefix: "color", openId: "color", openTestId: "color-select-dropdown-input", openPlaceholder: "Select up to 2 colours", contentTestId: "color-select-dropdown-content", values: colours });
 }
+
+/**
+ * Builds an EMPTY colour dropdown (opener + content, matching the
+ * verified live `color-select-dropdown-input`/`color-select-dropdown-content`
+ * shape — re-confirmed live this session, unchanged by this fix), with an
+ * `addRow` helper for constructing duplicate-representation scenarios
+ * directly — used by the colour duplicate-representation-collapsing
+ * regression tests below, mirroring addSizeOption's own role in the
+ * Size duplicate-collapsing tests above.
+ *
+ * Two rows added with the SAME `id` share ONE underlying checked-state
+ * (a `Set<id>` closed over by every row's click handler) and the SAME
+ * joined display value — exactly Vinted's own real behaviour for a
+ * Suggested chip mirroring its own full-list twin (per this fix's own
+ * disclosed live-verification limitation: no authenticated session ever
+ * rendered a real Suggested section this session, since Vinted appears to
+ * compute it only once a draft is genuinely saved — see
+ * resolveDuplicateOptionMatches's own top comment in form-steps.js for the
+ * full disclosure). Two rows added with DIFFERENT ids are, by
+ * construction, genuinely different colours and never share state — used
+ * for the "genuinely conflicting" AMBIGUOUS regression test.
+ */
+function buildDuplicateColourField(doc: Document, container: HTMLElement) {
+  const { opener, content } = buildDialogShell(doc, container, {
+    openId: "color", openTestId: "color-select-dropdown-input", openPlaceholder: "Select up to 2 colours",
+    contentTestId: "color-select-dropdown-content",
+  });
+  const checkedIds = new Set<number>();
+  const indicatorsById = new Map<number, HTMLInputElement[]>();
+  const nameById = new Map<number, string>();
+
+  function refreshDisplay() {
+    opener.value = [...checkedIds].map(id => nameById.get(id)!).filter(Boolean).join(", ");
+  }
+  function refreshIndicators(id: number) {
+    const checked = checkedIds.has(id);
+    for (const indicator of indicatorsById.get(id) ?? []) indicator.checked = checked;
+  }
+
+  /**
+   * `nested: true` mirrors addSizeOption's own "data-testid lives on a
+   * WRAPPER, not the row itself" case — proves resolveDuplicateOptionMatches's
+   * closest() lookup collapses this shape too, not just a bare-id row.
+   */
+  function addRow({ name, id, testId, sectionHeading, nested = false, removeSelfOnSelect = false }: { name: string; id: number; testId: string; sectionHeading?: string; nested?: boolean; removeSelfOnSelect?: boolean }) {
+    if (sectionHeading) {
+      const heading = doc.createElement("div");
+      heading.textContent = sectionHeading;
+      content.appendChild(heading);
+    }
+    nameById.set(id, name);
+
+    const row = doc.createElement("div");
+    row.setAttribute("role", "button"); // verified live shape — see form-steps.js's OPTION_ROW_ROLE_SELECTOR comment
+    row.textContent = name;
+    const indicator = doc.createElement("input") as HTMLInputElement;
+    indicator.type = "checkbox";
+    indicator.checked = checkedIds.has(id);
+    row.appendChild(indicator);
+
+    if (nested) {
+      const wrapper = doc.createElement("div");
+      wrapper.setAttribute("data-testid", testId);
+      wrapper.appendChild(row);
+      content.appendChild(wrapper);
+    } else {
+      row.setAttribute("data-testid", testId);
+      content.appendChild(row);
+    }
+
+    row.addEventListener("click", () => {
+      if (checkedIds.has(id)) checkedIds.delete(id); else checkedIds.add(id);
+      refreshIndicators(id);
+      refreshDisplay();
+      // content stays open — verified live; closes only on an outside click (see buildDialogShell)
+      // Simulates the Suggested chip vanishing on rerender once its
+      // colour is picked — proves resolveDuplicateOptionMatches/
+      // findOptionRows never hold a stale reference: the full-list twin
+      // (sharing the same id) is what confirmation must fall back to.
+      if (removeSelfOnSelect && checkedIds.has(id)) (nested ? row.parentElement! : row).remove();
+    });
+
+    if (!indicatorsById.has(id)) indicatorsById.set(id, []);
+    indicatorsById.get(id)!.push(indicator);
+    return row;
+  }
+
+  return { opener, content, addRow, isChecked: (id: number) => checkedIds.has(id) };
+}
 function buildMaterialField(doc: Document, container: HTMLElement, materials: Array<{ id: number; name: string }>) {
   return buildMultiField(doc, container, { idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material", contentTestId: "category-material-multi-list-content", values: materials });
+}
+
+/**
+ * Simulates Vinted's Material/Colour picker as a VIRTUALISED/scrollable
+ * list — only a `windowSize`-sized slice of `allValues` is ever mounted in
+ * the DOM at once, keyed off `scrollRegion.scrollTop`, exactly like a real
+ * windowing library (react-window and similar). `clientHeight`/`scrollHeight`
+ * are overridden via Object.defineProperty since jsdom implements no real
+ * layout engine and would otherwise report 0 for both, which
+ * scrollDropdownForOption's own scrollable-container detection depends on.
+ * Every scroll REBUILDS the rendered option nodes from scratch (never
+ * reuses old elements) — each carries a `data-render-generation` marker
+ * purely so a test can prove a matched element came from the LATEST
+ * render, never a stale one from before the scroll that revealed it.
+ */
+function buildVirtualizedMultiField(doc: Document, container: HTMLElement, { idPrefix, openId, openTestId, openPlaceholder, contentTestId, allValues, windowSize = 6, itemHeight = 40 }: { idPrefix: string; openId: string; openTestId: string; openPlaceholder: string; contentTestId: string; allValues: Array<{ id: number; name: string }>; windowSize?: number; itemHeight?: number }) {
+  const { opener, content } = buildDialogShell(doc, container, { openId, openTestId, openPlaceholder, contentTestId });
+
+  const scrollRegion = doc.createElement("div");
+  scrollRegion.setAttribute("data-testid", `${idPrefix}-options-scroll-region`);
+  content.appendChild(scrollRegion);
+
+  const viewportHeight = windowSize * itemHeight;
+  const totalHeight = allValues.length * itemHeight;
+  Object.defineProperty(scrollRegion, "clientHeight", { value: viewportHeight, configurable: true });
+  Object.defineProperty(scrollRegion, "scrollHeight", { value: totalHeight, configurable: true });
+
+  const checkedIds = new Set<number>();
+  let renderGeneration = 0;
+
+  function render() {
+    renderGeneration += 1;
+    scrollRegion.innerHTML = "";
+    const maxStart = Math.max(0, allValues.length - windowSize);
+    const startIndex = Math.max(0, Math.min(Math.floor(scrollRegion.scrollTop / itemHeight), maxStart));
+    const endIndex = Math.min(allValues.length, startIndex + windowSize);
+    for (let i = startIndex; i < endIndex; i++) {
+      const { id, name } = allValues[i];
+      const optionEl = doc.createElement("div");
+      optionEl.id = `${idPrefix}-${id}`;
+      optionEl.setAttribute("role", "button");
+      optionEl.setAttribute("data-testid", `${idPrefix}-${id}`);
+      optionEl.setAttribute("data-render-generation", String(renderGeneration));
+      optionEl.textContent = name;
+      const checkbox = doc.createElement("input") as HTMLInputElement;
+      checkbox.type = "checkbox";
+      checkbox.id = `${idPrefix}-checkbox-${id}`;
+      checkbox.checked = checkedIds.has(id);
+      optionEl.addEventListener("click", () => {
+        if (checkedIds.has(id)) checkedIds.delete(id); else checkedIds.add(id);
+        checkbox.checked = checkedIds.has(id);
+        opener.value = allValues.filter(v => checkedIds.has(v.id)).map(v => v.name).join(", ");
+      });
+      scrollRegion.append(optionEl, checkbox);
+    }
+  }
+  scrollRegion.addEventListener("scroll", render);
+  render(); // initial render — only the first window
+
+  return { opener, content, scrollRegion, getRenderGeneration: () => renderGeneration };
+}
+
+/**
+ * A second, DELIBERATELY DIFFERENT plausible virtualised Material/Colour
+ * shape — proves discovery no longer depends on any ONE guessed structure,
+ * the same class of assumption that produced the confirmed regression
+ * ("NOT_FOUND: material option exactly matching 'Suede'" despite it being
+ * visibly present and selectable). Differs from buildVirtualizedMultiField
+ * in every dimension the fix's own comment calls out:
+ *   - no data-testid on any row at all (the legacy selector source finds
+ *     NOTHING here — only the generic role-based fallback can);
+ *   - role="option", not "button";
+ *   - the checkbox NESTED inside the row, not a sibling;
+ *   - the row's own accessible name is deliberately GENERIC/WRONG
+ *     (aria-label="Option") — only extracting the row's actual VISIBLE
+ *     text (never the computed accessible name) can find the target.
+ * This is not a claim about Vinted's real current structure — no
+ * authenticated session was available to capture it directly this session
+ * (see this fix's own top-level report) — it is a plausible alternative
+ * shape used specifically to prove structure-agnosticism.
+ */
+function buildDriftedVirtualizedMultiField(doc: Document, container: HTMLElement, { idPrefix, openId, openTestId, openPlaceholder, contentTestId, allValues, windowSize = 6, itemHeight = 40 }: { idPrefix: string; openId: string; openTestId: string; openPlaceholder: string; contentTestId: string; allValues: Array<{ id: number; name: string }>; windowSize?: number; itemHeight?: number }) {
+  const { opener, content } = buildDialogShell(doc, container, { openId, openTestId, openPlaceholder, contentTestId });
+
+  const scrollRegion = doc.createElement("div");
+  content.appendChild(scrollRegion);
+
+  const viewportHeight = windowSize * itemHeight;
+  const totalHeight = allValues.length * itemHeight;
+  Object.defineProperty(scrollRegion, "clientHeight", { value: viewportHeight, configurable: true });
+  Object.defineProperty(scrollRegion, "scrollHeight", { value: totalHeight, configurable: true });
+
+  const checkedIds = new Set<number>();
+  let renderGeneration = 0;
+
+  function render() {
+    renderGeneration += 1;
+    scrollRegion.innerHTML = "";
+    const maxStart = Math.max(0, allValues.length - windowSize);
+    const startIndex = Math.max(0, Math.min(Math.floor(scrollRegion.scrollTop / itemHeight), maxStart));
+    const endIndex = Math.min(allValues.length, startIndex + windowSize);
+    for (let i = startIndex; i < endIndex; i++) {
+      const { id, name } = allValues[i];
+      const row = doc.createElement("li"); // deliberately no data-testid at all
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-label", "Option"); // deliberately NOT the material's own name
+      row.setAttribute("data-render-generation", String(renderGeneration));
+      row.setAttribute("data-option-id", String(id));
+      const label = doc.createElement("span");
+      label.textContent = name; // the row's real VISIBLE text
+      const checkbox = doc.createElement("input") as HTMLInputElement;
+      checkbox.type = "checkbox";
+      checkbox.setAttribute("aria-label", "Toggle"); // generic — never the material name either
+      checkbox.checked = checkedIds.has(id);
+      row.append(checkbox, label); // checkbox NESTED, not a sibling
+      row.addEventListener("click", () => {
+        if (checkedIds.has(id)) checkedIds.delete(id); else checkedIds.add(id);
+        checkbox.checked = checkedIds.has(id);
+        opener.value = allValues.filter(v => checkedIds.has(v.id)).map(v => v.name).join(", ");
+      });
+      scrollRegion.appendChild(row);
+    }
+  }
+  scrollRegion.addEventListener("scroll", render);
+  render();
+
+  return { opener, content, scrollRegion, getRenderGeneration: () => renderGeneration };
 }
 
 /**
@@ -795,7 +1011,16 @@ describe("runItem — each missing/ambiguous field fails safely, never partially
     const result = await runItem(validItem({ materials: ["Suede"] }), vi.fn((s, e = {}) => ({ status: s, ...e })), deps); // fixture only has Mesh/Leather
     expect(result.status).toBe("failed");
     expect(result.errorCode).toBe("SET_MATERIALS");
-  }, 30000); // no match ever appears — 3 retries x the full option-wait budget
+    // 3 retries x (the full option-wait budget + the virtualised-dropdown
+    // scroll-search fallback's own bounded search — see
+    // resolveMultiOptionWithScroll/scrollDropdownForOption in
+    // form-steps.js) — this fixture's material picker isn't virtualised,
+    // so the scroll fallback finds nothing to scroll and gives up quickly
+    // each time, but that bounded search still adds real (if small) time
+    // on top of the pre-existing per-attempt wait, so this needs more
+    // headroom than the otherwise-identical SET_SIZE test just above,
+    // which the scroll fix never touches.
+  }, 45000);
 });
 
 describe("runItem — CAPTCHA / login-required stop the item entirely, before any interaction", () => {
@@ -2327,6 +2552,184 @@ describe("stepSelectColours — multi-select RECONCILIATION, idempotent retry, n
   });
 });
 
+// Follow-up correction (colour duplicate-representation collapsing) — live
+// failure: `AMBIGUOUS: color option exactly matching "Mustard" (2
+// matches)` / "Light blue" (2 matches). Vinted renders the SAME logical
+// colour once under a "Suggested" section and again in the full list; both
+// are genuine exact-text matches, not a fuzzy-matching problem. See
+// form-steps.js's own resolveDuplicateOptionMatches/extractOptionEntityId
+// top comment for the full root-cause writeup, including the disclosed
+// live-verification limitation (no authenticated session this session
+// ever rendered a real Suggested colour section — it appears to be
+// computed only once a draft is genuinely saved).
+describe("stepSelectColours — duplicate-representation collapsing (follow-up correction: AMBIGUOUS false positive on a colour Vinted lists twice)", () => {
+  it('REGRESSION: "Mustard" appears once under Suggested and once in the full list — collapses into one logical colour and succeeds, preferring the Suggested copy', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    const suggested = colourField.addRow({ name: "Mustard", id: 29, testId: "color-suggestions-option-29", sectionHeading: "Suggested" });
+    const full = colourField.addRow({ name: "Mustard", id: 29, testId: "color-29", sectionHeading: "All colours" });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Mustard");
+    expect((suggested.querySelector("input") as HTMLInputElement).checked).toBe(true); // the Suggested copy was the one actually clicked
+    expect((full.querySelector("input") as HTMLInputElement).checked).toBe(true); // mirrored via shared underlying state — never independently toggled
+  });
+
+  it('REGRESSION: "Light blue" appears in both sections — selection succeeds', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Light blue", id: 15, testId: "color-suggestions-option-15", sectionHeading: "Suggested" });
+    colourField.addRow({ name: "Light blue", id: 15, testId: "color-15", sectionHeading: "All colours" });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Light blue"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Light blue");
+  });
+
+  it('REGRESSION: a two-colour listing ("Light blue" + "Grey") selects both exactly once, even though "Light blue" has a duplicate representation', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    const suggestedLightBlue = colourField.addRow({ name: "Light blue", id: 15, testId: "color-suggestions-option-15", sectionHeading: "Suggested" });
+    colourField.addRow({ name: "Light blue", id: 15, testId: "color-15", sectionHeading: "All colours" });
+    const greyClicks = { count: 0 };
+    const grey = colourField.addRow({ name: "Grey", id: 3, testId: "color-3" });
+    grey.addEventListener("click", () => { greyClicks.count += 1; });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Light blue", "Grey"] }), deps);
+
+    expect(result.ok).toBe(true);
+    const finalValues = (doc.getElementById("color") as HTMLInputElement).value.split(", ").sort();
+    expect(finalValues).toEqual(["Grey", "Light blue"]);
+    expect(greyClicks.count).toBe(1); // clicked exactly once — never twice
+    expect((suggestedLightBlue.querySelector("input") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("REGRESSION: Suggested section absent — the plain full-list option still works exactly as before", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-29" }); // only ONE representation — no duplication at all
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Mustard");
+  });
+
+  it("REGRESSION: the Suggested row disappears from the DOM immediately after being clicked (a real rerender) — fresh DOM re-querying against the surviving full-list twin still confirms selection", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-suggestions-option-29", sectionHeading: "Suggested", removeSelfOnSelect: true });
+    const full = colourField.addRow({ name: "Mustard", id: 29, testId: "color-29", sectionHeading: "All colours" });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(doc.querySelector('[data-testid="color-suggestions-option-29"]')).toBeNull(); // genuinely gone, not just hidden
+    expect((full.querySelector("input") as HTMLInputElement).checked).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Mustard");
+  });
+
+  it("REGRESSION: an already-selected duplicate colour is idempotent — the picker is never even opened, no row is clicked", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-suggestions-option-29", sectionHeading: "Suggested" });
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-29", sectionHeading: "All colours" });
+    (doc.getElementById("color") as HTMLInputElement).value = "Mustard"; // already correct, from a previous attempt
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(colourField.content.hidden).toBe(true); // never opened
+  });
+
+  it("REGRESSION: two GENUINELY conflicting exact matches (different underlying colour ids) still return AMBIGUOUS — never guessed, full diagnostics reported", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-suggestions-option-29", sectionHeading: "Suggested" });
+    colourField.addRow({ name: "Mustard", id: 501, testId: "color-501", sectionHeading: "All colours (a genuinely different swatch)" });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/AMBIGUOUS/);
+    expect(result.reason).toMatch(/optionId=29/);
+    expect(result.reason).toMatch(/optionId=501/);
+    expect(result.reason).toMatch(/2 matches/);
+  });
+
+  it("REGRESSION: an unresolvable id on one candidate (no trailing digits at all) remains AMBIGUOUS — never assumed equal to the recognised candidate", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-29" });
+    colourField.addRow({ name: "Mustard", id: 30, testId: "color-suggestions-option-mustard", sectionHeading: "Suggested" }); // no trailing digits — unrecognised shape
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/AMBIGUOUS/);
+    expect(result.reason).toMatch(/optionId=29/); // the recognised candidate
+    expect(result.reason).toMatch(/optionId=unknown/); // the unrecognised shape — never guessed to also be 29
+  });
+
+  it("REGRESSION: nested matching elements collapse into one option too — the data-testid lives on a WRAPPER around the row, not the row itself", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    const nested = colourField.addRow({ name: "Mustard", id: 29, testId: "color-suggestions-option-29", sectionHeading: "Suggested", nested: true });
+    colourField.addRow({ name: "Mustard", id: 29, testId: "color-29", sectionHeading: "All colours" });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem({ colours: ["Mustard"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((nested.querySelector("input") as HTMLInputElement).checked).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Mustard");
+  });
+
+  it("REGRESSION: publishing remains impossible, and processing continues on to Material, through a full happy-path run past a duplicate-but-equivalent colour", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["colour"]) });
+    attachCategoryDependents(categoryField);
+    const colourField = buildDuplicateColourField(doc, doc.body);
+    colourField.addRow({ name: "Black", id: 1, testId: "color-suggestions-option-1", sectionHeading: "Suggested" });
+    colourField.addRow({ name: "Black", id: 1, testId: "color-1", sectionHeading: "All colours" });
+    const uploadButton = doc.querySelector('[data-testid="upload-form-save-button"]') as HTMLButtonElement;
+    const uploadClicks = vi.fn();
+    uploadButton.addEventListener("click", uploadClicks);
+    const saveDraftButton = doc.querySelector('[data-testid="upload-form-save-draft-button"]') as HTMLButtonElement;
+    const saveDraftClicks = vi.fn();
+    saveDraftButton.addEventListener("click", saveDraftClicks);
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await runItem(validItem({ colours: ["Black"] }), vi.fn((s, e = {}) => ({ status: s, ...e })), deps);
+
+    expect(result.status).toBe("saving");
+    expect((result as { pending?: boolean }).pending).toBe(true);
+    expect((doc.getElementById("color") as HTMLInputElement).value).toBe("Black");
+    expect((doc.getElementById("material") as HTMLInputElement).value).toBe("Mesh"); // processing continued past Colours to Materials
+    expect(saveDraftClicks).toHaveBeenCalledTimes(1); // Save Draft is the only permitted final action
+    expect(uploadClicks).not.toHaveBeenCalled(); // Upload/publish is never clicked
+  }, 20000);
+});
+
 describe("stepSelectMaterials — shares stepSelectColours' verified reconciliation logic (root-scoping rewrite)", () => {
   it("REGRESSION: an already-correct material set is left untouched — the picker is never opened", async () => {
     const { doc, dom, categoryField, materialField } = buildMockVintedPage();
@@ -2336,6 +2739,306 @@ describe("stepSelectMaterials — shares stepSelectColours' verified reconciliat
     const result = await stepSelectMaterials(doc.body, validItem(), deps); // validItem().materials = ["Mesh"]
     expect(result.ok).toBe(true);
     expect(materialField!.content.hidden).toBe(true);
+  });
+});
+
+// ---- Virtualised/scrollable dropdown traversal (BUG FIX: valid materials
+// like "Suede"/"Mesh" wrongly reported NOT_FOUND) ----------------------------
+//
+// Confirmed root cause: both options genuinely exist and are selectable
+// manually on the live page, but only mount into the DOM once the picker's
+// own scrollable options container is scrolled to them — the OLD
+// implementation only ever searched whatever was already rendered.
+// buildVirtualizedMultiField above simulates exactly that: a real
+// windowing/virtualisation list, never everything rendered at once.
+function longMaterialList(count: number, targetsAtEnd: string[] = []) {
+  const values = Array.from({ length: count - targetsAtEnd.length }, (_, i) => ({ id: 1000 + i, name: `Filler material ${i + 1}` }));
+  targetsAtEnd.forEach((name, i) => values.push({ id: 2000 + i, name }));
+  return values;
+}
+
+describe("stepSelectMaterials — virtualised/scrollable dropdown traversal (BUG FIX)", () => {
+  it('REQUIREMENT: "Mesh", initially below the rendered/visible options, becomes selectable after scrolling', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+    // Not rendered before any scroll — proves the scenario is genuine.
+    expect(doc.querySelectorAll('[data-testid^="material-"][role="button"]').length).toBe(6);
+    expect(Array.from(doc.querySelectorAll('[data-testid^="material-"][role="button"]')).some(el => el.textContent === "Mesh")).toBe(false);
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("material") as HTMLInputElement).value).toBe("Mesh");
+    expect(materialField.content.hidden).toBe(true); // closed via the same outside-click convention as ever
+  });
+
+  it('REQUIREMENT: "Suede", initially outside the rendered options, is found and selected after scrolling', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(24, ["Suede"]), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Suede"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("material") as HTMLInputElement).value).toBe("Suede");
+  });
+
+  it("REQUIREMENT: the dropdown rerenders its option nodes during scrolling — the matched element is from the LATEST render generation, never a stale reused one", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const generationBeforeSearch = materialField.getRenderGeneration();
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(materialField.getRenderGeneration()).toBeGreaterThan(generationBeforeSearch); // at least one real scroll-triggered rerender happened
+    const matched = doc.getElementById("material-2000"); // "Mesh" — see longMaterialList's own id scheme
+    expect(matched).not.toBeNull();
+    expect(matched!.getAttribute("data-render-generation")).toBe(String(materialField.getRenderGeneration())); // came from the CURRENT (latest) render, not a stale one
+  });
+
+  it("REQUIREMENT: exact matching is preserved through the scroll fallback — case/whitespace normalised, never partial", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    // A near-miss ("Meshed Cotton") sits ALONGSIDE the real "Mesh" target —
+    // if the fallback ever degraded to substring/partial matching, this
+    // would wrongly resolve as ambiguous or select the wrong one.
+    buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content",
+      allValues: [...longMaterialList(18), { id: 3001, name: "Meshed Cotton" }, { id: 3002, name: "  mesh  " }],
+      windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    // Normalised-text match: "  mesh  " (id 3002) is the one that's exactly
+    // equal to "Mesh" once case/whitespace-normalised — never "Meshed Cotton".
+    expect((doc.getElementById("material-checkbox-3002") as HTMLInputElement).checked).toBe(true);
+    expect((doc.getElementById("material-checkbox-3001") as HTMLInputElement | null)?.checked ?? false).toBe(false);
+  });
+
+  it("REQUIREMENT: a genuinely absent material stops after a bounded, complete search — never an infinite loop", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const started = Date.now();
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Genuinely Nonexistent Fabric"] }), deps);
+    const elapsedMs = Date.now() - started;
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/^NOT_FOUND:/);
+    expect(result.reason).toContain("Genuinely Nonexistent Fabric");
+    expect(elapsedMs).toBeLessThan(15000); // bounded — never hangs
+  });
+
+  it("REQUIREMENT: an already-selected material (exact set match) stays idempotent — the picker is never opened, even though it's virtualised", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+    (doc.getElementById("material") as HTMLInputElement).value = "Mesh";
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(materialField.content.hidden).toBe(true); // never opened at all — idempotent pre-check short-circuited before any scroll
+  });
+
+  it("REQUIREMENT: Colour selection is unaffected by the shared multi-select helper's scroll-fallback addition — two colours, non-virtualised, still resolve via the fast immediate path", async () => {
+    const { doc, dom, categoryField, colourField } = buildMockVintedPage();
+    attachCategoryDependents(categoryField);
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectColours(doc.body, validItem(), deps); // validItem().colours = ["Black", "White"]
+    expect(result.ok).toBe(true);
+    const finalValues = (doc.getElementById("color") as HTMLInputElement).value.split(", ").sort();
+    expect(finalValues).toEqual(["Black", "White"]);
+    expect(colourField!.content.hidden).toBe(true);
+  });
+});
+
+// ---- Structure-agnostic discovery (follow-up correction: Material still
+// NOT_FOUND despite being visibly present) -----------------------------------
+//
+// Confirmed regression: the PREVIOUS scrolling fix still searched only one
+// specific guessed shape ([data-testid^="material-"][role="button"]
+// matched by ACCESSIBLE NAME) — Vinted's real current Material dropdown
+// (per the live failure report and screenshots showing Suede genuinely
+// visible and selectable) no longer reliably satisfies that shape.
+// buildDriftedVirtualizedMultiField above simulates a DIFFERENT plausible
+// shape in every dimension that could have broken the old assumption: no
+// data-testid, role="option" not "button", a NESTED checkbox rather than a
+// sibling, and a deliberately generic/wrong accessible name on the row
+// itself — proving discovery now depends on VISIBLE TEXT and a broad
+// role-based search, never one specific guessed structure.
+describe("stepSelectMaterials — structure-agnostic discovery against a DIFFERENT (drifted) plausible DOM shape", () => {
+  it('REQUIREMENT: a visible "Suede" row whose accessible name/outer option name is NOT "Suede" is still found and selected', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Suede"]), windowSize: 6,
+    });
+    // Sanity-check the fixture itself proves the premise: the accessible
+    // name of every rendered row (including the eventual Suede row) is
+    // the generic "Option", never "Suede" — so an accessible-name-based
+    // match could never have found it, only visible-text extraction can.
+    const initialRow = doc.querySelector('[role="option"]')!;
+    expect(getAccessibleName(initialRow)).toBe("Option");
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Suede"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("material") as HTMLInputElement).value).toBe("Suede");
+    expect(materialField.content.hidden).toBe(true);
+  });
+
+  it('REQUIREMENT: "Mesh" is found and selected via the drifted structure (no data-testid, nested checkbox, role="option")', async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+    // The legacy selector shape must find NOTHING here at all — proves
+    // this test genuinely exercises the generic fallback, not the old path.
+    expect(doc.querySelectorAll('[data-testid^="material-"][role="button"]').length).toBe(0);
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect((doc.getElementById("material") as HTMLInputElement).value).toBe("Mesh");
+  });
+
+  it("REQUIREMENT: an off-screen option in the drifted structure becomes available after virtualised scrolling", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(24, ["Suede"]), windowSize: 6,
+    });
+    expect(Array.from(doc.querySelectorAll('[role="option"] span')).some(el => el.textContent === "Suede")).toBe(false); // not rendered before any scroll
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Suede"] }), deps);
+    expect(result.ok).toBe(true);
+  });
+
+  it("REQUIREMENT: DOM option nodes in the drifted structure are replaced during scrolling — the matched row is from the LATEST render generation, never a stale reused one", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const generationBeforeSearch = materialField.getRenderGeneration();
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(materialField.getRenderGeneration()).toBeGreaterThan(generationBeforeSearch);
+    const matched = doc.querySelector('[data-option-id="2000"]'); // "Mesh" — see longMaterialList's own id scheme
+    expect(matched).not.toBeNull();
+    expect(matched!.getAttribute("data-render-generation")).toBe(String(materialField.getRenderGeneration()));
+  });
+
+  it("REQUIREMENT: exact matching in the drifted structure is case/whitespace-normalised but never partial", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content",
+      allValues: [...longMaterialList(18), { id: 3001, name: "Meshed Cotton" }, { id: 3002, name: "  MESH  " }],
+      windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    const selectedRow = doc.querySelector('[data-option-id="3002"] input[type="checkbox"]') as HTMLInputElement;
+    expect(selectedRow.checked).toBe(true);
+    const nonSelectedRow = doc.querySelector('[data-option-id="3001"] input[type="checkbox"]') as HTMLInputElement | null;
+    expect(nonSelectedRow?.checked ?? false).toBe(false);
+  });
+
+  it("REQUIREMENT: a genuinely missing material in the drifted structure stops after a bounded, complete search", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const started = Date.now();
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Genuinely Nonexistent Fabric"] }), deps);
+    const elapsedMs = Date.now() - started;
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/^NOT_FOUND:/);
+    expect(result.reason).toContain("dropdown_found=true"); // safe diagnostics — proves the dropdown itself WAS found
+    expect(elapsedMs).toBeLessThan(15000);
+  });
+
+  it("REQUIREMENT: an already-selected material in the drifted structure remains selected without being toggled off", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]) });
+    attachCategoryDependents(categoryField);
+    const materialField = buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20, ["Mesh"]), windowSize: 6,
+    });
+    (doc.getElementById("material") as HTMLInputElement).value = "Mesh"; // already correct
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Mesh"] }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(materialField.content.hidden).toBe(true); // idempotent — never even opened, so nothing could have been toggled
+  });
+
+  it("REQUIREMENT: safe diagnostics never include full page content, credentials or tokens — only counts/booleans/scroll positions", async () => {
+    const { doc, dom, categoryField } = buildMockVintedPage({ omit: new Set(["material"]), extraBodyText: "<p>" + "filler ".repeat(20000) + "</p>" });
+    attachCategoryDependents(categoryField);
+    buildDriftedVirtualizedMultiField(doc, doc.body, {
+      idPrefix: "material", openId: "material", openTestId: "category-material-multi-list-input", openPlaceholder: "Select a material",
+      contentTestId: "category-material-multi-list-content", allValues: longMaterialList(20), windowSize: 6,
+    });
+
+    const deps = buildDeps(doc, dom.window as unknown as Window & typeof globalThis);
+    const result = await stepSelectMaterials(doc.body, validItem({ materials: ["Nonexistent"] }), deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason.length).toBeLessThan(400); // nowhere close to the ~140KB filler text
+    expect(result.reason).not.toContain("filler");
+    expect(result.reason).toMatch(/dropdown_found=true rows_inspected=\d+ text_observed=false control_resolved=false start_scroll=\d+ final_scroll=\d+/);
   });
 });
 

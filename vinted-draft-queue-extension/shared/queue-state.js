@@ -21,6 +21,14 @@ export const ITEM_STATUSES = Object.freeze({
   FAILED: "failed",
   PAUSED: "paused",
   CANCELLED: "cancelled",
+  // Follow-up correction (native browser reload-confirmation bug) — see
+  // this file's own "Manual browser reload" section further down. Distinct
+  // from PAUSED (a whole-batch flag, not a per-item one): this item is
+  // specifically the one a stuck same-tab reload belongs to, waiting on a
+  // human to resolve the browser's own native confirmation dialog. Never
+  // FAILED, and never treated as in-flight/stalled by the generic watchdog
+  // — see BLOCKING_STATUSES below.
+  WAITING_FOR_MANUAL_RELOAD: "waiting_for_manual_reload",
 });
 
 const TERMINAL_STATUSES = new Set([ITEM_STATUSES.COMPLETED, ITEM_STATUSES.FAILED, ITEM_STATUSES.CANCELLED]);
@@ -30,6 +38,20 @@ const TERMINAL_STATUSES = new Set([ITEM_STATUSES.COMPLETED, ITEM_STATUSES.FAILED
 // in-memory progress for a mid-flight item survives a restart, only what
 // was already persisted.
 const IN_FLIGHT_STATUSES = new Set([ITEM_STATUSES.PREPARING, ITEM_STATUSES.FILLING, ITEM_STATUSES.SAVING]);
+// Follow-up correction (native browser reload-confirmation bug) — everything
+// computeProgressSummary's own currentItem/"something already in flight"
+// check should recognise as blocking the next dispatch. Deliberately a
+// SEPARATE set from IN_FLIGHT_STATUSES above: a waiting-for-manual-reload
+// item must never be reset to QUEUED by resumeAfterRestart's blanket
+// in-flight reset, and must never be treated as stalled by the generic
+// watchdog (findStalledItem) — a human may take arbitrarily long to notice
+// and click the browser's own Reload control, and that is never itself a
+// failure. It DOES still need to count as "something is currently in
+// flight" so triggerTick never starts a second item while the first is
+// waiting — batch.paused (see MANUAL_RELOAD_PAUSE_REASON below) already
+// blocks that on its own, but this keeps the side panel's own "active"
+// stat and the queue list's "is-current" highlighting accurate too.
+const BLOCKING_STATUSES = new Set([...IN_FLIGHT_STATUSES, ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD]);
 
 export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(status);
@@ -567,16 +589,133 @@ export function resumeAfterRestart(state, nowIso) {
       : { ...state, batch: { ...state.batch, pendingSave: { ...pending, vintedTabId: null } } };
   }
 
-  const stillPendingItemId = afterPendingSave.batch.pendingSave?.itemId ?? null;
-  let changed = afterPendingSave !== state;
-  const items = afterPendingSave.batch.items.map(item => {
+  // Follow-up correction (native browser reload-confirmation bug,
+  // restart-recovery) — a persisted manualReload.tabId can no longer be
+  // trusted after a restart either, exactly like pendingSave.vintedTabId
+  // above (a Chrome tab id from a previous session may point at nothing,
+  // or at a completely different tab Chrome has since reused). Cleared
+  // here so the service worker's own boot-time recovery
+  // (attemptManualReloadRecovery) reacquires a fresh, validated tab via
+  // the SAME ensureVintedTab() every other flow uses. The waiting item and
+  // the pause itself are both left completely untouched: a restart is
+  // never treated as an automatic resolution (that requires an actual,
+  // freshly-observed clean page) OR an automatic failure (the item is
+  // never FAILED just because the extension restarted).
+  const manualReload = afterPendingSave.batch.manualReload;
+  const afterManualReload = manualReload
+    ? { ...afterPendingSave, batch: { ...afterPendingSave.batch, manualReload: { ...manualReload, tabId: null } } }
+    : afterPendingSave;
+
+  const stillPendingItemId = afterManualReload.batch.pendingSave?.itemId ?? null;
+  let changed = afterManualReload !== state;
+  const items = afterManualReload.batch.items.map(item => {
     if (!IN_FLIGHT_STATUSES.has(item.status)) return item;
     if (item.itemId === stillPendingItemId) return item; // never reset the item a LIVE (preserved, not expired) pendingSave belongs to
     changed = true;
     return { ...item, status: ITEM_STATUSES.QUEUED };
   });
-  if (!changed && afterPendingSave.batch.vintedTabId == null) return afterPendingSave;
-  return { ...afterPendingSave, batch: { ...afterPendingSave.batch, items, vintedTabId: null } };
+  if (!changed && afterManualReload.batch.vintedTabId == null) return afterManualReload;
+  return { ...afterManualReload, batch: { ...afterManualReload.batch, items, vintedTabId: null } };
+}
+
+// ---- Manual browser reload (native browser reload-confirmation bug, follow-up) --------
+//
+// The live investigation confirmed that resetting a DIRTY Vinted tab back
+// to a fresh Create Listing form (service-worker.js's
+// returnTabToCreateListing, called by ensureCleanCreateForm whenever a
+// failed item leaves the form contaminated) can trigger the BROWSER'S OWN
+// native "Reload site? Changes that you made may not be saved." (or
+// "Leave site?") confirmation — chrome-internal UI, never part of the
+// page's own DOM, and therefore something this extension can never query,
+// click, or otherwise resolve programmatically (no screen-coordinate
+// clicks, no chrome.debugger permission, no invisible bypass — see this
+// extension's own top-level safety rules). While that dialog is up,
+// chrome.tabs.update's own navigation never completes.
+//
+// This section is the durable, restart-safe alternative — modelled
+// directly on the pendingSave section above: a state.batch.manualReload
+// record that the service worker sets BEFORE giving up on a stuck
+// navigation, uses to keep the affected item visibly (and honestly)
+// "waiting" rather than failed, and clears the moment a fresh, genuinely
+// clean page is actually observed. Every real DECISION here is a pure
+// function, per this file's own top comment; service-worker.js owns the
+// chrome.* orchestration (the bounded navigation wait, the periodic/
+// navigation-event-driven recovery checks, and the explicit "Try reload
+// again" side-panel action) that calls these at the right moments.
+//
+// manualReload shape: { itemId, tabId, startedAt, attempts, lastAttemptAt }
+// — same "existence alone is the source of truth for whether a manual
+// reload is currently pending" convention as pendingSave above.
+
+const MANUAL_RELOAD_PAUSE_REASON = "manual_reload_required";
+export const MANUAL_RELOAD_WARNING_MESSAGE = "Browser needs manual reload — click Reload in the Vinted confirmation box to continue.";
+
+/**
+ * Enters the durable waiting-for-manual-reload state for exactly one item —
+ * called when a same-tab reload/navigation could not be confirmed complete
+ * (see service-worker.js's returnTabToCreateListing/TAB_NAVIGATION_TIMEOUT_MS
+ * for why this can never be distinguished with certainty from "the
+ * browser's own native confirmation is blocking it", since that dialog can
+ * never be inspected). Marks the item WAITING_FOR_MANUAL_RELOAD (never
+ * FAILED) and pauses the whole batch (MANUAL_RELOAD_PAUSE_REASON) so
+ * nothing else can ever be dispatched while this is unresolved — the SAME
+ * applyPause/pauseReason gate triggerTick() already respects for a lost
+ * tab or an account change (see applyVintedTabLost above).
+ *
+ * Idempotent against being called again for the SAME item already
+ * waiting (e.g. the automatic attempt inside ensureCleanCreateForm firing
+ * again on a later item dispatch attempt, or the explicit "Try reload
+ * again" action) — bumps attempts/lastAttemptAt on the existing record
+ * rather than creating a second one or re-pausing what is already paused.
+ */
+export function applyManualReloadNeeded(state, { itemId, tabId }, nowIso) {
+  if (!state.batch) return state;
+  const existing = state.batch.manualReload;
+  const manualReload = existing && existing.itemId === itemId
+    ? { ...existing, tabId, attempts: existing.attempts + 1, lastAttemptAt: nowIso }
+    : { itemId, tabId, startedAt: nowIso, attempts: 1, lastAttemptAt: nowIso };
+  const withRecord = { ...state, batch: { ...state.batch, manualReload } };
+  const withItem = applyItemStatus(withRecord, itemId, { status: ITEM_STATUSES.WAITING_FOR_MANUAL_RELOAD }, nowIso);
+  return applyPause(withItem, MANUAL_RELOAD_PAUSE_REASON);
+}
+
+export function isManualReloadPause(state) {
+  return Boolean(state.batch?.paused) && state.batch.pauseReason === MANUAL_RELOAD_PAUSE_REASON;
+}
+
+/** Records a fresh attempt (the explicit "Try reload again" action, or a reacquired tab id after a restart) — bookkeeping only; the actual navigation attempt itself is service-worker.js's job. A safe no-op if nothing is waiting. */
+export function applyManualReloadAttempt(state, nowIso) {
+  if (!state.batch?.manualReload) return state;
+  const manualReload = { ...state.batch.manualReload, attempts: state.batch.manualReload.attempts + 1, lastAttemptAt: nowIso };
+  return { ...state, batch: { ...state.batch, manualReload } };
+}
+
+/** Mirrors applyPendingSaveTabReacquired exactly — records a freshly reacquired tab id (via the SAME ensureVintedTab() every other flow uses) after a restart cleared the old one. A safe no-op if nothing is waiting. */
+export function applyManualReloadTabReacquired(state, tabId, nowIso) {
+  if (!state.batch?.manualReload) return state;
+  const manualReload = { ...state.batch.manualReload, tabId };
+  const withTab = { ...state, batch: { ...state.batch, manualReload } };
+  return applyItemStatus(withTab, manualReload.itemId, {}, nowIso);
+}
+
+/**
+ * The reload genuinely completed — a freshly-observed clean page was
+ * confirmed (chrome.tabs.onUpdated fired, or a periodic/explicit recovery
+ * check ran, and shared/form-steps.js's inspectPageState reported
+ * "clean"). Clears the record, resumes the batch (ONLY if this specific
+ * pause reason is still the active one — never steals a resume from a
+ * genuinely different pause, e.g. a mid-flight account change that
+ * happened to arrive at the same moment), and resets the waiting item back
+ * to QUEUED so the normal dispatch loop picks it straight back up — no
+ * Retry click needed, and no risk of dispatching it a second time (it was
+ * never anything but this one item the whole time it was waiting).
+ */
+export function applyManualReloadResolved(state, nowIso) {
+  if (!state.batch?.manualReload) return state;
+  const { itemId } = state.batch.manualReload;
+  const cleared = { ...state, batch: { ...state.batch, manualReload: null } };
+  const resumed = isManualReloadPause(cleared) ? applyResume(cleared) : cleared;
+  return applyItemStatus(resumed, itemId, { status: ITEM_STATUSES.QUEUED }, nowIso);
 }
 
 export function computeProgressSummary(state) {
@@ -585,7 +724,7 @@ export function computeProgressSummary(state) {
   const completed = items.filter(i => i.status === ITEM_STATUSES.COMPLETED).length;
   const failed = items.filter(i => i.status === ITEM_STATUSES.FAILED).length;
   const cancelled = items.filter(i => i.status === ITEM_STATUSES.CANCELLED).length;
-  const currentItem = items.find(i => IN_FLIGHT_STATUSES.has(i.status)) ?? null;
+  const currentItem = items.find(i => BLOCKING_STATUSES.has(i.status)) ?? null;
   return { total: items.length, completed, failed, cancelled, remaining: items.length - completed - failed - cancelled, currentItem };
 }
 

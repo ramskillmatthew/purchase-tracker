@@ -1,6 +1,7 @@
 "use client";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import DateRangeFilterBar from "@/components/sales/reports/DateRangeFilterBar";
 import ReportSummaryCards from "@/components/sales/reports/ReportSummaryCards";
 import RevenueProfitChart from "@/components/sales/reports/RevenueProfitChart";
@@ -164,7 +165,7 @@ function SalesReportsPageInner() {
   ];
 
   return <section className="page-shell">
-    <a href="/sales" className={styles.reportBackLink} onClick={event => { event.preventDefault(); router.push("/sales"); }}>&larr; Back to Sales</a>
+    <Link href="/sales" className={styles.reportBackLink}>&larr; Back to Sales</Link>
     <header className={styles.topbar}>
       <div className="title-row"><h1>Sales Reports</h1></div>
     </header>

@@ -65,26 +65,25 @@ describe("app/api/sales/route.ts — GET list", () => {
     expect(createRoute).toContain("sales_orders?owner_id=eq.${user.id}");
   });
 
-  it("REQUIREMENT: bounded to the most recent sales via a Range header, not an unbounded fetch of the entire sales history (a full paginated history browser belongs to a later stage)", () => {
+  it("REQUIREMENT: exposes server-backed page/page-size controls instead of a recent-200 browser list", () => {
     const getFn = createRoute.slice(createRoute.indexOf("export async function GET"));
-    expect(getFn).toContain("Range: `0-${MAX_RECENT_SALES - 1}`");
+    expect(getFn).toContain("HISTORY_PAGE_SIZES.includes");
+    expect(getFn).toContain("filtered.slice((page - 1) * pageSize, page * pageSize)");
+    expect(getFn).toContain("totalPages");
   });
 
-  it("REQUIREMENT: annotates each order with its item count, exact profit, and grouped description snapshots via ONE bounded follow-up query against sale_items, never one request per order", () => {
-    const getFn = createRoute.slice(createRoute.indexOf("export async function GET"));
-    expect(getFn).toContain("supabaseRequestAll<{ sales_order_id: string; item_description_snapshot: string; profit: number }>(");
-    expect(getFn).toContain("`sale_items?sales_order_id=in.(${ids.join(\",\")})&select=sales_order_id,item_description_snapshot,profit`");
-    expect(getFn.match(/supabaseRequest/g)?.length).toBe(2); // one bounded orders fetch + one supabaseRequestAll covering items for every listed order
+  it("REQUIREMENT: annotates orders in fixed-size batches, never with one sale-items request per order", () => {
+    expect(createRoute).toContain("index += SALE_ITEM_BATCH_SIZE");
+    expect(createRoute).toContain('`sale_items?sales_order_id=in.(${ids.join(",")})&select=sales_order_id,item_description_snapshot,category_snapshot,profit&order=sales_order_id.asc,created_at.asc`');
+    expect(createRoute).not.toMatch(/for \(const order of orders\)[\s\S]{0,250}supabaseRequest/);
   });
 
   it("REQUIREMENT: profit is summed from each sale_item's own saved `profit` (poundsToPence), never recalculated — agrees exactly with the sale detail page", () => {
-    const getFn = createRoute.slice(createRoute.indexOf("export async function GET"));
-    expect(getFn).toContain("poundsToPence(Number(item.profit))");
+    expect(createRoute).toContain("poundsToPence(Number(item.profit))");
   });
 
   it("REQUIREMENT: description groups come from the immutable item_description_snapshot via the shared groupItemDescriptions helper, not the current purchase description", () => {
-    const getFn = createRoute.slice(createRoute.indexOf("export async function GET"));
-    expect(getFn).toContain("groupItemDescriptions(descriptionsByOrder.get(order.id) ?? [])");
+    expect(createRoute).toContain("groupItemDescriptions(orderItems.map(item => item.item_description_snapshot))");
   });
 });
 
@@ -105,4 +104,3 @@ describe("app/api/sales/[id]/route.ts — GET single sale with line items", () =
     expect(singleRoute).toContain("supabaseRequestAll<SaleItem>(`sale_items?sales_order_id=eq.${encodeURIComponent(id)}&order=created_at.asc`)");
   });
 });
-
