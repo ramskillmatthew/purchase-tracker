@@ -1620,10 +1620,10 @@ describe("service worker — photo download (photo-download CORS-bug fix): downl
       expect.arrayContaining(["http://localhost:3000/*", "http://localhost:3001/*", "http://localhost:3002/*"]),
     );
     // Narrowly scoped: every entry is either localhost, the exact deployed
-    // production origin, or vinted.co.uk — never "<all_urls>" or a bare
+    // production origin, vinted.co.uk, or ebay.co.uk — never "<all_urls>" or a bare
     // "*://*/*" wildcard.
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === "https://purchase-tracker-one.vercel.app/*").toBe(true);
+      expect(origin === "https://www.vinted.co.uk/*" || origin === "https://www.ebay.co.uk/*" || origin.includes("localhost") || origin === "https://purchase-tracker-one.vercel.app/*").toBe(true);
     }
   });
 

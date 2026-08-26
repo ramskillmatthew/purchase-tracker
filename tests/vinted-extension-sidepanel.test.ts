@@ -147,7 +147,7 @@ describe("side panel — 'Check saved draft again' for a SAVE_DRAFT_UNCONFIRMED 
 
     expect(checkButton.disabled).toBe(true);
     expect(checkButton.textContent).toBe("Checking…");
-    expect(sentTypes.filter(t => t !== PANEL_TO_WORKER.GET_STATE)).toEqual([PANEL_TO_WORKER.CHECK_SAVED_DRAFT]);
+    expect(sentTypes.filter(t => ![PANEL_TO_WORKER.GET_STATE, "EBAY_GET_IMPORT_STATE"].includes(t))).toEqual([PANEL_TO_WORKER.CHECK_SAVED_DRAFT]);
 
     resolveCheck({ found: false });
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -359,11 +359,11 @@ describe("Option 4 redesign — disconnected state", () => {
     expect(sidepanelSource).not.toMatch(/>\s*3\.\s+Batch/);
   });
 
-  it("REGRESSION: 'Vinted Draft Queue' appears as a heading only once — never repeated as a second large heading", () => {
+  it("REGRESSION: 'Listing Assistant' appears as a heading only once — never repeated as a second large heading", () => {
     // Once in <title>, once as the header <h1>'s own text+title attribute
     // (same single element, both referring to it) — never a SECOND <h1> or
     // heading-level element repeating it below the header.
-    const headingMatches = sidepanelSource.match(/<h1[^>]*>Vinted Draft Queue<\/h1>/g) ?? [];
+    const headingMatches = sidepanelSource.match(/<h1[^>]*>Listing Assistant<\/h1>/g) ?? [];
     expect(headingMatches.length).toBe(1);
     expect(sidepanelSource.match(/<h1/g)?.length ?? 0).toBe(1);
   });
