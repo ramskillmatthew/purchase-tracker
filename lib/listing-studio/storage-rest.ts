@@ -143,6 +143,20 @@ export async function deleteStorageObject(bucket: string, path: string): Promise
   if (!response.ok) throw new Error(`Could not delete the Storage object (${response.status}): ${await response.text()}`);
 }
 
+/** Server-side upload used by trusted remote imports. Unlike browser uploads,
+ * the bytes have already been fetched and size/type checked by our server. */
+export async function uploadStorageObject(bucket: string, path: string, bytes: ArrayBuffer, mimeType: string): Promise<void> {
+  const { url, key } = config();
+  const headers: Record<string, string> = { apikey: key, "Content-Type": mimeType, "x-upsert": "false" };
+  if (!key.startsWith("sb_secret_")) headers.Authorization = `Bearer ${key}`;
+  const response = await fetch(`${url}/storage/v1/object/${bucket}/${path}`, { method: "POST", headers, body: bytes });
+  const body = await response.text();
+  if (!response.ok) {
+    if (looksLikeMissingBucket(body)) throw new StorageBucketMissingError(`Storage bucket "${bucket}" was not found. Run supabase-listing-studio.sql before importing.`);
+    throw new Error(`Could not store an imported photo (${response.status}): ${body}`);
+  }
+}
+
 // A defensive cap on how many prefixes go in one DELETE request body — not
 // a documented hard Supabase Storage limit, just a sane ceiling well under
 // any observed real one, so a full workspace clear (potentially hundreds of

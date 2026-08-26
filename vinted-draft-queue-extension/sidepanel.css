@@ -613,3 +613,63 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 /* Never allow horizontal scrolling regardless of width. */
 html, body { overflow-x: hidden; }
+/* Listing Assistant tool switcher. The original Vinted UI remains the
+   default view; eBay is an additive surface with no shared queue controls. */
+.assistant-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  margin: 4px 0 18px;
+  border: 1px solid var(--border, #2b3040);
+  border-radius: 12px;
+  background: #11141d;
+}
+
+.assistant-tab {
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #9299ad;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.assistant-tab.is-active { background: #5849b8; color: #fff; }
+body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view) { display: none !important; }
+.ebay-view { display: grid; gap: 18px; }
+.ebay-view[hidden] { display: none; }
+.ebay-safety { margin: 0; width: max-content; max-width: 100%; }
+
+.ebay-hero { text-align: center; padding: 30px 20px; border-color: #145e47; background: #0b2d23; }
+.ebay-hero-icon {
+  display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 16px;
+  border-radius: 50%; background: #12563e; color: #25db87; font-size: 30px; font-weight: 800;
+}
+.ebay-hero h2 { margin: 0 0 8px; color: #fff; font-size: 20px; }
+.ebay-hero p { margin: 0; color: #abb3c6; line-height: 1.5; }
+.ebay-test-card { display: grid; gap: 16px; }
+.ebay-queue-card { display: grid; gap: 16px; }
+.ebay-queue-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ebay-queue-head .panel-title-sm, .ebay-queue-head .panel-subtitle { margin: 0; }
+.ebay-queue-head .panel-subtitle { margin-top: 5px; }
+.ebay-queue-progress { display: grid; gap: 12px; }
+.ebay-queue-list { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.ebay-queue-list li { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid #292e3d; }
+.ebay-queue-list .queue-dot { width: 8px; height: 8px; border-radius: 50%; background: #7c6cf2; }
+.ebay-queue-list li.is-imported .queue-dot { background: #26dc86; }
+.ebay-queue-list li.is-failed .queue-dot { background: #ff526c; }
+.ebay-queue-list strong { color: #fff; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ebay-queue-list span:last-child { color: #929aad; font-size: 12px; }
+.ebay-test-card .panel-title-sm, .ebay-test-card .panel-subtitle { margin: 0; }
+.ebay-test-card .panel-subtitle { margin-top: 5px; }
+.ebay-preview { display: grid; gap: 18px; }
+.ebay-preview-heading { display: flex; gap: 12px; align-items: flex-start; }
+.ebay-preview-heading .status-dot { flex: none; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: #26dc86; }
+.ebay-preview-heading h2 { margin: 4px 0 0; color: #fff; font-size: 18px; line-height: 1.35; }
+.ebay-preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0; }
+.ebay-preview-grid div { padding: 12px; border: 1px solid #2a3040; border-radius: 10px; background: #11141d; }
+.ebay-preview-grid dt { color: #818aa2; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.ebay-preview-grid dd { margin: 5px 0 0; color: #fff; font-weight: 700; overflow-wrap: anywhere; }
+.ebay-preview-note { margin: 0; color: #929aad; font-size: 12px; line-height: 1.5; }

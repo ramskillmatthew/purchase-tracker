@@ -22,6 +22,7 @@ export type GroupSummary = {
   // real, existing, actionable gap — see
   // lib/listing-studio/vinted-category-assignment.ts).
   vinted_category_id: number | null;
+  source_type: "photos" | "ebay_uk"; source_url: string | null; source_item_id: string | null;
 };
 
 // Milestone 4 (AI listing generation) — present only once this group has a
@@ -237,6 +238,7 @@ function ProductGroupCard({
                   {isUnsorted ? (group.title || "Unsorted") : titleLine}
                 </button>}
             {isUnsorted && <span className="product-group-unsorted-badge">Inbox</span>}
+            {!isUnsorted && group.source_type === "ebay_uk" && <span className="product-group-source-badge">Imported from eBay</span>}
             {failedCount > 0 && <span className="upload-status-badge upload-status-badge-failed">{failedCount} failed</span>}
             {stillUploading && <span className="upload-status-badge upload-status-badge-uploading">Uploading…</span>}
           </div>

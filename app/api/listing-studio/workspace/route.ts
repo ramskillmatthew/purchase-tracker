@@ -57,9 +57,15 @@ export async function GET() {
     // listings-review/route.ts's own GET: a legacy draft shows corrected
     // immediately, without waiting for Assign Category / a save / the
     // "Refresh listing text" repair action to actually persist it.
+    let importedByDraftId = new Map<string, { source_url: string; ebay_item_id: string }>();
+    try {
+      const imported = await supabaseRequestAll<{ draft_id: string; source_url: string; ebay_item_id: string }>(`ebay_import_items?owner_id=eq.${user.id}&status=eq.imported&draft_id=not.is.null&select=draft_id,source_url,ebay_item_id&order=created_at.asc`);
+      importedByDraftId = new Map(imported.map(row => [row.draft_id, row]));
+    } catch { /* Import migration is optional until Stage One is installed. */ }
     const normalisedDrafts = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);
       const normalisedAudience = normaliseFootwearVintedAudience(draft.vinted_audience, itemFamily);
+      const imported = importedByDraftId.get(draft.id);
       return {
         ...draft,
         vinted_audience: normalisedAudience,
@@ -67,6 +73,9 @@ export async function GET() {
         product_type: normaliseFootwearListingText(draft.product_type, itemFamily, normalisedAudience),
         generated_title: normaliseFootwearListingText(draft.generated_title, itemFamily, normalisedAudience),
         generated_description: normaliseFootwearListingText(draft.generated_description, itemFamily, normalisedAudience),
+        source_type: imported ? "ebay_uk" : "photos",
+        source_url: imported?.source_url ?? null,
+        source_item_id: imported?.ebay_item_id ?? null,
       };
     });
     return NextResponse.json({ drafts: normalisedDrafts, images });

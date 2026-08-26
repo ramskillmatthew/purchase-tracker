@@ -27,6 +27,23 @@ const BLOCKING_ITEM_STATUSES = new Set([...IN_FLIGHT_STATUSES, ITEM_STATUSES.WAI
 const TERMINAL_ITEM_STATUSES = new Set([ITEM_STATUSES.COMPLETED, ITEM_STATUSES.FAILED, ITEM_STATUSES.CANCELLED]);
 
 const els = {
+  vintedTab: document.getElementById("vinted-tab"),
+  ebayTab: document.getElementById("ebay-tab"),
+  ebayView: document.getElementById("ebay-view"),
+  ebayReadCurrent: document.getElementById("ebay-read-current"),
+  ebayReadError: document.getElementById("ebay-read-error"),
+  ebayPreview: document.getElementById("ebay-preview"),
+  ebayPreviewTitle: document.getElementById("ebay-preview-title"),
+  ebayPreviewId: document.getElementById("ebay-preview-id"),
+  ebayPreviewPhotos: document.getElementById("ebay-preview-photos"),
+  ebayPreviewPrice: document.getElementById("ebay-preview-price"),
+  ebayPreviewSpecifics: document.getElementById("ebay-preview-specifics"),
+  ebayStartImports: document.getElementById("ebay-start-imports"),
+  ebayQueueSummary: document.getElementById("ebay-queue-summary"),
+  ebayQueueProgress: document.getElementById("ebay-queue-progress"),
+  ebayQueueProgressFill: document.getElementById("ebay-queue-progress-fill"),
+  ebayQueueList: document.getElementById("ebay-queue-list"),
+  ebayQueueError: document.getElementById("ebay-queue-error"),
   brandMark: document.getElementById("brand-mark"),
   connectionBadge: document.getElementById("connection-badge"),
   connectionBadgeLabel: document.getElementById("connection-badge-label"),
@@ -712,9 +729,89 @@ els.retryManualReload.addEventListener("click", async () => {
   }
 });
 
-chrome.storage.onChanged.addListener(changes => {
-  if (changes.state) render(changes.state.newValue ?? { pairing: null, batch: null });
+function selectAssistantTab(tab) {
+  const ebay = tab === "ebay";
+  document.body.classList.toggle("ebay-mode", ebay);
+  els.ebayView.hidden = !ebay;
+  els.vintedTab.classList.toggle("is-active", !ebay);
+  els.ebayTab.classList.toggle("is-active", ebay);
+  els.vintedTab.setAttribute("aria-selected", String(!ebay));
+  els.ebayTab.setAttribute("aria-selected", String(ebay));
+  chrome.storage.local.set({ assistantTab: ebay ? "ebay" : "vinted" });
+}
+
+const EBAY_STATUS_LABELS = { waiting: "Waiting", imported: "Imported", failed: "Failed" };
+function renderEbayImportState(state = {}) {
+  const total = state.total || 0;
+  const completed = state.completed || 0;
+  const failed = state.failed || 0;
+  els.ebayStartImports.disabled = Boolean(state.running);
+  els.ebayStartImports.textContent = state.running ? "Importing…" : (failed ? "Retry failed" : "Start importing");
+  els.ebayQueueSummary.textContent = state.running
+    ? `${completed} of ${total} imported${failed ? ` · ${failed} failed` : ""}`
+    : state.status === "completed" ? `${completed} of ${total} imported${failed ? ` · ${failed} failed` : ""}`
+      : "Check Listing Studio for waiting URLs.";
+  els.ebayQueueError.textContent = state.error || "";
+  els.ebayQueueError.hidden = !state.error;
+  els.ebayQueueProgress.hidden = !total;
+  els.ebayQueueProgressFill.style.width = `${total ? Math.round(((completed + failed) / total) * 100) : 0}%`;
+  els.ebayQueueList.replaceChildren(...(state.items || []).map(item => {
+    const row = document.createElement("li");
+    row.className = `is-${item.status}`;
+    const dot = document.createElement("span"); dot.className = "queue-dot";
+    const title = document.createElement("strong"); title.textContent = item.title || `eBay item ${item.itemId}`; title.title = title.textContent;
+    const status = document.createElement("span"); status.textContent = EBAY_STATUS_LABELS[item.status] || (item.id === state.activeItemId ? "Processing" : "Waiting");
+    if (item.error) title.title = `${title.textContent}: ${item.error}`;
+    row.append(dot, title, status); return row;
+  }));
+}
+
+els.vintedTab.addEventListener("click", () => selectAssistantTab("vinted"));
+els.ebayTab.addEventListener("click", () => selectAssistantTab("ebay"));
+els.ebayStartImports.addEventListener("click", async () => {
+  els.ebayQueueError.hidden = true;
+  const result = await send("EBAY_RUN_IMPORTS");
+  if (result?.state) renderEbayImportState(result.state);
+  if (result?.error) { els.ebayQueueError.textContent = result.error; els.ebayQueueError.hidden = false; }
 });
 
+els.ebayReadCurrent.addEventListener("click", async () => {
+  els.ebayReadCurrent.disabled = true;
+  els.ebayReadCurrent.textContent = "Reading listing…";
+  els.ebayReadError.hidden = true;
+  try {
+    const result = await send("EBAY_READ_ACTIVE_LISTING");
+    if (result?.error) {
+      els.ebayPreview.hidden = true;
+      els.ebayReadError.textContent = result.error;
+      els.ebayReadError.hidden = false;
+      return;
+    }
+    const listing = result.listing;
+    els.ebayPreviewTitle.textContent = listing.title;
+    els.ebayPreviewId.textContent = listing.itemId;
+    els.ebayPreviewPhotos.textContent = String(listing.imageUrls?.length ?? 0);
+    els.ebayPreviewPrice.textContent = listing.pricePence == null
+      ? "Not found"
+      : new Intl.NumberFormat("en-GB", { style: "currency", currency: listing.currency || "GBP" }).format(listing.pricePence / 100);
+    els.ebayPreviewSpecifics.textContent = String(Object.keys(listing.itemSpecifics || {}).length);
+    els.ebayPreview.hidden = false;
+  } catch (error) {
+    els.ebayPreview.hidden = true;
+    els.ebayReadError.textContent = error?.message || "The eBay page reader could not be reached.";
+    els.ebayReadError.hidden = false;
+  } finally {
+    els.ebayReadCurrent.disabled = false;
+    els.ebayReadCurrent.textContent = "Read current eBay listing";
+  }
+});
+
+chrome.storage.onChanged.addListener(changes => {
+  if (changes.state) render(changes.state.newValue ?? { pairing: null, batch: null });
+  if (changes.ebayImportState) renderEbayImportState(changes.ebayImportState.newValue);
+});
+
+chrome.storage.local.get("assistantTab").then(({ assistantTab }) => selectAssistantTab(assistantTab === "ebay" ? "ebay" : "vinted"));
+send("EBAY_GET_IMPORT_STATE").then(result => renderEbayImportState(result.state));
 loadSettings();
 refresh();
