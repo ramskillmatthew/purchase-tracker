@@ -5,6 +5,7 @@ const dialog = readFileSync("components/listing-studio/ImportEbayListingsDialog.
 const workspace = readFileSync("components/listing-studio/GroupingWorkspace.tsx", "utf8");
 const card = readFileSync("components/listing-studio/ProductGroupCard.tsx", "utf8");
 const migration = readFileSync("supabase-listing-studio.sql", "utf8");
+const extensionQueueRoute = readFileSync("app/api/extension/ebay-imports/route.ts", "utf8");
 
 describe("Listing Studio eBay import integration", () => {
   it("uses the requested plural label and accepts one URL per line", () => {
@@ -27,5 +28,9 @@ describe("Listing Studio eBay import integration", () => {
     expect(migration).toContain("create table if not exists public.ebay_import_batches");
     expect(migration).toContain("create table if not exists public.ebay_import_items");
     expect(migration).toContain("source_type in ('photos', 'ebay_uk')");
+  });
+
+  it("offers the newest waiting import batches before retained completed history", () => {
+    expect(extensionQueueRoute).toMatch(/ebay_import_batches\?[^`]+order=created_at\.desc/);
   });
 });
