@@ -19,7 +19,7 @@ describe("supabase-listing-studio.sql — structural checks (consistent with tes
     // deliberately NOT owner_id-scoped itself, since ownership is already
     // established via its batch_id -> vinted_extension_batches -> owner_id chain).
     const ownerIdCount = migration.match(/owner_id uuid not null/g) ?? [];
-    expect(ownerIdCount.length).toBe(6);
+    expect(ownerIdCount.length).toBe(8);
   });
 
   it("every table enables RLS with no policies, matching every RLS-enabled table in this repo, and revokes anon/authenticated access as defence in depth", () => {

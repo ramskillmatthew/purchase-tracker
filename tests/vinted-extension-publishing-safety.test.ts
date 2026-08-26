@@ -122,13 +122,13 @@ describe("Publishing safety — structural: no publish/upload/list-live function
     for (const file of jsFiles) expect(read(file)).not.toMatch(/import\(["']https?:\/\/|from ["']https?:\/\/|cdn\.|unpkg\.com|jsdelivr/);
   });
 
-  it("manifest.json requests no cookies/history/proxy/password-adjacent permissions, and host_permissions is restricted to the app + Vinted only", () => {
+  it("manifest.json requests no cookies/history/proxy/password-adjacent permissions, and host_permissions is restricted to the app, Vinted and eBay UK only", () => {
     const manifest = JSON.parse(read("manifest.json"));
     for (const forbidden of ["cookies", "history", "proxy", "webRequest", "management", "debugger"]) {
       expect(manifest.permissions ?? []).not.toContain(forbidden);
     }
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin.includes("localhost") || origin === PRODUCTION_ORIGIN).toBe(true);
+      expect(origin === "https://www.vinted.co.uk/*" || origin === "https://www.ebay.co.uk/*" || origin.includes("localhost") || origin === PRODUCTION_ORIGIN).toBe(true);
     }
   });
 
