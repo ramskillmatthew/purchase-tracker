@@ -18,6 +18,9 @@ import { z } from "zod";
 
 const batchTokenPayloadSchema = z.object({ batchId: z.string().uuid() });
 export type BatchTokenPayload = z.infer<typeof batchTokenPayloadSchema>;
+const connectionTokenPayloadSchema = z.object({ ownerId: z.string().uuid(), scope: z.literal("listing-assistant") });
+export type ConnectionTokenPayload = z.infer<typeof connectionTokenPayloadSchema>;
+export const EXTENSION_CONNECTION_EXPIRY_SECONDS = 90 * 24 * 60 * 60;
 
 function key() {
   const value = process.env.EXTENSION_BATCH_SECRET;
@@ -45,6 +48,19 @@ export async function verifyBatchToken(token: string): Promise<BatchTokenPayload
     // failure, same "safe generic error message" reasoning as every other
     // auth boundary in this app.
     throw new BatchTokenError("Invalid or expired batch token.");
+  }
+}
+
+export async function signConnectionToken(ownerId: string): Promise<string> {
+  return new SignJWT({ ownerId, scope: "listing-assistant" }).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime(`${EXTENSION_CONNECTION_EXPIRY_SECONDS}s`).sign(key());
+}
+
+export async function verifyConnectionToken(token: string): Promise<ConnectionTokenPayload> {
+  try {
+    const { payload } = await jwtVerify(token, key(), { algorithms: ["HS256"] });
+    return connectionTokenPayloadSchema.parse(payload);
+  } catch {
+    throw new BatchTokenError("Invalid or expired extension connection token.");
   }
 }
 

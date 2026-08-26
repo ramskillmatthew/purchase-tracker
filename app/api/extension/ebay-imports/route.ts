@@ -1,10 +1,9 @@
-import { extractBearerToken, verifyBatchToken } from "@/lib/listing-studio/extension-batch-tokens";
+import { extractBearerToken, verifyConnectionToken } from "@/lib/listing-studio/extension-batch-tokens";
 import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError } from "@/lib/listing-studio/extension-cors";
 import { supabaseRequestAll } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 
-type PairedBatch = { owner_id: string };
 type ImportBatch = { id: string; status: string; total_count: number; created_at: string; updated_at: string };
 type ImportItem = { id: string; batch_id: string; source_url: string; ebay_item_id: string; status: string; title: string | null; photo_count: number; draft_id: string | null; safe_error: string | null; attempt_count: number; created_at: string; updated_at: string };
 
@@ -13,10 +12,7 @@ export async function OPTIONS(request: Request) { return extensionCorsPreflight(
 async function ownerFromPairing(request: Request): Promise<string> {
   const token = extractBearerToken(request.headers.get("authorization"));
   if (!token) throw new Error("Missing extension connection token.");
-  const { batchId } = await verifyBatchToken(token);
-  const rows = await supabaseRequestAll<PairedBatch>(`vinted_extension_batches?id=eq.${batchId}&select=owner_id&order=created_at.desc`);
-  if (!rows[0]?.owner_id) throw new Error("The extension connection has expired. Pair it with Listing Studio again.");
-  return rows[0].owner_id;
+  return (await verifyConnectionToken(token)).ownerId;
 }
 
 export async function GET(request: Request) {

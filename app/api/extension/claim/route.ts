@@ -1,6 +1,6 @@
 import { supabaseRequest } from "@/lib/supabase";
 import { hashPairingCode } from "@/lib/listing-studio/extension-pairing-code";
-import { signBatchToken } from "@/lib/listing-studio/extension-batch-tokens";
+import { EXTENSION_CONNECTION_EXPIRY_SECONDS, signBatchToken, signConnectionToken } from "@/lib/listing-studio/extension-batch-tokens";
 import { claimRequestSchema } from "@/lib/listing-studio/extension-batch-schema";
 import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError, requestIpForRateLimit } from "@/lib/listing-studio/extension-cors";
 import { enforceRateLimit } from "@/lib/security/activity";
@@ -18,7 +18,7 @@ const RATE_LIMIT_WINDOW_SECONDS = 10 * 60;
 
 export async function OPTIONS(request: Request) { return extensionCorsPreflight(request); }
 
-type BatchRow = { id: string; status: string; expires_at: string };
+type BatchRow = { id: string; owner_id: string; status: string; expires_at: string };
 
 /**
  * Milestone 7 (Chrome extension draft queue) — exchanges a single-use
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     // so a plain bounded GET is exactly the right tool, not a
     // fetch-every-matching-row helper.
     const lookupResponse = await supabaseRequest(
-      `vinted_extension_batches?pairing_code_hash=eq.${codeHash}&select=id,status,expires_at&limit=1`,
+      `vinted_extension_batches?pairing_code_hash=eq.${codeHash}&select=id,owner_id,status,expires_at&limit=1`,
     );
     const batches = await lookupResponse.json() as BatchRow[];
     const batch = batches[0];
@@ -80,7 +80,9 @@ export async function POST(request: Request) {
 
     const expiresInSeconds = Math.max(1, Math.floor((new Date(batch.expires_at).getTime() - Date.now()) / 1000));
     const batchToken = await signBatchToken(batch.id, expiresInSeconds);
+    const connectionToken = await signConnectionToken(batch.owner_id);
+    const connectionExpiresAt = new Date(Date.now() + EXTENSION_CONNECTION_EXPIRY_SECONDS * 1000).toISOString();
 
-    return extensionCorsJson(request, { batchToken, batchId: batch.id, expiresAt: batch.expires_at });
+    return extensionCorsJson(request, { batchToken, batchId: batch.id, expiresAt: batch.expires_at, connectionToken, connectionExpiresAt });
   } catch (error) { return extensionSafeApiError(request, error, "Could not claim this batch."); }
 }
