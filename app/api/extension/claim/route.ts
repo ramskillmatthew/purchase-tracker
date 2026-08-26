@@ -36,11 +36,15 @@ type BatchRow = { id: string; owner_id: string; status: string; expires_at: stri
  * a caller can't use the error to narrow down a guess.
  */
 export async function POST(request: Request) {
+  let claimStage = "initialising";
   try {
+    claimStage = "rate_limit";
     const ip = requestIpForRateLimit(request);
     await enforceRateLimit(RATE_LIMIT_BUCKET_OWNER_ID, `extension_claim:${ip}`, RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECONDS);
 
+    claimStage = "request_validation";
     const { pairingCode, extensionId, extensionVersion, browserLabel } = claimRequestSchema.parse(await request.json());
+    claimStage = "pairing_hash";
     const codeHash = hashPairingCode(pairingCode);
     const genericError = () => extensionCorsJson(request, { error: "This code is invalid or has expired." }, 400);
 
@@ -52,6 +56,7 @@ export async function POST(request: Request) {
     // A single row is always expected here (pairing_code_hash is unique),
     // so a plain bounded GET is exactly the right tool, not a
     // fetch-every-matching-row helper.
+    claimStage = "pairing_lookup";
     const lookupResponse = await supabaseRequest(
       `vinted_extension_batches?pairing_code_hash=eq.${codeHash}&select=id,owner_id,status,expires_at&limit=1`,
     );
@@ -67,6 +72,7 @@ export async function POST(request: Request) {
     }
     if (batch.status !== "pending_claim") return genericError();
 
+    claimStage = "claim_update";
     const nowIso = new Date().toISOString();
     const claimResponse = await supabaseRequest(
       `vinted_extension_batches?id=eq.${batch.id}&status=eq.pending_claim`,
@@ -78,11 +84,12 @@ export async function POST(request: Request) {
     const claimedRows = await claimResponse.json() as BatchRow[];
     if (!claimedRows.length) return genericError(); // lost the race to another concurrent claim attempt
 
+    claimStage = "token_signing";
     const expiresInSeconds = Math.max(1, Math.floor((new Date(batch.expires_at).getTime() - Date.now()) / 1000));
     const batchToken = await signBatchToken(batch.id, expiresInSeconds);
     const connectionToken = await signConnectionToken(batch.owner_id);
     const connectionExpiresAt = new Date(Date.now() + EXTENSION_CONNECTION_EXPIRY_SECONDS * 1000).toISOString();
 
     return extensionCorsJson(request, { batchToken, batchId: batch.id, expiresAt: batch.expires_at, connectionToken, connectionExpiresAt });
-  } catch (error) { return extensionSafeApiError(request, error, "Could not claim this batch."); }
+  } catch (error) { return extensionSafeApiError(request, error, `Could not claim this batch (${claimStage}).`); }
 }
