@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/auth/server", () => ({ requireOwner: mocks.requireOwner, AuthError: class AuthError extends Error { status = 401; } }));
 vi.mock("@/lib/supabase", () => ({ supabaseRequest: mocks.supabaseRequest, supabaseRequestAll: mocks.supabaseRequestAll }));
-vi.mock("@/lib/listing-studio/ebay-extractor", () => ({ extractEbayListing: mocks.extractEbayListing }));
+vi.mock("@/lib/listing-studio/ebay-extractor", () => ({ extractEbayListing: mocks.extractEbayListing, decodeHtml: (value: string) => value }));
 vi.mock("@/lib/listing-studio/storage-rest", () => ({ uploadStorageObject: mocks.uploadStorageObject, deleteStorageObjects: mocks.deleteStorageObjects }));
 
 import { POST } from "@/app/api/listing-studio/ebay-imports/[batchId]/items/[itemId]/process/route";
