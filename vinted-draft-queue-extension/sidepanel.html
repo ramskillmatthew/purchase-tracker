@@ -44,12 +44,14 @@
       <section class="panel-card ebay-queue-card">
         <div class="ebay-queue-head">
           <div><p class="panel-title-sm">Import queue</p><p id="ebay-queue-summary" class="panel-subtitle">Check Listing Studio for waiting URLs.</p></div>
-          <button id="ebay-start-imports" class="button-primary button-sm" type="button">Start importing</button>
+          <div class="ebay-queue-actions">
+            <button id="ebay-clear-completed" class="button-outline button-sm" type="button" hidden>Clear completed</button>
+            <button id="ebay-start-imports" class="button-primary button-sm" type="button">Start importing</button>
+          </div>
         </div>
         <div id="ebay-queue-progress" class="ebay-queue-progress" hidden>
           <div class="progress-track"><div id="ebay-queue-progress-fill" class="progress-fill"></div></div>
           <ol id="ebay-queue-list" class="ebay-queue-list"></ol>
-          <button id="ebay-clear-completed" class="action-button quiet ebay-clear-completed" type="button" hidden>Clear completed</button>
         </div>
         <p id="ebay-queue-error" class="error-text" role="alert" hidden></p>
       </section>
