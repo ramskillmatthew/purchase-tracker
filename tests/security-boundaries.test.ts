@@ -10,8 +10,10 @@ describe("server security boundaries",()=>{
     for(const route of routes){
       const source=read(route);
       expect(source,route).not.toContain("requireOwner");
-      const isClaimRoute=route.replace(/\\/g,"/").endsWith("app/api/extension/claim/route.ts");
+      const normalised=route.replace(/\\/g,"/");
+      const isClaimRoute=normalised.endsWith("app/api/extension/claim/route.ts");
       if(isClaimRoute) expect(source,route).toContain("enforceRateLimit");
+      else if(normalised.endsWith("app/api/extension/ebay-imports/route.ts")) expect(source,route).toContain("verifyConnectionToken");
       else expect(source,route).toContain("verifyBatchToken");
     }
   });

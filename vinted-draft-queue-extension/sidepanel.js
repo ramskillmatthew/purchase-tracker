@@ -43,6 +43,7 @@ const els = {
   ebayQueueProgress: document.getElementById("ebay-queue-progress"),
   ebayQueueProgressFill: document.getElementById("ebay-queue-progress-fill"),
   ebayQueueList: document.getElementById("ebay-queue-list"),
+  ebayClearCompleted: document.getElementById("ebay-clear-completed"),
   ebayQueueError: document.getElementById("ebay-queue-error"),
   brandMark: document.getElementById("brand-mark"),
   connectionBadge: document.getElementById("connection-badge"),
@@ -754,6 +755,7 @@ function renderEbayImportState(state = {}) {
   els.ebayQueueError.textContent = state.error || "";
   els.ebayQueueError.hidden = !state.error;
   els.ebayQueueProgress.hidden = !total;
+  els.ebayClearCompleted.hidden = !completed || Boolean(state.running);
   els.ebayQueueProgressFill.style.width = `${total ? Math.round(((completed + failed) / total) * 100) : 0}%`;
   els.ebayQueueList.replaceChildren(...(state.items || []).map(item => {
     const row = document.createElement("li");
@@ -773,6 +775,10 @@ els.ebayStartImports.addEventListener("click", async () => {
   const result = await send("EBAY_RUN_IMPORTS");
   if (result?.state) renderEbayImportState(result.state);
   if (result?.error) { els.ebayQueueError.textContent = result.error; els.ebayQueueError.hidden = false; }
+});
+els.ebayClearCompleted.addEventListener("click", async () => {
+  const result = await send("EBAY_CLEAR_COMPLETED");
+  if (result?.state) renderEbayImportState(result.state);
 });
 
 els.ebayReadCurrent.addEventListener("click", async () => {

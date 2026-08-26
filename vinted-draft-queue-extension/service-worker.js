@@ -1596,6 +1596,15 @@ async function runEbayImports() {
   }
 }
 
+async function clearCompletedEbayImports() {
+  const current = (await chrome.storage.local.get("ebayImportState")).ebayImportState ?? {};
+  if (current.running) return { error: "Wait for the current imports to finish." };
+  const items = (current.items || []).filter(item => item.status !== "imported");
+  const failed = items.filter(item => item.status === "failed").length;
+  const next = await setEbayImportState({ items, total: items.length, completed: 0, failed, status: items.length ? "completed" : "idle", error: null });
+  return { state: next };
+}
+
 // ---- Message handling -----------------------------------------------------------
 
 async function handleMessage(message, sender) {
@@ -1604,6 +1613,7 @@ async function handleMessage(message, sender) {
     case "EBAY_READ_ACTIVE_LISTING": return readActiveEbayListing();
     case "EBAY_GET_IMPORT_STATE": return { state: (await chrome.storage.local.get("ebayImportState")).ebayImportState ?? { status: "idle", running: false, total: 0, completed: 0, failed: 0, items: [] } };
     case "EBAY_RUN_IMPORTS": return runEbayImports();
+    case "EBAY_CLEAR_COMPLETED": return clearCompletedEbayImports();
     case PANEL_TO_WORKER.CLAIM_BATCH: return claimBatch(message.pairingCode);
     case PANEL_TO_WORKER.START_BATCH: {
       const current = await getState();

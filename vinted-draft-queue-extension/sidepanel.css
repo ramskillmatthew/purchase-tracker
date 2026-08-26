@@ -654,6 +654,7 @@ body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view) {
 .ebay-queue-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ebay-queue-head .panel-title-sm, .ebay-queue-head .panel-subtitle { margin: 0; }
 .ebay-queue-head .panel-subtitle { margin-top: 5px; }
+.ebay-clear-completed { width: 100%; margin-top: 12px; }
 .ebay-queue-progress { display: grid; gap: 12px; }
 .ebay-queue-list { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
 .ebay-queue-list li { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid #292e3d; }
