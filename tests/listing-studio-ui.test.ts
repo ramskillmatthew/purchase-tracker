@@ -1275,7 +1275,7 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Gene
   it("calls the single-group generate endpoint once per eligible group, sequentially, continuing past an individual failure rather than aborting the whole run", () => {
     const fn = handlerFn();
     expect(fn).toContain("for (const group of eligibleListingGroups) {");
-    expect(fn).toContain("fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: \"POST\" })");
+    expect(fn).toContain("fetch(`/api/listing-studio/groups/${group.id}/generate`, {");
     expect(fn).toContain("failureCount += 1;");
     expect(fn).not.toContain("break;");
   });
@@ -1292,10 +1292,14 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Gene
     expect(fn).toContain("could not be generated. Click Generate Listings again to retry them.");
   });
 
-  it("never sends any request body at all to the generate endpoint — the route derives everything itself from the group's own stored photos", () => {
+  // Follow-up (Stage 2, marketplace-aware drafts): the request body now
+  // names which marketplace(s) to generate for (defaulting to VINTED via
+  // the MarketplaceSelector's own default state) — everything else (the
+  // group's own stored photos, structured fields) is still derived
+  // entirely server-side, never sent by the client.
+  it("sends only the selected marketplace target(s) in the request body — never the group's own photos or fields, which the route derives itself", () => {
     const fn = handlerFn();
-    expect(fn).toContain('fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" })');
-    expect(fn).not.toContain("body:");
+    expect(fn).toContain("body: JSON.stringify({ targets: marketplacesForTarget(generationTarget) })");
   });
 });
 
@@ -1553,12 +1557,16 @@ describe("components/listing-studio/GroupingWorkspace.tsx — expand/collapse st
     expect(source).toContain("setExpandedGroupId(current => (current === draftId ? null : draftId));");
   });
 
-  it("REGRESSION: generation display tracking is purely additive inside the EXISTING loop — never changes request order, retries, payloads, or error handling", () => {
+  it("REGRESSION: generation display tracking is purely additive inside the EXISTING loop — never changes request order, retries, or error handling", () => {
     const fn = source.slice(source.indexOf("async function handleGenerateListings"), source.indexOf("async function handleSaveListingFields"));
-    // The exact same sequential for-of loop over eligibleListingGroups, same endpoint, same POST/no-body call, same failureCount/anySucceeded logic.
+    // The exact same sequential for-of loop over eligibleListingGroups, same
+    // endpoint, same failureCount/anySucceeded logic. Stage 2 (marketplace-
+    // aware drafts) intentionally adds a JSON body naming which
+    // marketplace(s) to generate for — see MarketplaceSelector.tsx and
+    // lib/listing-studio/marketplace-types.ts's marketplacesForTarget.
     expect(fn).toContain("for (const group of eligibleListingGroups) {");
-    expect(fn).toContain('fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" })');
-    expect(fn).not.toContain("body:");
+    expect(fn).toContain("fetch(`/api/listing-studio/groups/${group.id}/generate`, {");
+    expect(fn).toContain("body: JSON.stringify({ targets: marketplacesForTarget(generationTarget) })");
     expect(fn).not.toContain("break;");
     // The new display-only state is set/reset alongside, never gating the request itself.
     expect(fn).toContain("setCurrentlyGeneratingGroupId(group.id); // display-only — the fetch below is unchanged");

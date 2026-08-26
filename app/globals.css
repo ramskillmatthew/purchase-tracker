@@ -445,6 +445,22 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .period-switch button { min-height: 28px; padding: 0 11px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 9px; font-weight: 680; white-space: nowrap; }
 .period-switch button:hover { color: var(--text); background: var(--surface-2); }
 .period-switch .period-active { color: var(--primary); background: var(--primary-soft); }
+
+/* Marketplace selector (Listing Studio Stage 2) — same pill mechanism as
+   .period-switch above (shared base rules via the .period-switch class),
+   with its own row/label wrapper and a 3-column mobile grid instead of
+   .period-switch's own 2-column one. */
+.marketplace-target-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.marketplace-target-label { font-size: 12px; font-weight: 650; color: var(--muted); }
+.marketplace-switch button { font-size: 11px; padding: 0 13px; }
+
+/* eBay draft settings panel (Stage 3) */
+.ebay-settings-panel { display: flex; flex-direction: column; gap: 14px; padding: 16px; margin-bottom: 16px; }
+.ebay-settings-title { font-size: 13px; font-weight: 700; color: var(--text); margin: 0; }
+.ebay-settings-caption { font-size: 11px; color: var(--muted); margin: -8px 0 0; }
+.ebay-settings-checkbox { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text); }
+.ebay-settings-checkbox input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
+.ebay-settings-save-state { font-size: 10px; color: var(--muted); min-height: 14px; }
 .home-error { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 8px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
 .summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .summary-grid article { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-sm); }
@@ -1090,6 +1106,8 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .home-header { align-items: stretch; flex-direction: column; }
   .period-control { align-items: stretch; flex-direction: column; gap: 5px; }
   .period-switch { display: grid; grid-template-columns: repeat(2, 1fr); }
+  .marketplace-target-row { flex-direction: column; align-items: stretch; }
+  .marketplace-switch.period-switch { display: grid; grid-template-columns: repeat(3, 1fr); }
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary-grid strong { font-size: 17px; }
   .summary-grid .summary-arrival-value { font-size: 18px; }

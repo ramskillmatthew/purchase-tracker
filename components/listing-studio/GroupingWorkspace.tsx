@@ -21,6 +21,9 @@ import { CHUNK_OVERLAP_SIZE, MAX_AUTO_GROUP_BATCH_SIZE, MAX_AUTO_GROUP_SESSION_S
 import { prepareImagePreview, releaseImagePreview } from "@/lib/listing-studio/client-image-processing";
 import { planUploadChunks, type PlannableFile } from "@/lib/listing-studio/upload-chunk-planner";
 import { parseRegistrationFailure } from "@/lib/listing-studio/upload-error-messages";
+import { MarketplaceSelector } from "./MarketplaceSelector";
+import { EbayDraftSettingsPanel } from "./EbayDraftSettingsPanel";
+import { marketplacesForTarget, type GenerationTarget } from "@/lib/listing-studio/marketplace-types";
 
 type WorkspaceDraft = {
   id: string; title: string | null; status: string; created_at: string; updated_at: string;
@@ -176,6 +179,10 @@ export default function GroupingWorkspace() {
   const [autoGroupProposals, setAutoGroupProposals] = useState<AutoGroupProposal[]>([]);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
 
+  // Stage 2 (marketplace-aware drafts) — defaults to VINTED, matching the
+  // exact pre-existing "Generate listings" behaviour when this control is
+  // never touched (see handleGenerateListings' fetch body below).
+  const [generationTarget, setGenerationTarget] = useState<GenerationTarget>("VINTED");
   const [clearWorkspaceDialogOpen, setClearWorkspaceDialogOpen] = useState(false);
   const [clearingWorkspace, setClearingWorkspace] = useState(false);
   const [clearWorkspaceError, setClearWorkspaceError] = useState("");
@@ -1098,7 +1105,10 @@ export default function GroupingWorkspace() {
     for (const group of eligibleListingGroups) {
       setCurrentlyGeneratingGroupId(group.id); // display-only — the fetch below is unchanged
       try {
-        const response = await fetch(`/api/listing-studio/groups/${group.id}/generate`, { method: "POST" });
+        const response = await fetch(`/api/listing-studio/groups/${group.id}/generate`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targets: marketplacesForTarget(generationTarget) }),
+        });
         if (response.ok) anySucceeded = true;
         else { failureCount += 1; setGenerationFailedGroupIds(current => new Set(current).add(group.id)); }
       } catch {
@@ -1470,6 +1480,9 @@ export default function GroupingWorkspace() {
             : visibleProductDrafts.map(draft => renderGroupCard(draft))}
         </div>
       </>}
+
+      <MarketplaceSelector value={generationTarget} onChange={setGenerationTarget} disabled={generatingListings} />
+      {(generationTarget === "EBAY_UK" || generationTarget === "BOTH") && <EbayDraftSettingsPanel />}
 
       <div className="listing-sticky-bar" role="toolbar" aria-label="Listing Studio actions">
         <div className="listing-sticky-bar-selection" role="status">
