@@ -73,6 +73,16 @@ function meta(property) {
   return cleanText(document.querySelector(`meta[property="${property}"], meta[name="${property}"]`)?.content);
 }
 
+function readCondition(product, specifics) {
+  const value = cleanText(product.itemCondition) ?? specific(specifics, ["Condition"]);
+  if (!value) return null;
+  if (/^https?:\/\/schema\.org\//i.test(value)) return value;
+  // eBay often places its full condition-definition paragraph in Item
+  // specifics. Only the label before that explanation is the condition.
+  const label = value.split(":", 1)[0].trim();
+  return label.length <= 100 ? label : value.slice(0, 100);
+}
+
 function readListing() {
   const itemId = itemIdFromUrl(location.href);
   if (!itemId) throw new Error("Open an eBay UK item listing before importing.");
@@ -103,7 +113,7 @@ function readListing() {
     imageUrls: images,
     pricePence: Number.isFinite(price) ? Math.round(price * 100) : null,
     currency: cleanText(offers.priceCurrency) ?? meta("og:price:currency"),
-    condition: cleanText(product.itemCondition) ?? specific(specifics, ["Condition"]),
+    condition: readCondition(product, specifics),
     category: cleanText(product.category),
     brand: cleanText(product.brand?.name ?? product.brand) ?? specific(specifics, ["Brand"]),
     size: specific(specifics, ["UK Shoe Size", "Shoe Size", "Size"]),
@@ -120,4 +130,3 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   catch (error) { sendResponse({ ok: false, error: error?.message || "This eBay listing could not be read." }); }
   return false;
 });
-

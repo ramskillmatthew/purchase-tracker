@@ -40,6 +40,14 @@ describe("POST eBay import item process route", () => {
     expect(mocks.supabaseRequest.mock.calls.some(call => String(call[0]).startsWith("ebay_import_items?") && JSON.parse((call[1] as RequestInit).body as string).status === "imported")).toBe(true);
   });
 
+  it("stores only the label from eBay's verbose condition definition", async () => {
+    mocks.extractEbayListing.mockResolvedValueOnce({ ...(await mocks.extractEbayListing.getMockImplementation()!()), condition: "New: A brand-new, unused, unopened and undamaged item in original retail packaging" });
+    const response = await POST(new Request("http://localhost", { method: "POST" }), { params: Promise.resolve({ batchId, itemId }) });
+    expect(response.status).toBe(200);
+    const draftInsert = mocks.supabaseRequest.mock.calls.find(call => call[0] === "listing_drafts");
+    expect(JSON.parse((draftInsert?.[1] as RequestInit).body as string).condition).toBe("New");
+  });
+
   it("rejects malformed route ids before any extraction or storage work", async () => {
     const response = await POST(new Request("http://localhost", { method: "POST" }), { params: Promise.resolve({ batchId: "bad", itemId: "bad" }) });
     expect(response.status).toBe(400);
