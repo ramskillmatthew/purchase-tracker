@@ -6,7 +6,9 @@ const MAX_IMAGES = 24;
 
 function cleanText(value) {
   if (typeof value !== "string") return null;
-  const text = value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const decoder = document.createElement("textarea");
+  decoder.innerHTML = value.replace(/<[^>]*>/g, " ");
+  const text = decoder.value.replace(/\s+/g, " ").trim();
   return text || null;
 }
 
@@ -96,11 +98,14 @@ function readListing() {
   const title = cleanText(product.name) ?? meta("og:title") ?? cleanText(document.querySelector("h1")?.textContent);
   if (!title) throw new Error("The listing title could not be read.");
   const description = cleanText(product.description) ?? meta("og:description") ?? "";
-  const images = [...new Set([
-    ...strings(product.image),
-    ...[...document.querySelectorAll('img[src*="ebayimg.com"]')].map(image => image.currentSrc || image.src),
-    meta("og:image") ?? "",
-  ].filter(url => /^https:\/\//i.test(url)).map(url => url.replace(/s-l\d+\./i, "s-l1600.")))].slice(0, MAX_IMAGES);
+  // JSON-LD belongs to this product. A page-wide eBay image scan also
+  // captures recommendations and adverts, so it must never be used here.
+  const productImages = strings(product.image);
+  const galleryImages = [...document.querySelectorAll('[data-testid*="ux-image"] img, .ux-image-carousel img, .ux-image-grid img')]
+    .map(image => image.currentSrc || image.src);
+  const imageCandidates = productImages.length ? productImages : [...galleryImages, meta("og:image") ?? ""];
+  const images = [...new Set(imageCandidates.filter(url => /^https:\/\//i.test(url))
+    .map(url => url.replace(/s-l\d+\.(?:jpg|jpeg|png|webp)(?:\?.*)?$/i, "s-l1600.jpg")))].slice(0, MAX_IMAGES);
   if (!images.length) throw new Error("No listing photos could be read.");
   const price = Number(offers.price ?? meta("og:price:amount"));
   const colour = specific(specifics, ["Colour", "Color"]);
@@ -121,6 +126,7 @@ function readListing() {
     material: specific(specifics, ["Upper Material", "Material"]),
     quantity: Number.isFinite(Number(offers.inventoryLevel)) ? Number(offers.inventoryLevel) : null,
     itemSpecifics: specifics,
+    descriptionUrl: document.querySelector('iframe#desc_ifr, iframe[title*="Seller"], iframe[src*="ebaydesc.com"]')?.src ?? null,
   };
 }
 

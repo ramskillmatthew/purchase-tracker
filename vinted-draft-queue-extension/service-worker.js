@@ -16,6 +16,7 @@
 import { PANEL_TO_WORKER, CONTENT_TO_WORKER, WORKER_TO_CONTENT } from "./shared/messages.js";
 import * as QueueState from "./shared/queue-state.js";
 import { validateBatchPayload, isValidPairingCodeShape } from "./shared/validation.js";
+import { htmlToPlainText, isAllowedEbayDescriptionUrl } from "./shared/ebay-description.js";
 
 const DEFAULT_APP_BASE_URL = "http://localhost:3000";
 const VINTED_URL_PATTERN = "https://www.vinted.co.uk/*";
@@ -1508,6 +1509,25 @@ async function startItem(item) {
 
 // ---- eBay listing reader --------------------------------------------------------
 
+async function enrichEbayListingDescription(listing) {
+  if (!listing?.descriptionUrl) return listing;
+  if (!isAllowedEbayDescriptionUrl(listing.descriptionUrl)) throw new Error("eBay supplied an invalid seller-description address.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(listing.descriptionUrl, { signal: controller.signal, credentials: "omit" });
+    if (!response.ok) throw new Error(`eBay returned status ${response.status} for the seller description.`);
+    const html = await response.text();
+    if (html.length > 2_000_000) throw new Error("The seller description was unexpectedly large.");
+    const description = htmlToPlainText(html);
+    if (!description) throw new Error("The full seller description was empty.");
+    return { ...listing, description };
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("eBay took too long to return the full seller description.");
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
 async function readActiveEbayListing() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^https:\/\/(?:www\.)?ebay\.co\.uk\/itm\//i.test(tab.url || "")) {
@@ -1515,13 +1535,13 @@ async function readActiveEbayListing() {
   }
   try {
     const result = await chrome.tabs.sendMessage(tab.id, { type: "EBAY_READ_LISTING" });
-    return result?.ok ? { listing: result.listing } : { error: result?.error || "This eBay listing could not be read." };
+    return result?.ok ? { listing: await enrichEbayListingDescription(result.listing) } : { error: result?.error || "This eBay listing could not be read." };
   } catch {
     // Covers a tab that was already open when the upgraded extension was
     // reloaded. Inject once, then retry without asking the user to refresh.
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["ebay-content-script.js"] });
     const result = await chrome.tabs.sendMessage(tab.id, { type: "EBAY_READ_LISTING" });
-    return result?.ok ? { listing: result.listing } : { error: result?.error || "This eBay listing could not be read." };
+    return result?.ok ? { listing: await enrichEbayListingDescription(result.listing) } : { error: result?.error || "This eBay listing could not be read." };
   }
 }
 
@@ -1570,6 +1590,7 @@ async function runEbayImports() {
         try { result = await chrome.tabs.sendMessage(tabId, { type: "EBAY_READ_LISTING" }); }
         catch { await chrome.scripting.executeScript({ target: { tabId }, files: ["ebay-content-script.js"] }); result = await chrome.tabs.sendMessage(tabId, { type: "EBAY_READ_LISTING" }); }
         if (!result?.ok) throw new Error(result?.error || "This eBay listing could not be read.");
+        result.listing = await enrichEbayListingDescription(result.listing);
         await setEbayImportState({ status: "saving" });
         const saveResponse = await fetch(`${appBaseUrl}/api/listing-studio/ebay-imports/${item.batchId}/items/${item.id}/process`, {
           method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${connectionToken}` },

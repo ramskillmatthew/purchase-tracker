@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
-import { extractEbayListing } from "@/lib/listing-studio/ebay-extractor";
+import { extractEbayListing, decodeHtml } from "@/lib/listing-studio/ebay-extractor";
 import { buildDraftImageStoragePath, LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import { deleteStorageObjects, uploadStorageObject } from "@/lib/listing-studio/storage-rest";
 import { z } from "zod";
@@ -89,6 +89,12 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
     const body = extensionRequest ? await request.json() : null;
     const listing: EbayExtractedListing = extensionRequest ? browserListingSchema.parse(body?.listing) : await extractEbayListing(item.source_url);
     if (listing.itemId !== item.source_url.match(/\/itm\/(\d{9,15})/)?.[1]) throw new Error("The eBay page did not match the queued listing.");
+    // Defensive second decode: the browser extension already decodes HTML
+    // entities in the title before submitting it, but an older/un-updated
+    // extension build must never be able to store an encoded title (e.g.
+    // "Brand New &amp; Unopened"). Decoding an already-decoded title is a
+    // harmless no-op — see decodeHtml's own comment.
+    listing.title = decodeHtml(listing.title);
     await patchItem(itemId, ownerId, { status: "downloading_photos", title: listing.title });
     stage = "matching the listing fields";
     const fields = mapEbayListingFields(listing);
