@@ -22,6 +22,16 @@ import { ITEM_STATUSES, SAVE_DRAFT_UNCONFIRMED_ERROR_CODE, SAVE_DRAFT_UNCONFIRME
 
 const SIDEPANEL_HTML = readFileSync(path.resolve("vinted-draft-queue-extension/sidepanel.html"), "utf8");
 
+describe("eBay importer queue controls", () => {
+  it("keeps Clear completed in the visible queue header rather than below the scrollable list", () => {
+    const headerStart = SIDEPANEL_HTML.indexOf('<div class="ebay-queue-head">');
+    const progressStart = SIDEPANEL_HTML.indexOf('<div id="ebay-queue-progress"');
+    const clearButton = SIDEPANEL_HTML.indexOf('id="ebay-clear-completed"');
+    expect(clearButton).toBeGreaterThan(headerStart);
+    expect(clearButton).toBeLessThan(progressStart);
+  });
+});
+
 function baseState(itemOverrides: Record<string, unknown> = {}, batchOverrides: Record<string, unknown> = {}) {
   return {
     pairing: { batchId: "batch-1", expiresAt: "2026-08-05T10:30:00.000Z" },
