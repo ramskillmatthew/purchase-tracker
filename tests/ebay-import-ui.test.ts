@@ -22,6 +22,8 @@ describe("Listing Studio eBay import integration", () => {
   it("shows the combined queue and allows waiting imports to be cleared", () => {
     expect(dialog).toContain("batches.flatMap");
     expect(dialog).toContain("Clear waiting");
+    expect(dialog).toContain("Clear completed & failed");
+    expect(dialog).toContain("?scope=history");
     expect(dialog).toContain('method: "DELETE"');
   });
 

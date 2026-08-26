@@ -48,19 +48,21 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   try {
     const user = await requireOwner();
-    const waiting = await supabaseRequestAll<{ id: string; batch_id: string }>(`ebay_import_items?owner_id=eq.${user.id}&status=eq.waiting&select=id,batch_id&order=created_at.asc`);
-    if (waiting.length) {
-      await supabaseRequest(`ebay_import_items?owner_id=eq.${user.id}&status=eq.waiting`, { method: "DELETE", headers: { Prefer: "return=minimal" } });
-      const batchIds = [...new Set(waiting.map(item => item.batch_id))];
+    const scope = new URL(request.url).searchParams.get("scope") === "history" ? "history" : "waiting";
+    const statusFilter = scope === "history" ? "in.(imported,failed)" : "eq.waiting";
+    const removed = await supabaseRequestAll<{ id: string; batch_id: string }>(`ebay_import_items?owner_id=eq.${user.id}&status=${statusFilter}&select=id,batch_id&order=created_at.asc`);
+    if (removed.length) {
+      await supabaseRequest(`ebay_import_items?owner_id=eq.${user.id}&status=${statusFilter}`, { method: "DELETE", headers: { Prefer: "return=minimal" } });
+      const batchIds = [...new Set(removed.map(item => item.batch_id))];
       for (const batchId of batchIds) {
         const remaining = await supabaseRequestAll<{ status: string }>(`ebay_import_items?owner_id=eq.${user.id}&batch_id=eq.${batchId}&select=status&order=created_at.asc`);
         if (!remaining.length) await supabaseRequest(`ebay_import_batches?owner_id=eq.${user.id}&id=eq.${batchId}`, { method: "DELETE", headers: { Prefer: "return=minimal" } });
       }
     }
-    return NextResponse.json({ ok: true, cleared: waiting.length });
+    return NextResponse.json({ ok: true, cleared: removed.length, scope });
   } catch (error) {
     return safeApiError(error, "Could not clear waiting eBay imports.");
   }
