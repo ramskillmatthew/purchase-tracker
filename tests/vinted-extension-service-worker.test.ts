@@ -177,6 +177,16 @@ function createChromeMock(options: {
     ) {
       result = { response: { state: "clean" } };
     }
+    // The eBay read/import paths call chrome.tabs.sendMessage with no
+    // callback at all (`await chrome.tabs.sendMessage(tabId, message)`),
+    // relying on Chrome's real promise-returning form — distinct from
+    // every pre-existing caller in this codebase, which always passes an
+    // explicit callback. Mirrors the real API: rejects on a lastError,
+    // resolves with the response otherwise.
+    if (typeof callback !== "function") {
+      if (result.noCallback) return new Promise(() => {});
+      return result.lastError ? Promise.reject(new Error(result.lastError)) : Promise.resolve(result.response);
+    }
     if (result.noCallback) return;
     if (result.lastError) {
       runtime.lastError = { message: result.lastError };
@@ -268,6 +278,7 @@ function createChromeMock(options: {
       create: tabsCreate,
       get: tabsGet,
       update: tabsUpdate,
+      remove: vi.fn(async () => {}),
       sendMessage,
       onUpdated: { addListener: tabsOnUpdatedAddListener, removeListener: vi.fn((fn: any) => { const i = updatedListeners.indexOf(fn); if (i >= 0) updatedListeners.splice(i, 1); }) },
     },
@@ -1620,10 +1631,16 @@ describe("service worker — photo download (photo-download CORS-bug fix): downl
       expect.arrayContaining(["http://localhost:3000/*", "http://localhost:3001/*", "http://localhost:3002/*"]),
     );
     // Narrowly scoped: every entry is either localhost, the exact deployed
-    // production origin, vinted.co.uk, or ebay.co.uk — never "<all_urls>" or a bare
-    // "*://*/*" wildcard.
+    // production origin, vinted.co.uk, ebay.co.uk, or the eBay
+    // seller-description host — never "<all_urls>" or a bare "*://*/*" wildcard.
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin === "https://www.ebay.co.uk/*" || origin.includes("localhost") || origin === "https://purchase-tracker-one.vercel.app/*").toBe(true);
+      expect(
+        origin === "https://www.vinted.co.uk/*" ||
+        origin === "https://www.ebay.co.uk/*" ||
+        origin === "https://*.ebaydesc.com/*" ||
+        origin.includes("localhost") ||
+        origin === "https://purchase-tracker-one.vercel.app/*",
+      ).toBe(true);
     }
   });
 
@@ -2873,5 +2890,135 @@ describe("service worker — multi-batch support: browser label at claim time, a
 
     const finalState = storageData.state as any;
     expect(finalState.batch.running).toBe(true);
+  });
+});
+
+// ---- eBay full seller-description enrichment (fixes the short og:description
+// preview bug) --------------------------------------------------------------
+//
+// The main eBay page's own JSON-LD only ever carries a short marketing
+// preview of the seller's description; the complete text lives in a
+// same-origin-restricted iframe (desc_ifr, hosted on ebaydesc.com) that the
+// content script can only report the URL of, never read directly. These
+// tests prove enrichEbayListingDescription() — reached through both
+// EBAY_READ_ACTIVE_LISTING and EBAY_RUN_IMPORTS, its only two callers —
+// actually fetches and substitutes the complete description, and that a
+// fetch failure produces a clear, retryable failure rather than silently
+// keeping (or worse, saving) the short preview.
+describe("service worker — eBay full seller-description enrichment", () => {
+  const EBAY_TAB_URL = "https://www.ebay.co.uk/itm/267750791701";
+  const DESCRIPTION_URL = "https://itm.ebaydesc.com/itmdesc/267750791701?token=abc";
+  const SHORT_DESCRIPTION = "Short JSON-LD summary only.";
+  const FULL_DESCRIPTION_HTML = "<p>Brand New &amp; Unopened</p><ul><li>La Mer mascara</li><li>MAC lipstick</li></ul>";
+
+  function rawListing() {
+    return {
+      itemId: "267750791701", url: EBAY_TAB_URL, title: "Harrods BEAUTY Advent Calendar",
+      description: SHORT_DESCRIPTION, imageUrls: ["https://i.ebayimg.com/images/g/x/s-l1600.jpg"],
+      pricePence: 3499, currency: "GBP", condition: null, category: null, brand: "Harrods",
+      size: null, colours: [], material: null, quantity: 1, itemSpecifics: {}, descriptionUrl: DESCRIPTION_URL,
+    };
+  }
+
+  it("REGRESSION: EBAY_READ_ACTIVE_LISTING returns the COMPLETE seller description fetched from the ebaydesc.com iframe, never the short JSON-LD preview", async () => {
+    const { chromeMock, messageListeners } = createChromeMock({
+      activeTabQueryResult: [{ id: 7, url: EBAY_TAB_URL, windowId: 1, active: true }],
+      sendMessageHandler: (_tabId, message) => message.type === "EBAY_READ_LISTING" ? { response: { ok: true, listing: rawListing() } } : { response: {} },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      expect(String(url)).toBe(DESCRIPTION_URL);
+      return new Response(FULL_DESCRIPTION_HTML, { status: 200 });
+    }));
+
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: "EBAY_READ_ACTIVE_LISTING" });
+
+    expect(result.listing.description).toContain("Brand New & Unopened");
+    expect(result.listing.description).toContain("• La Mer mascara");
+    expect(result.listing.description).toContain("• MAC lipstick");
+    expect(result.listing.description).not.toBe(SHORT_DESCRIPTION);
+  });
+
+  it("REGRESSION: EBAY_READ_ACTIVE_LISTING surfaces a clear error when the full description can't be fetched, rather than returning a listing with the short preview", async () => {
+    const { chromeMock, messageListeners } = createChromeMock({
+      activeTabQueryResult: [{ id: 7, url: EBAY_TAB_URL, windowId: 1, active: true }],
+      sendMessageHandler: (_tabId, message) => message.type === "EBAY_READ_LISTING" ? { response: { ok: true, listing: rawListing() } } : { response: {} },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Server error", { status: 500 })));
+
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: "EBAY_READ_ACTIVE_LISTING" });
+
+    expect(result.listing).toBeUndefined();
+    expect(result.error).toBeTruthy();
+  });
+
+  it("REGRESSION: EBAY_RUN_IMPORTS posts the COMPLETE seller description to the app for each queued item, never the short preview", async () => {
+    const queuedItem = { id: "item-1", ebay_item_id: "267750791701", title: "Harrods BEAUTY Advent Calendar", source_url: EBAY_TAB_URL };
+    let postedBody: any = null;
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      createdTabId: 42,
+      sendMessageHandler: (_tabId, message) => message.type === "EBAY_READ_LISTING" ? { response: { ok: true, listing: rawListing() } } : { response: {} },
+    });
+    storageData.settings = { appBaseUrl: APP_BASE_URL, connectionToken: "test-token", connectionExpiresAt: "2099-01-01T00:00:00.000Z" };
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+      const href = String(url);
+      if (href.endsWith("/api/extension/ebay-imports")) return new Response(JSON.stringify({ batches: [{ id: "batch-1", items: [queuedItem] }] }), { status: 200 });
+      if (href === DESCRIPTION_URL) return new Response(FULL_DESCRIPTION_HTML, { status: 200 });
+      if (href.includes("/process")) { postedBody = JSON.parse(init.body); return new Response(JSON.stringify({ title: postedBody.listing.title }), { status: 200 }); }
+      return new Response(null, { status: 204 });
+    }));
+
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: "EBAY_RUN_IMPORTS" });
+
+    expect(result.state.completed).toBe(1);
+    expect(result.state.failed).toBe(0);
+    expect(postedBody).not.toBeNull();
+    expect(postedBody.listing.description).toContain("Brand New & Unopened");
+    expect(postedBody.listing.description).not.toBe(SHORT_DESCRIPTION);
+  });
+
+  it("REGRESSION: a full-description fetch failure marks THAT item failed with a useful message, and never falls back to posting the short preview", async () => {
+    const queuedItem = { id: "item-1", ebay_item_id: "267750791701", title: "Harrods BEAUTY Advent Calendar", source_url: EBAY_TAB_URL };
+    let processCalled = false;
+    const { chromeMock, storageData, messageListeners } = createChromeMock({
+      createdTabId: 42,
+      sendMessageHandler: (_tabId, message) => message.type === "EBAY_READ_LISTING" ? { response: { ok: true, listing: rawListing() } } : { response: {} },
+    });
+    storageData.settings = { appBaseUrl: APP_BASE_URL, connectionToken: "test-token", connectionExpiresAt: "2099-01-01T00:00:00.000Z" };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.endsWith("/api/extension/ebay-imports")) return new Response(JSON.stringify({ batches: [{ id: "batch-1", items: [queuedItem] }] }), { status: 200 });
+      if (href === DESCRIPTION_URL) return new Response("Server error", { status: 500 });
+      if (href.includes("/process")) { processCalled = true; return new Response(JSON.stringify({}), { status: 200 }); }
+      return new Response(null, { status: 204 });
+    }));
+
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: "EBAY_RUN_IMPORTS" });
+
+    expect(result.state.failed).toBe(1);
+    expect(result.state.completed).toBe(0);
+    expect(result.state.items[0].status).toBe("failed");
+    expect(result.state.items[0].error).toMatch(/description/i);
+    expect(processCalled).toBe(false);
+  });
+
+  it("does not change existing Vinted draft orchestration: EBAY_RUN_IMPORTS with an empty queue leaves the queue idle without touching chrome.tabs.create", async () => {
+    const { chromeMock, storageData, messageListeners, tabsCreate } = createChromeMock({
+      sendMessageHandler: () => ({ response: {} }),
+    });
+    storageData.settings = { appBaseUrl: APP_BASE_URL, connectionToken: "test-token", connectionExpiresAt: "2099-01-01T00:00:00.000Z" };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/extension/ebay-imports")) return new Response(JSON.stringify({ batches: [] }), { status: 200 });
+      return new Response(null, { status: 204 });
+    }));
+
+    await loadWorker(chromeMock);
+    const result: any = await dispatch(messageListeners, { type: "EBAY_RUN_IMPORTS" });
+
+    expect(result.state.total).toBe(0);
+    expect(tabsCreate).not.toHaveBeenCalled();
   });
 });

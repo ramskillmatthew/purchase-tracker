@@ -30,4 +30,31 @@ describe("eBay listing extractor", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>Verify you are human captcha</html>", { status: 200 })));
     await expect(extractEbayListing("https://www.ebay.co.uk/itm/123456789012")).rejects.toThrow("human verification");
   });
+
+  it("REGRESSION: prefers product.image over og:image — og:image is only ever a fallback for when JSON-LD has no image at all, never appended alongside a real product.image list", async () => {
+    const html = `<html><head>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product", name: "Harrods BEAUTY Advent Calendar", description: "d",
+        image: ["https://i.ebayimg.com/images/g/SScAAeSwwXppPWrE/s-l1600.jpg"],
+        offers: { price: "89.99", priceCurrency: "GBP" },
+      })}</script>
+      <meta property="og:image" content="https://i.ebayimg.com/images/g/otherimage/s-l500.jpg" />
+    </head></html>`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(html, { status: 200 })));
+    const result = await extractEbayListing("https://www.ebay.co.uk/itm/267750791701");
+    expect(result.imageUrls).toEqual(["https://i.ebayimg.com/images/g/SScAAeSwwXppPWrE/s-l1600.jpg"]);
+  });
+
+  it("REGRESSION: normalises different size/format variants of the SAME underlying photo to one canonical URL before deduplicating — never counts the same photo twice", async () => {
+    const html = `<html><head>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Product", name: "Two sizes of the same photo", description: "d",
+        image: ["https://i.ebayimg.com/images/g/same/s-l500.jpg", "https://i.ebayimg.com/images/g/same/s-l1600.png", "https://i.ebayimg.com/images/g/different/s-l1600.jpg"],
+        offers: { price: "10", priceCurrency: "GBP" },
+      })}</script>
+    </head></html>`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(html, { status: 200 })));
+    const result = await extractEbayListing("https://www.ebay.co.uk/itm/267750791701");
+    expect(result.imageUrls).toHaveLength(2);
+  });
 });

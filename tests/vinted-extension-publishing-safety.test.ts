@@ -122,14 +122,31 @@ describe("Publishing safety — structural: no publish/upload/list-live function
     for (const file of jsFiles) expect(read(file)).not.toMatch(/import\(["']https?:\/\/|from ["']https?:\/\/|cdn\.|unpkg\.com|jsdelivr/);
   });
 
-  it("manifest.json requests no cookies/history/proxy/password-adjacent permissions, and host_permissions is restricted to the app, Vinted and eBay UK only", () => {
+  it("manifest.json requests no cookies/history/proxy/password-adjacent permissions, and host_permissions is restricted to the app, Vinted, eBay UK and the eBay seller-description host only", () => {
     const manifest = JSON.parse(read("manifest.json"));
     for (const forbidden of ["cookies", "history", "proxy", "webRequest", "management", "debugger"]) {
       expect(manifest.permissions ?? []).not.toContain(forbidden);
     }
     for (const origin of manifest.host_permissions) {
-      expect(origin === "https://www.vinted.co.uk/*" || origin === "https://www.ebay.co.uk/*" || origin.includes("localhost") || origin === PRODUCTION_ORIGIN).toBe(true);
+      expect(
+        origin === "https://www.vinted.co.uk/*" ||
+        origin === "https://www.ebay.co.uk/*" ||
+        origin === "https://*.ebaydesc.com/*" ||
+        origin.includes("localhost") ||
+        origin === PRODUCTION_ORIGIN,
+      ).toBe(true);
     }
+  });
+
+  // Follow-up (full seller-description fetch, ebaydesc.com iframe) — the
+  // seller's complete description lives in a same-origin-restricted iframe
+  // hosted on ebaydesc.com, not the main ebay.co.uk page. This permission
+  // must stay narrowly scoped to that one host, never a broad wildcard.
+  it("host_permissions includes the narrowly-scoped eBay seller-description host, https://*.ebaydesc.com/*, and nothing broader", () => {
+    const manifest = JSON.parse(read("manifest.json"));
+    expect(manifest.host_permissions).toContain("https://*.ebaydesc.com/*");
+    expect(manifest.host_permissions).not.toContain("https://*/*");
+    expect(manifest.host_permissions).not.toContain("<all_urls>");
   });
 
   // Follow-up correction (live production error — PHOTO_HOST_NOT_PERMITTED)

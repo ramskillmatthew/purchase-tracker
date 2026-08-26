@@ -23,8 +23,14 @@ const PAGE_TIMEOUT_MS = 15_000;
 const MAX_PAGE_BYTES = 5_000_000;
 const MAX_IMAGES = 24;
 
-function decodeHtml(value: string): string {
-  return value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).trim();
+// Exported — also used server-side in app/api/listing-studio/ebay-imports/
+// [batchId]/items/[itemId]/process/route.ts as a defensive second decode of
+// the title the browser extension submits, so an older/un-updated extension
+// build can never cause an encoded title (e.g. "Brand New &amp; Unopened")
+// to be stored. Applying this twice on an already-decoded string is a
+// harmless no-op: a bare "&" never matches any of these entity patterns.
+export function decodeHtml(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16))).replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).trim();
 }
 
 function cleanText(value: unknown): string | null {
@@ -112,7 +118,17 @@ export async function extractEbayListing(rawUrl: string): Promise<EbayExtractedL
   const specifics = specificsFrom(product);
   const offers = product.offers && typeof product.offers === "object" ? product.offers as Record<string, unknown> : {};
   const price = Number(offers.price ?? meta(html, "og:price:amount"));
-  const imageUrls = [...new Set([...strings(product.image), meta(html, "og:image") ?? ""].filter(value => /^https:\/\//i.test(value)))].slice(0, MAX_IMAGES);
+  // Product JSON-LD's own `image` belongs to this exact product. og:image is
+  // only ever used as a fallback when JSON-LD has no image at all — it must
+  // never be appended alongside a real product.image list, since it can
+  // duplicate (a different cached size/format of) the same photo and
+  // silently inflate the imported photo count. Different size/format
+  // variants of the SAME underlying photo are normalised to one canonical
+  // URL before deduplication, matching the browser extension's own logic.
+  const productImages = strings(product.image);
+  const imageCandidates = productImages.length ? productImages : [meta(html, "og:image") ?? ""];
+  const imageUrls = [...new Set(imageCandidates.filter(value => /^https:\/\//i.test(value))
+    .map(value => value.replace(/s-l\d+\.(?:jpg|jpeg|png|webp)(?:\?.*)?$/i, "s-l1600.jpg")))].slice(0, MAX_IMAGES);
   if (!imageUrls.length) throw new Error("No listing photos could be extracted.");
   const colour = specific(specifics, ["colour", "color"]);
   return {
