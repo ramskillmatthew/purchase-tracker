@@ -17,17 +17,47 @@ import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDr
 import { canonicaliseVintedBrand } from "@/lib/listing-studio/vinted-brand-canonicalisation";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
 import type { VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
+import { z } from "zod";
+import { marketplaceSchema } from "@/lib/validation/listing-studio-marketplace";
+import { buildEbayDraftFromGeneratedFields } from "@/lib/listing-studio/ebay-draft-generation";
+import { upsertMarketplaceDraft, getMarketplaceSettingsDefaults } from "@/lib/listing-studio/marketplace-drafts";
+import { resolveMarketplaceSettings, defaultContentModeForSourceType } from "@/lib/listing-studio/marketplace-settings";
+import { marketplaceDraftSettingsSchema } from "@/lib/validation/listing-studio-marketplace";
+import type { Marketplace } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const UNSORTED_TITLE = "Unsorted";
 
+// Stage 2 (marketplace-aware drafts): defaults to VINTED-only, matching
+// this route's exact pre-existing behaviour when a caller sends no body
+// at all — every existing caller (GroupingWorkspace.tsx's
+// handleGenerateListings, every pre-existing test) keeps working
+// completely unchanged. "targets" only ever names real marketplaces
+// (never the UI-only "BOTH" concept — see
+// lib/listing-studio/marketplace-types.ts's marketplacesForTarget, which
+// the CLIENT uses to expand "Both" into ["VINTED","EBAY_UK"] before this
+// route ever sees the request).
+// Stage 3 (eBay draft settings) — an optional BATCH-level settings override
+// for this one generate call, sitting between account defaults (lowest
+// priority — see lib/listing-studio/marketplace-drafts.ts's
+// getMarketplaceSettingsDefaults) and a per-draft override (highest —
+// listing_marketplace_drafts.settings_json, not touched here since this
+// route only ever creates/regenerates a fresh draft). Never persisted
+// anywhere: this app has no standing "batch" entity for Listing Studio
+// generation, so it lives only as long as this one request.
+const generateRequestSchema = z.object({
+  targets: z.array(marketplaceSchema).min(1).default(["VINTED"]),
+  ebaySettings: marketplaceDraftSettingsSchema.optional(),
+});
+
 type DraftRow = {
   id: string; title: string | null; uk_size: string | null; uk_size_source: string | null;
   vinted_category_id: number | null; vinted_category_path: string | null; vinted_category_source: "ai" | "manual" | null;
   vinted_category_status: string | null;
   vinted_audience: VintedAudienceValue | null; vinted_audience_source: "ai" | "manual" | null;
+  suggested_price_pence: number | null; confirmed_price_pence: number | null;
 };
 type CategoryRunOutcome = { status: "success" | "failed"; errorMessage: string | null; responseJson: unknown };
 type ImageRow = { id: string; storage_path: string; mime_type: string };
@@ -49,14 +79,16 @@ type ImageRow = { id: string; storage_path: string; mime_type: string };
  * partial/guessed data is ever written) — only an audit row is recorded,
  * so a retry is always safe and simply repeats the same call.
  */
-export async function POST(_request: Request, { params }: { params: Promise<{ draftId: string }> }) {
+export async function POST(request: Request, { params }: { params: Promise<{ draftId: string }> }) {
   try {
     const user = await requireOwner();
     const { draftId } = await params;
     if (!uuidSchema.safeParse(draftId).success) return NextResponse.json({ error: "Invalid group id." }, { status: 400 });
+    const { targets, ebaySettings } = generateRequestSchema.parse(await request.json().catch(() => ({})));
+    const targetSet = new Set<Marketplace>(targets);
 
     const drafts = await supabaseRequestAll<DraftRow>(
-      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source`,
+      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source,suggested_price_pence,confirmed_price_pence`,
     );
     const draft = drafts[0];
     if (!draft) return NextResponse.json({ error: "Group not found." }, { status: 404 });
@@ -248,6 +280,35 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
       }).catch(() => {});
     }
 
+    // Stage 2 (marketplace-aware drafts): additive only — reuses the SAME
+    // `fields`/`finalUkSize` the Vinted logic above already computed from
+    // this one photo-analysis call, so selecting "eBay UK" or "Both" never
+    // triggers a second AI call or a second photo upload. Never touches
+    // anything written above; the eBay draft lives entirely in its own
+    // listing_marketplace_drafts row (see that table's own header comment
+    // in supabase-listing-studio-marketplace.sql for why it's a separate
+    // table rather than a replacement of the Vinted-shaped columns above).
+    let ebayDraft: Awaited<ReturnType<typeof buildEbayDraftFromGeneratedFields>> | null = null;
+    if (targetSet.has("EBAY_UK")) {
+      const accountDefaults = await getMarketplaceSettingsDefaults(user.id, "EBAY_UK");
+      const resolvedSettings = resolveMarketplaceSettings(accountDefaults, ebaySettings, null);
+      const contentMode = ebaySettings?.contentMode ?? accountDefaults.contentMode ?? defaultContentModeForSourceType("generated");
+      const pricePence = draft.confirmed_price_pence ?? draft.suggested_price_pence;
+      const generation = buildEbayDraftFromGeneratedFields({
+        fields, ukSize: finalUkSize, hasPhoto: eligibleImages.length > 0, pricePence, quantity: resolvedSettings.quantity,
+      });
+      ebayDraft = generation;
+      await upsertMarketplaceDraft({
+        productDraftId: draftId, ownerId: user.id, marketplace: "EBAY_UK",
+        sourceType: "generated", contentMode,
+        title: generation.title, description: generation.description,
+        conditionValue: generation.conditionValue,
+        pricePence, quantity: resolvedSettings.quantity, currency: "GBP",
+        status: generation.status, readiness: generation.readiness, validationMessages: generation.validationMessages,
+        aiGeneration: { model, promptVersion: LISTING_PROMPT_VERSIONS.generation, schemaVersion: LISTING_SCHEMA_VERSIONS.generation, generatedAt: completedAt },
+      });
+    }
+
     return NextResponse.json({
       draftId,
       brand: structuredFields.brand, model: structuredFields.model, productType: structuredFields.productType,
@@ -256,6 +317,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
       generatedTitle, generatedDescription, status: "ready",
       vintedAudience: finalVintedAudience, vintedAudienceSource: finalVintedAudienceSource, vintedAudienceEvidence: finalVintedAudienceEvidence,
       vintedCategoryId: categoryId, vintedCategoryPath: categoryPath, vintedCategorySource: categorySource, vintedCategoryStatus: categoryStatus,
+      ...(ebayDraft ? { ebayDraft: { title: ebayDraft.title, description: ebayDraft.description, status: ebayDraft.status, readiness: ebayDraft.readiness, validationMessages: ebayDraft.validationMessages } } : {}),
     });
   } catch (error) { return safeApiError(error, "Could not generate this listing."); }
 }
