@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 vi.mock("server-only", () => ({}));
 import { extractEbayListing } from "@/lib/listing-studio/ebay-extractor";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("eBay listing extractor", () => {
+  it("normalises eBay's verbose browser condition paragraph before sending it to the app", () => {
+    const browserExtractor = readFileSync("vinted-draft-queue-extension/ebay-content-script.js", "utf8");
+    expect(browserExtractor).toContain("function readCondition");
+    expect(browserExtractor).toContain('value.split(":", 1)[0]');
+    expect(browserExtractor).toContain("condition: readCondition(product, specifics)");
+  });
   it("extracts the title, original description, photos, price and item specifics from Product JSON-LD", async () => {
     const html = `<html><head><script type="application/ld+json">${JSON.stringify({
       "@type": "Product", name: "Nike Air Max 95 UK 9", description: "Original seller description",

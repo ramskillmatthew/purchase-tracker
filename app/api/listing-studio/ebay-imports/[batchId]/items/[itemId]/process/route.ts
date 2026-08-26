@@ -23,7 +23,7 @@ const browserListingSchema = z.object({
   itemId: z.string().regex(/^\d{9,15}$/), url: z.string().url(), title: z.string().trim().min(1).max(300),
   description: z.string().max(100_000), imageUrls: z.array(z.string().url()).min(1).max(24),
   pricePence: z.number().int().nonnegative().nullable(), currency: z.string().max(10).nullable(),
-  condition: z.string().max(200).nullable(), category: z.string().max(500).nullable(), brand: z.string().max(300).nullable(),
+  condition: z.string().max(2_000).nullable(), category: z.string().max(500).nullable(), brand: z.string().max(300).nullable(),
   size: z.string().max(200).nullable(), colours: z.array(z.string().max(200)).max(2), material: z.string().max(300).nullable(),
   quantity: z.number().int().nonnegative().nullable(), itemSpecifics: z.record(z.string(), z.string().max(5_000)),
 });
@@ -68,11 +68,13 @@ async function downloadImage(urlValue: string): Promise<{ bytes: ArrayBuffer; mi
 
 function normaliseCondition(value: string | null): string | null {
   if (!value) return null;
-  return value.replace(/^https?:\/\/schema\.org\//i, "").replace(/Condition$/i, "").replace(/([a-z])([A-Z])/g, "$1 $2").trim() || null;
+  const cleaned = value.replace(/^https?:\/\/schema\.org\//i, "").replace(/Condition$/i, "").replace(/([a-z])([A-Z])/g, "$1 $2").trim();
+  const label = cleaned.split(":", 1)[0].trim();
+  return (label.length <= 100 ? label : cleaned.slice(0, 100)) || null;
 }
 
 export async function POST(request: Request, context: { params: Promise<{ batchId: string; itemId: string }> }) {
-  let ownerId = ""; let itemId = ""; let batchId = ""; let draftId: string | null = null; let extensionRequest = false; const storedPaths: string[] = [];
+  let ownerId = ""; let itemId = ""; let batchId = ""; let draftId: string | null = null; let extensionRequest = false; let stage = "starting the import"; const storedPaths: string[] = [];
   try {
     const auth = await requestOwner(request); ownerId = auth.ownerId; extensionRequest = auth.extension;
     ({ batchId, itemId } = z.object({ batchId: z.string().uuid(), itemId: z.string().uuid() }).parse(await context.params));
@@ -83,16 +85,19 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
     await patchItem(itemId, ownerId, { status: "extracting", safe_error: null, started_at: new Date().toISOString(), completed_at: null, attempt_count: item.attempt_count + 1 });
     await supabaseRequest(`ebay_import_batches?id=eq.${batchId}&owner_id=eq.${ownerId}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "processing", updated_at: new Date().toISOString() }) });
 
+    stage = "validating the data read from eBay";
     const body = extensionRequest ? await request.json() : null;
     const listing: EbayExtractedListing = extensionRequest ? browserListingSchema.parse(body?.listing) : await extractEbayListing(item.source_url);
     if (listing.itemId !== item.source_url.match(/\/itm\/(\d{9,15})/)?.[1]) throw new Error("The eBay page did not match the queued listing.");
     await patchItem(itemId, ownerId, { status: "downloading_photos", title: listing.title });
+    stage = "matching the listing fields";
     const fields = mapEbayListingFields(listing);
     let category: Awaited<ReturnType<typeof resolveVintedCategoryAssignment>> | null = null;
     if (fields.productType && fields.audience) {
       try { category = await resolveVintedCategoryAssignment({ vintedAudience: fields.audience, productType: fields.productType, brand: fields.brand, model: fields.model }); }
       catch { /* Category matching is helpful enrichment; it must never prevent the eBay listing itself importing. */ }
     }
+    stage = "creating the Listing Studio draft";
     draftId = crypto.randomUUID();
     await supabaseRequest("listing_drafts", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({
       id: draftId, owner_id: ownerId, title: listing.title, description: listing.description, brand: fields.brand, model: fields.model,
@@ -109,6 +114,7 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
       ai_result_json: { source: "ebay_uk", sourceUrl: listing.url, sourceItemId: listing.itemId, importedAt: new Date().toISOString(), currency: listing.currency, quantity: listing.quantity, itemSpecifics: listing.itemSpecifics },
     }) });
 
+    stage = "saving the listing photos";
     const imageRows: Record<string, unknown>[] = [];
     for (let position = 0; position < listing.imageUrls.length; position++) {
       const photo = await downloadImage(listing.imageUrls[position]);
@@ -129,7 +135,12 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
     if (isEbayImportMigrationMissing(error)) return extensionRequest ? extensionCorsJson(request, { error: "The eBay importer database update is not installed yet. Run supabase-ebay-import-stage-one.sql, then try again." }, 503) : NextResponse.json({ error: "The eBay importer database update is not installed yet. Run supabase-ebay-import-stage-one.sql, then try again." }, { status: 503 });
     if (storedPaths.length && ownerId) await deleteStorageObjects(LISTING_STUDIO_BUCKET, storedPaths).catch(() => {});
     if (draftId && ownerId) await supabaseRequest(`listing_drafts?id=eq.${draftId}&owner_id=eq.${ownerId}`, { method: "DELETE" }).catch(() => {});
-    const safeMessage = error instanceof Error && /eBay|listing|photo|human verification|URL/i.test(error.message) ? error.message.slice(0, 240) : "This listing could not be imported. Please retry.";
+    const validationIssue = error instanceof z.ZodError ? error.issues[0] : null;
+    const safeMessage = validationIssue
+      ? `eBay returned unsupported data for ${validationIssue.path.join(".") || "the listing"}: ${validationIssue.message}`.slice(0, 240)
+      : error instanceof Error && /eBay|listing|photo|human verification|URL/i.test(error.message)
+        ? error.message.slice(0, 240)
+        : `This listing could not be imported while ${stage}. Please retry.`;
     if (itemId && ownerId) await patchItem(itemId, ownerId, { status: "failed", safe_error: safeMessage, draft_id: null, completed_at: new Date().toISOString() }).catch(() => {});
     if (batchId && ownerId) await finishBatch(batchId, ownerId).catch(() => {});
     if (itemId) return extensionRequest ? extensionCorsJson(request, { error: safeMessage }, 422) : NextResponse.json({ error: safeMessage }, { status: 422 });

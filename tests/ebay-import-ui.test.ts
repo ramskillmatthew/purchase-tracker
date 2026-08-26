@@ -41,4 +41,10 @@ describe("Listing Studio eBay import integration", () => {
   it("offers the newest waiting import batches before retained completed history", () => {
     expect(extensionQueueRoute).toMatch(/ebay_import_batches\?[^`]+order=created_at\.desc/);
   });
+
+  it("keeps failed items from completed batches retryable and deduplicates repeated failures", () => {
+    expect(extensionQueueRoute).toContain("Completed batches can still contain failed items");
+    expect(extensionQueueRoute).toContain("seenItemIds");
+    expect(extensionQueueRoute).toContain("order=created_at.desc");
+  });
 });
