@@ -7,7 +7,7 @@ import { buildDraftImageStoragePath, LISTING_STUDIO_BUCKET } from "@/lib/listing
 import { deleteStorageObjects, uploadStorageObject } from "@/lib/listing-studio/storage-rest";
 import { z } from "zod";
 import { isEbayImportMigrationMissing } from "@/lib/listing-studio/ebay-import";
-import { extractBearerToken, verifyBatchToken } from "@/lib/listing-studio/extension-batch-tokens";
+import { extractBearerToken, verifyConnectionToken } from "@/lib/listing-studio/extension-batch-tokens";
 import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError } from "@/lib/listing-studio/extension-cors";
 import type { EbayExtractedListing } from "@/lib/listing-studio/ebay-extractor";
 
@@ -31,10 +31,7 @@ export async function OPTIONS(request: Request) { return extensionCorsPreflight(
 async function requestOwner(request: Request): Promise<{ ownerId: string; extension: boolean }> {
   const token = extractBearerToken(request.headers.get("authorization"));
   if (!token) return { ownerId: (await requireOwner()).id, extension: false };
-  const { batchId } = await verifyBatchToken(token);
-  const rows = await supabaseRequestAll<{ owner_id: string }>(`vinted_extension_batches?id=eq.${batchId}&select=owner_id&order=created_at.desc`);
-  if (!rows[0]?.owner_id) throw new Error("The extension connection has expired. Pair it with Listing Studio again.");
-  return { ownerId: rows[0].owner_id, extension: true };
+  return { ownerId: (await verifyConnectionToken(token)).ownerId, extension: true };
 }
 
 async function patchItem(itemId: string, ownerId: string, values: Record<string, unknown>) {

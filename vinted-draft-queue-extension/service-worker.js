@@ -1188,6 +1188,8 @@ async function claimBatch(pairingCode) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) return { error: body.error || "Could not claim this batch." };
 
+  if (body.connectionToken) await setSettings({ connectionToken: body.connectionToken, connectionExpiresAt: body.connectionExpiresAt });
+
   await updateState(s => QueueState.applyClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: nowIso() }));
   const payloadResult = await fetchBatchPayload();
   if (payloadResult.error) return payloadResult;
@@ -1545,13 +1547,12 @@ async function setEbayImportState(patch) {
 async function runEbayImports() {
   const current = (await chrome.storage.local.get("ebayImportState")).ebayImportState;
   if (current?.running) return { error: "eBay imports are already running." };
-  const state = await getState();
-  const { appBaseUrl } = await getSettings();
-  if (!state.pairing?.batchToken) return { error: "Connect the extension to Listing Studio before importing." };
+  const { appBaseUrl, connectionToken, connectionExpiresAt } = await getSettings();
+  if (!connectionToken || !connectionExpiresAt || new Date(connectionExpiresAt).getTime() <= Date.now()) return { error: "Your Listing Assistant connection has expired. Pair the extension with Listing Studio again." };
   await setEbayImportState({ running: true, status: "checking", error: null, completed: 0, failed: 0, total: 0, items: [] });
   let completed = 0; let failed = 0; let total = 0;
   try {
-    const queueResponse = await fetch(`${appBaseUrl}/api/extension/ebay-imports`, { headers: { Authorization: `Bearer ${state.pairing.batchToken}` } });
+    const queueResponse = await fetch(`${appBaseUrl}/api/extension/ebay-imports`, { headers: { Authorization: `Bearer ${connectionToken}` } });
     const queueBody = await queueResponse.json().catch(() => ({}));
     if (!queueResponse.ok) throw new Error(queueBody.error || "Could not load eBay imports from Listing Studio.");
     const queue = (queueBody.batches || []).flatMap(batch => (batch.items || []).map(item => ({ ...item, batchId: batch.id })));
@@ -1571,7 +1572,7 @@ async function runEbayImports() {
         if (!result?.ok) throw new Error(result?.error || "This eBay listing could not be read.");
         await setEbayImportState({ status: "saving" });
         const saveResponse = await fetch(`${appBaseUrl}/api/listing-studio/ebay-imports/${item.batchId}/items/${item.id}/process`, {
-          method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.pairing.batchToken}` },
+          method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${connectionToken}` },
           body: JSON.stringify({ listing: result.listing }),
         });
         const saved = await saveResponse.json().catch(() => ({}));
