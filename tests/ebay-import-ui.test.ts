@@ -19,6 +19,12 @@ describe("Listing Studio eBay import integration", () => {
     expect(dialog).toContain("/api/listing-studio/ebay-imports");
   });
 
+  it("shows the combined queue and allows waiting imports to be cleared", () => {
+    expect(dialog).toContain("batches.flatMap");
+    expect(dialog).toContain("Clear waiting");
+    expect(dialog).toContain('method: "DELETE"');
+  });
+
   it("marks imported rows without creating a parallel listing card", () => {
     expect(card).toContain("Imported from eBay");
     expect(card).toContain('group.source_type === "ebay_uk"');

@@ -10,6 +10,8 @@ import { isEbayImportMigrationMissing } from "@/lib/listing-studio/ebay-import";
 import { extractBearerToken, verifyConnectionToken } from "@/lib/listing-studio/extension-batch-tokens";
 import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError } from "@/lib/listing-studio/extension-cors";
 import type { EbayExtractedListing } from "@/lib/listing-studio/ebay-extractor";
+import { mapEbayListingFields } from "@/lib/listing-studio/ebay-field-mapping";
+import { resolveVintedCategoryAssignment } from "@/lib/listing-studio/vinted-category-assignment";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -85,12 +87,23 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
     const listing: EbayExtractedListing = extensionRequest ? browserListingSchema.parse(body?.listing) : await extractEbayListing(item.source_url);
     if (listing.itemId !== item.source_url.match(/\/itm\/(\d{9,15})/)?.[1]) throw new Error("The eBay page did not match the queued listing.");
     await patchItem(itemId, ownerId, { status: "downloading_photos", title: listing.title });
+    const fields = mapEbayListingFields(listing);
+    let category: Awaited<ReturnType<typeof resolveVintedCategoryAssignment>> | null = null;
+    if (fields.productType && fields.audience) {
+      try { category = await resolveVintedCategoryAssignment({ vintedAudience: fields.audience, productType: fields.productType, brand: fields.brand, model: fields.model }); }
+      catch { /* Category matching is helpful enrichment; it must never prevent the eBay listing itself importing. */ }
+    }
     draftId = crypto.randomUUID();
     await supabaseRequest("listing_drafts", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({
-      id: draftId, owner_id: ownerId, title: listing.title, description: listing.description, brand: listing.brand,
-      product_type: listing.category, condition: normaliseCondition(listing.condition), uk_size: listing.size,
-      colours: listing.colours, material: listing.material, generated_title: listing.title,
-      generated_description: listing.description, suggested_price_pence: listing.pricePence,
+      id: draftId, owner_id: ownerId, title: listing.title, description: listing.description, brand: fields.brand, model: fields.model,
+      product_type: fields.productType, condition: normaliseCondition(listing.condition), uk_size: fields.size,
+      colours: fields.colours, material: fields.material, generated_title: listing.title,
+      generated_description: listing.description, suggested_price_pence: listing.pricePence, confirmed_price_pence: listing.pricePence,
+      vinted_audience: category?.vintedAudience ?? fields.audience, vinted_audience_source: fields.audience ? "ai" : null,
+      vinted_category_id: category?.result.reason === "category_assigned" ? category.result.categoryId : null,
+      vinted_category_path: category?.result.reason === "category_assigned" ? category.result.categoryPath : null,
+      vinted_category_source: category?.result.reason === "category_assigned" ? "ai" : null,
+      vinted_category_status: category?.result.reason ?? (fields.audience ? null : "audience_missing"),
       status: "needs_review", overall_confidence: "unconfirmed",
       source_type: "ebay_uk", source_url: listing.url, source_item_id: listing.itemId,
       ai_result_json: { source: "ebay_uk", sourceUrl: listing.url, sourceItemId: listing.itemId, importedAt: new Date().toISOString(), currency: listing.currency, quantity: listing.quantity, itemSpecifics: listing.itemSpecifics },

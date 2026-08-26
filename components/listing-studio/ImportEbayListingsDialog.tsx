@@ -14,13 +14,13 @@ const STATUS_LABELS: Record<EbayImportStatus, string> = {
 export default function ImportEbayListingsDialog({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: () => Promise<unknown> }) {
   const [rawUrls, setRawUrls] = useState("");
   const [batches, setBatches] = useState<ImportBatch[]>([]);
-  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState("");
   const lines = useMemo(() => rawUrls.split(/\r?\n/).map(value => value.trim()).filter(Boolean), [rawUrls]);
   const validation = useMemo(() => validateAndDedupeEbayUrls(lines), [lines]);
-  const activeBatch = batches.find(batch => batch.id === activeBatchId) ?? batches[0] ?? null;
+  const queueItems = useMemo(() => batches.flatMap(batch => batch.items), [batches]);
 
   const loadImports = useCallback(async () => {
     setLoading(true);
@@ -29,7 +29,6 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not load imports.");
       setBatches(body.batches ?? []);
-      setActiveBatchId(current => current ?? body.batches?.[0]?.id ?? null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load imports."); }
     finally { setLoading(false); }
   }, []);
@@ -49,15 +48,28 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not start the import.");
       const batch = body.batch as ImportBatch;
-      setBatches(current => [batch, ...current]); setActiveBatchId(batch.id); setRawUrls("");
+      setBatches(current => [batch, ...current]); setRawUrls("");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start the import."); }
     finally { setCreating(false); }
   }
 
+  async function clearWaiting() {
+    if (!queueItems.some(item => item.status === "waiting")) return;
+    setClearing(true); setError("");
+    try {
+      const response = await fetch("/api/listing-studio/ebay-imports", { method: "DELETE" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Could not clear waiting imports.");
+      await loadImports();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not clear waiting imports."); }
+    finally { setClearing(false); }
+  }
+
   if (!open) return null;
-  const completed = activeBatch?.items.filter(item => item.status === "imported").length ?? 0;
-  const failed = activeBatch?.items.filter(item => item.status === "failed").length ?? 0;
-  const busy = creating || Boolean(activeBatch?.items.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status)));
+  const completed = queueItems.filter(item => item.status === "imported").length;
+  const failed = queueItems.filter(item => item.status === "failed").length;
+  const waiting = queueItems.filter(item => item.status === "waiting").length;
+  const busy = creating || clearing || queueItems.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status));
 
   return <div className="ebay-import-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <section className="ebay-import-dialog" role="dialog" aria-modal="true" aria-labelledby="ebay-import-title">
@@ -71,9 +83,9 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
           <button className="button primary ebay-import-submit" type="button" onClick={createImport} disabled={creating || !validation.urls.length || validation.errors.length > 0}>{creating ? "Importing listings…" : `Import ${validation.urls.length || ""} listing${validation.urls.length === 1 ? "" : "s"}`}</button>
         </div>
 
-        {(loading || activeBatch) && <div className="ebay-import-progress">
-          <div className="ebay-import-progress-head"><div><strong>Import progress</strong>{activeBatch && <span>{completed} of {activeBatch.total_count} imported{failed ? ` · ${failed} failed` : ""}</span>}</div>{activeBatch && <button type="button" className="button-secondary" onClick={loadImports}>Refresh</button>}</div>
-          {loading && !activeBatch ? <p className="ebay-import-loading">Loading imports…</p> : <div className="ebay-import-items">{activeBatch?.items.map(item => <article key={item.id} className={`ebay-import-item ebay-import-item-${item.status}`}>
+        {(loading || queueItems.length > 0) && <div className="ebay-import-progress">
+          <div className="ebay-import-progress-head"><div><strong>Import queue</strong><span>{completed} imported{waiting ? ` · ${waiting} waiting` : ""}{failed ? ` · ${failed} failed` : ""}</span></div><div className="ebay-import-progress-actions"><button type="button" className="button-secondary" onClick={clearWaiting} disabled={!waiting || clearing}>{clearing ? "Clearing…" : "Clear waiting"}</button><button type="button" className="button-secondary" onClick={loadImports}>Refresh</button></div></div>
+          {loading && !queueItems.length ? <p className="ebay-import-loading">Loading imports…</p> : <div className="ebay-import-items">{queueItems.map(item => <article key={item.id} className={`ebay-import-item ebay-import-item-${item.status}`}>
             <span className="ebay-import-item-icon" aria-hidden="true">{item.status === "imported" ? "✓" : item.status === "failed" ? "!" : item.status === "waiting" ? "·" : "↻"}</span>
             <div><strong>{item.title || `eBay item ${item.ebay_item_id}`}</strong><small>{STATUS_LABELS[item.status]}{item.photo_count ? ` · ${item.photo_count} photos` : ""}</small>{item.safe_error && <p>{item.safe_error}</p>}</div>
           </article>)}</div>}

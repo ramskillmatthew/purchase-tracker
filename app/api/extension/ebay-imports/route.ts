@@ -22,7 +22,7 @@ export async function GET(request: Request) {
     // so taking the oldest ten would eventually hide a newly-created waiting
     // batch from the extension entirely.
     const batches = await supabaseRequestAll<ImportBatch>(`ebay_import_batches?owner_id=eq.${ownerId}&status=in.(waiting,processing,completed)&select=id,status,total_count,created_at,updated_at&order=created_at.desc`);
-    const visible = batches.slice(0, 10);
+    const visible = batches.filter(batch => batch.status !== "completed").slice(0, 50);
     const items = visible.length
       ? await supabaseRequestAll<ImportItem>(`ebay_import_items?owner_id=eq.${ownerId}&batch_id=in.(${visible.map(row => row.id).join(",")})&status=in.(waiting,failed,extracting)&select=id,batch_id,source_url,ebay_item_id,status,title,photo_count,draft_id,safe_error,attempt_count,created_at,updated_at&order=created_at.asc`)
       : [];
