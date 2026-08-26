@@ -13,6 +13,7 @@ import ClearWorkspaceDialog from "./ClearWorkspaceDialog";
 import WorkflowSteps from "./WorkflowSteps";
 import TaskToast from "@/components/TaskToast";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import ImportEbayListingsDialog from "./ImportEbayListingsDialog";
 import { UPLOAD_ACTIVE_STATES, type UploadItem } from "./upload-types";
 import type { PhotoTileData } from "./SortablePhotoGrid";
 import { isAcceptedFile, partitionDuplicateFiles } from "@/lib/listing-studio/file-selection";
@@ -35,6 +36,7 @@ type WorkspaceDraft = {
   vinted_category_status: string | null;
   // Follow-up correction (2026-08-04).
   vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
+  source_type: "photos" | "ebay_uk"; source_url: string | null; source_item_id: string | null;
 };
 type WorkspaceImage = {
   id: string; draft_id: string; original_filename: string; mime_type: string; file_size: number;
@@ -52,6 +54,7 @@ const BLANK_LISTING_FIELDS = {
   uk_size: null, sku: null, generated_title: null, generated_description: null,
   vinted_category_id: null, vinted_category_path: null, vinted_category_source: null, vinted_category_status: null,
   vinted_audience: null,
+  source_type: "photos", source_url: null, source_item_id: null,
 } as const;
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -201,6 +204,7 @@ export default function GroupingWorkspace() {
   // start of each run and gains one id per already-existing failure branch.
   const [currentlyGeneratingGroupId, setCurrentlyGeneratingGroupId] = useState<string | null>(null);
   const [generationFailedGroupIds, setGenerationFailedGroupIds] = useState<Set<string>>(new Set());
+  const [ebayImportOpen, setEbayImportOpen] = useState(false);
 
   // Visual redesign — the upload-success banner is a temporary notification,
   // not a permanent status line: it clears itself a few seconds after being
@@ -1313,6 +1317,7 @@ export default function GroupingWorkspace() {
     />
 
     {!hasAnyData && <>
+      <div className="listing-source-actions"><button type="button" className="button-secondary listing-import-button" onClick={() => setEbayImportOpen(true)}>↗ Import listings</button></div>
       <UploadDropzone onFilesSelected={handleFilesSelected} />
       {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
       <UploadQueue
@@ -1328,6 +1333,7 @@ export default function GroupingWorkspace() {
     </>}
 
     {hasAnyData && <>
+      <div className="listing-source-actions"><button type="button" className="button-secondary listing-import-button" onClick={() => setEbayImportOpen(true)}>↗ Import listings</button></div>
       <UploadDropzone onFilesSelected={handleFilesSelected} compact />
       {uploadNotice && <p className="import-note" role="status">{uploadNotice}</p>}
       <UploadQueue
@@ -1535,6 +1541,8 @@ export default function GroupingWorkspace() {
       onCancel={() => setBulkDeleteConfirmOpen(false)}
     />}
     {pendingUndo && <TaskToast message={pendingUndo.message} actionLabel="Undo" onAction={pendingUndo.onAction} onDismiss={pendingUndo.onDismiss} />}
+    <ImportEbayListingsDialog open={ebayImportOpen} onClose={() => setEbayImportOpen(false)} onImported={loadWorkspace} />
+
     {clearWorkspaceDialogOpen && <ClearWorkspaceDialog
       loading={clearingWorkspace}
       onClose={() => setClearWorkspaceDialogOpen(false)}

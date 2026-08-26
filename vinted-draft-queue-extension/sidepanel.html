@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Vinted Draft Queue</title>
+  <title>Listing Assistant</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
     <header class="app-header">
       <div class="brand">
         <span id="brand-mark" class="brand-mark">TA</span>
-        <h1 class="brand-name" title="Vinted Draft Queue">Vinted Draft Queue</h1>
+        <h1 class="brand-name" title="Listing Assistant">Listing Assistant</h1>
       </div>
       <div class="header-actions">
         <span id="connection-badge" class="connection-badge" role="status">
@@ -23,6 +23,59 @@
         </button>
       </div>
     </header>
+
+    <nav class="assistant-tabs" aria-label="Listing Assistant tools">
+      <button id="vinted-tab" class="assistant-tab is-active" type="button" aria-selected="true">Vinted Drafts</button>
+      <button id="ebay-tab" class="assistant-tab" type="button" aria-selected="false">eBay Importer</button>
+    </nav>
+
+    <section id="ebay-view" class="ebay-view" hidden>
+      <div class="safety-banner ebay-safety" role="note">
+        <svg class="safety-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.75 4.9v4.6c0 4 2.7 6.9 6.25 8 3.55-1.1 6.25-4 6.25-8V4.9L10 2.5Z" stroke="currentColor" stroke-width="1.4"/><path d="M7.4 10.1l1.9 1.9 3.3-3.9" stroke="currentColor" stroke-width="1.4"/></svg>
+        <span>Reads listings — never publishes</span>
+      </div>
+
+      <section id="ebay-ready-card" class="ebay-hero panel-card">
+        <span class="ebay-hero-icon" aria-hidden="true">✓</span>
+        <h2>eBay importer ready</h2>
+        <p>Paste URLs in Listing Studio to import multiple listings.</p>
+      </section>
+
+      <section class="panel-card ebay-queue-card">
+        <div class="ebay-queue-head">
+          <div><p class="panel-title-sm">Import queue</p><p id="ebay-queue-summary" class="panel-subtitle">Check Listing Studio for waiting URLs.</p></div>
+          <button id="ebay-start-imports" class="button-primary button-sm" type="button">Start importing</button>
+        </div>
+        <div id="ebay-queue-progress" class="ebay-queue-progress" hidden>
+          <div class="progress-track"><div id="ebay-queue-progress-fill" class="progress-fill"></div></div>
+          <ol id="ebay-queue-list" class="ebay-queue-list"></ol>
+        </div>
+        <p id="ebay-queue-error" class="error-text" role="alert" hidden></p>
+      </section>
+
+      <section class="panel-card ebay-test-card">
+        <div>
+          <p class="panel-title-sm">Test the page reader</p>
+          <p class="panel-subtitle">Open one eBay UK item page and check that the extension can read it.</p>
+        </div>
+        <button id="ebay-read-current" class="button-primary button-block" type="button">Read current eBay listing</button>
+        <p id="ebay-read-error" class="error-text" role="alert" hidden></p>
+      </section>
+
+      <section id="ebay-preview" class="panel-card ebay-preview" hidden>
+        <div class="ebay-preview-heading">
+          <span class="status-dot"></span>
+          <div><p class="panel-label">Listing read successfully</p><h2 id="ebay-preview-title"></h2></div>
+        </div>
+        <dl class="ebay-preview-grid">
+          <div><dt>Item number</dt><dd id="ebay-preview-id">—</dd></div>
+          <div><dt>Photos</dt><dd id="ebay-preview-photos">—</dd></div>
+          <div><dt>Price</dt><dd id="ebay-preview-price">—</dd></div>
+          <div><dt>Specifics</dt><dd id="ebay-preview-specifics">—</dd></div>
+        </dl>
+        <p class="ebay-preview-note">This test only reads the page. The next build step will save it into Listing Studio.</p>
+      </section>
+    </section>
 
     <!-- Permanent safety reassurance — one line, never repeated. -->
     <div class="safety-banner" role="note">

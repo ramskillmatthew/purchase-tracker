@@ -1504,11 +1504,105 @@ async function startItem(item) {
   });
 }
 
+// ---- eBay listing reader --------------------------------------------------------
+
+async function readActiveEbayListing() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !/^https:\/\/(?:www\.)?ebay\.co\.uk\/itm\//i.test(tab.url || "")) {
+    return { error: "Open an eBay UK item listing in this window, then try again." };
+  }
+  try {
+    const result = await chrome.tabs.sendMessage(tab.id, { type: "EBAY_READ_LISTING" });
+    return result?.ok ? { listing: result.listing } : { error: result?.error || "This eBay listing could not be read." };
+  } catch {
+    // Covers a tab that was already open when the upgraded extension was
+    // reloaded. Inject once, then retry without asking the user to refresh.
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["ebay-content-script.js"] });
+    const result = await chrome.tabs.sendMessage(tab.id, { type: "EBAY_READ_LISTING" });
+    return result?.ok ? { listing: result.listing } : { error: result?.error || "This eBay listing could not be read." };
+  }
+}
+
+function waitForEbayTab(tabId, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("eBay took too long to load this listing.")); }, timeoutMs);
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId !== tabId || info.status !== "complete") return;
+      clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => { if (tab.status === "complete") { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(); } }).catch(() => {});
+  });
+}
+
+async function setEbayImportState(patch) {
+  const { ebayImportState = {} } = await chrome.storage.local.get("ebayImportState");
+  const next = { ...ebayImportState, ...patch, updatedAt: nowIso() };
+  await chrome.storage.local.set({ ebayImportState: next });
+  return next;
+}
+
+async function runEbayImports() {
+  const current = (await chrome.storage.local.get("ebayImportState")).ebayImportState;
+  if (current?.running) return { error: "eBay imports are already running." };
+  const state = await getState();
+  const { appBaseUrl } = await getSettings();
+  if (!state.pairing?.batchToken) return { error: "Connect the extension to Listing Studio before importing." };
+  await setEbayImportState({ running: true, status: "checking", error: null, completed: 0, failed: 0, total: 0, items: [] });
+  let completed = 0; let failed = 0; let total = 0;
+  try {
+    const queueResponse = await fetch(`${appBaseUrl}/api/extension/ebay-imports`, { headers: { Authorization: `Bearer ${state.pairing.batchToken}` } });
+    const queueBody = await queueResponse.json().catch(() => ({}));
+    if (!queueResponse.ok) throw new Error(queueBody.error || "Could not load eBay imports from Listing Studio.");
+    const queue = (queueBody.batches || []).flatMap(batch => (batch.items || []).map(item => ({ ...item, batchId: batch.id })));
+    total = queue.length;
+    await setEbayImportState({ status: total ? "running" : "idle", total, items: queue.map(item => ({ id: item.id, itemId: item.ebay_item_id, title: item.title, status: "waiting", error: null })) });
+    for (const item of queue) {
+      let tabId = null;
+      try {
+        await setEbayImportState({ activeItemId: item.id, status: "opening" });
+        const tab = await chrome.tabs.create({ url: item.source_url, active: false });
+        tabId = tab.id;
+        await waitForEbayTab(tabId);
+        await setEbayImportState({ status: "reading" });
+        let result;
+        try { result = await chrome.tabs.sendMessage(tabId, { type: "EBAY_READ_LISTING" }); }
+        catch { await chrome.scripting.executeScript({ target: { tabId }, files: ["ebay-content-script.js"] }); result = await chrome.tabs.sendMessage(tabId, { type: "EBAY_READ_LISTING" }); }
+        if (!result?.ok) throw new Error(result?.error || "This eBay listing could not be read.");
+        await setEbayImportState({ status: "saving" });
+        const saveResponse = await fetch(`${appBaseUrl}/api/listing-studio/ebay-imports/${item.batchId}/items/${item.id}/process`, {
+          method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.pairing.batchToken}` },
+          body: JSON.stringify({ listing: result.listing }),
+        });
+        const saved = await saveResponse.json().catch(() => ({}));
+        if (!saveResponse.ok) throw new Error(saved.error || "This listing could not be saved.");
+        completed += 1;
+        const snapshot = (await chrome.storage.local.get("ebayImportState")).ebayImportState;
+        await setEbayImportState({ completed, items: (snapshot.items || []).map(row => row.id === item.id ? { ...row, title: saved.title || result.listing.title, status: "imported", error: null } : row) });
+      } catch (error) {
+        failed += 1;
+        const snapshot = (await chrome.storage.local.get("ebayImportState")).ebayImportState;
+        await setEbayImportState({ failed, items: (snapshot.items || []).map(row => row.id === item.id ? { ...row, status: "failed", error: error?.message || "Import failed." } : row) });
+      } finally {
+        if (tabId) await chrome.tabs.remove(tabId).catch(() => {});
+      }
+    }
+    const finished = await setEbayImportState({ running: false, activeItemId: null, status: total ? "completed" : "idle", completed, failed, total });
+    return { state: finished };
+  } catch (error) {
+    const failedState = await setEbayImportState({ running: false, activeItemId: null, status: "failed", error: error?.message || "eBay imports could not be started.", completed, failed, total });
+    return { error: failedState.error, state: failedState };
+  }
+}
+
 // ---- Message handling -----------------------------------------------------------
 
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case PANEL_TO_WORKER.GET_STATE: return { state: await getState(), settings: await getSettings() };
+    case "EBAY_READ_ACTIVE_LISTING": return readActiveEbayListing();
+    case "EBAY_GET_IMPORT_STATE": return { state: (await chrome.storage.local.get("ebayImportState")).ebayImportState ?? { status: "idle", running: false, total: 0, completed: 0, failed: 0, items: [] } };
+    case "EBAY_RUN_IMPORTS": return runEbayImports();
     case PANEL_TO_WORKER.CLAIM_BATCH: return claimBatch(message.pairingCode);
     case PANEL_TO_WORKER.START_BATCH: {
       const current = await getState();
