@@ -4,14 +4,27 @@ import type { EmailType } from "@/lib/email/classify";
 import { rankedFilters, type RankedIndexQuery } from "./ranked-filters";
 import { hasFullCoverage, type CompletedRange } from "./coverage-gaps";
 
-export type IndexQuery = { ownerId: string; entity?: string; type?: EmailType; startDate?: string; endDate?: string; limit?: number };
+// A single type keeps an explicit, narrow request (e.g. "find my order
+// confirmation") scoped to exactly that document type. A list lets a
+// lifecycle status question ("did my order arrive?") retrieve every stage
+// of the forward order narrative (confirmation, shipping, delivery)
+// together at the database level, rather than excluding the other stages
+// via a single equality filter — see lib/anthropic/assistant.ts's
+// lifecycleTypeFilter for how the list is chosen.
+export type IndexQuery = { ownerId: string; entity?: string; type?: EmailType | EmailType[]; startDate?: string; endDate?: string; limit?: number };
 const safe = (value: string) => value.replace(/[%*,()]/g, "").trim();
+
+function typeFilter(type: IndexQuery["type"]) {
+  if (!type) return null;
+  const types = Array.isArray(type) ? type : [type];
+  return types.length ? `email_type=in.(${types.join(",")})` : null;
+}
 
 export async function queryIndex(value: IndexQuery) {
   const filters = ["select=*", `owner_id=eq.${value.ownerId}`, "order=email_date.desc", `limit=${Math.min(value.limit || 25, 100)}`];
   if (value.startDate) filters.push(`email_date=gte.${value.startDate}T00:00:00Z`);
   if (value.endDate) filters.push(`email_date=lt.${nextDay(value.endDate)}T00:00:00Z`);
-  if (value.type) filters.push(`email_type=eq.${value.type}`);
+  const type = typeFilter(value.type); if (type) filters.push(type);
   if (value.entity) { const term = encodeURIComponent(safe(value.entity)); filters.push(`or=(entity_name.ilike.*${term}*,sender_name.ilike.*${term}*,sender_address.ilike.*${term}*,subject.ilike.*${term}*)`); }
   return await (await supabaseRequest(`email_metadata_index?${filters.join("&")}`)).json() as Record<string, unknown>[];
 }
@@ -20,7 +33,7 @@ export async function countIndex(value: IndexQuery) {
   const filters = ["select=id", `owner_id=eq.${value.ownerId}`];
   if (value.startDate) filters.push(`email_date=gte.${value.startDate}T00:00:00Z`);
   if (value.endDate) filters.push(`email_date=lt.${nextDay(value.endDate)}T00:00:00Z`);
-  if (value.type) filters.push(`email_type=eq.${value.type}`);
+  const type = typeFilter(value.type); if (type) filters.push(type);
   if (value.entity) { const term = encodeURIComponent(safe(value.entity)); filters.push(`or=(entity_name.ilike.*${term}*,sender_name.ilike.*${term}*,sender_address.ilike.*${term}*,subject.ilike.*${term}*)`); }
   const response = await supabaseRequest(`email_metadata_index?${filters.join("&")}`, { headers: { Prefer: "count=exact", Range: "0-0" } });
   const range = response.headers.get("content-range") || "";

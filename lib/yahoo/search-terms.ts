@@ -53,6 +53,17 @@ export function semanticSubjectTerms(values: string[]) {
   const intent = values.join(" ").replace(/\bconformation\b/gi, "confirmation");
   const terms = new Set<string>();
   if (classifyQueryIntent(values) === "sold") ["sold", "you've sold", "you’ve sold", "item sold", "sale completed"].forEach(term => terms.add(term));
+  // Shipping/delivery wording is checked before the generic order/purchase
+  // and confirmation branches below, so a lifecycle-status question (e.g.
+  // "when did my order arrive") keeps its specific "parcel"/"arriving"
+  // terms within the bounded result set instead of them being crowded out
+  // by the more generic order-confirmation vocabulary that also matches.
+  if (/(?:dispatch|shipping|shipped|tracking|on (?:the|its) way|parcel)/i.test(intent)) {
+    ["dispatch", "dispatched", "shipping", "shipped", "tracking", "on its way", "order update", "parcel"].forEach(term => terms.add(term));
+  }
+  if (/(?:deliver|delivery|collected|collection|arriv|expect|parcel)/i.test(intent)) {
+    ["delivered", "delivery", "ready for collection", "collected", "arriving", "expecting", "parcel"].forEach(term => terms.add(term));
+  }
   if (/\b(?:order|purchase|preorder)\b/i.test(intent)) {
     const orderTerms = /\bconfirm(?:ed|ation)?s?\b/i.test(intent)
       ? ["confirmed", "confirmation", "thank you for", "order received", "order", "purchase", "order details", "receipt"]
@@ -61,12 +72,6 @@ export function semanticSubjectTerms(values: string[]) {
   }
   if (/(?:receipt|invoice|confirmations?|confirmed|proof of purchase)/i.test(intent)) {
     ["confirmed", "confirmation", "thank you for", "receipt", "invoice", "purchase", "order details", "payment received", "payment confirmation", "purchase confirmation", "order"].forEach(term => terms.add(term));
-  }
-  if (/(?:dispatch|shipping|shipped|tracking|on (?:the|its) way)/i.test(intent)) {
-    ["dispatch", "dispatched", "shipping", "shipped", "tracking", "on its way", "order update"].forEach(term => terms.add(term));
-  }
-  if (/(?:deliver|delivery|collected|collection)/i.test(intent)) {
-    ["delivered", "delivery", "ready for collection", "collected"].forEach(term => terms.add(term));
   }
   if (/(?:cancel|cancellation)/i.test(intent)) ["cancelled", "canceled", "cancellation"].forEach(term => terms.add(term));
   if (/(?:refund|refunded|money back)/i.test(intent)) ["refund", "refunded", "money back"].forEach(term => terms.add(term));

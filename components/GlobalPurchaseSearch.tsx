@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import ArrivalToggle from "./ArrivalToggle";
 import type { Purchase } from "@/lib/types";
 
 type SearchablePurchase = Purchase & { searchText: string };
@@ -61,6 +62,22 @@ export default function GlobalPurchaseSearch() {
     router.push(`/purchases/${id}`);
   }
 
+  // Updates this component's own local list in place — the Purchases page
+  // (if open in another tab/route) reloads from the database on its own
+  // next mount, so no cross-component sync is needed here.
+  async function toggleArrived(id: string, next: boolean) {
+    try {
+      const response = await fetch(`/api/purchases?id=${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arrived: next }),
+      });
+      if (!response.ok) return false;
+      setPurchases(current => current.map(purchase => purchase.id === id ? { ...purchase, arrived: next } : purchase));
+      return true;
+    } catch { return false; }
+  }
+
   return <div className="global-search-shell">
     <div className="global-search-inner" ref={searchRef}>
       <div className={`app-global-search ${focused ? "app-global-search-focused" : ""}`}>
@@ -69,11 +86,14 @@ export default function GlobalPurchaseSearch() {
         {query ? <button type="button" onClick={() => { setQuery(""); inputRef.current?.focus(); }} aria-label="Clear search">×</button> : <kbd>Ctrl K</kbd>}
       </div>
       {focused && query.trim() && <div className="global-search-results" role="listbox">
-        {results.length ? results.map((purchase, index) => <button key={purchase.id} type="button" onClick={() => openPurchase(purchase.id)} className="global-search-result" role="option" aria-selected={index === 0}>
-          <span className="global-result-icon">{purchase.item_description?.slice(0, 1).toUpperCase() || "P"}</span>
-          <span className="global-result-copy"><strong>{purchase.item_description}</strong><small>{purchase.seller_name || "No seller"} · SKU {purchase.sku || "—"}</small></span>
+        {results.length ? results.map((purchase, index) => <div key={purchase.id} className="global-search-result" role="option" aria-selected={index === 0}>
+          <button type="button" className="global-search-result-open" onClick={() => openPurchase(purchase.id)}>
+            <span className="global-result-icon">{purchase.item_description?.slice(0, 1).toUpperCase() || "P"}</span>
+            <span className="global-result-copy"><strong>{purchase.item_description}</strong><small>{purchase.seller_name || "No seller"} · SKU {purchase.sku || "—"}</small></span>
+          </button>
+          <ArrivalToggle id={purchase.id} arrived={purchase.arrived} description={purchase.item_description} onToggle={toggleArrived} size="md" />
           {index === 0 && <span className="global-result-enter">Enter ↵</span>}
-        </button>) : <div className="global-search-no-results"><strong>No matching purchases</strong><span>Search by item title, SKU or seller name.</span></div>}
+        </div>) : <div className="global-search-no-results"><strong>No matching purchases</strong><span>Search by item title, SKU or seller name.</span></div>}
       </div>}
     </div>
   </div>;

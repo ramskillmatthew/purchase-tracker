@@ -4,7 +4,7 @@ import GlobalPurchaseSearch from "@/components/GlobalPurchaseSearch";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Purchase Tracker",
+  title: "Trotter's Attire HQ",
   description: "A simple personal purchase and expense tracker",
 };
 

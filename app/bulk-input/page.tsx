@@ -2,17 +2,20 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { parseUkDate, formatUkDate } from "@/lib/validation/uk-date";
+import { purchaseCategories } from "@/lib/validation/purchase";
 
-type Field = "order_date" | "purchased_from" | "seller_name" | "sku" | "arrived" | "item_description" | "item_size" | "item_condition" | "price_purchased";
+type Field = "order_date" | "purchased_from" | "seller_name" | "sku" | "arrived" | "item_description" | "item_size" | "item_condition" | "category" | "price_purchased";
 type Columns = Record<Field, string>;
 type ApplyState = Record<"order_date" | "purchased_from" | "seller_name" | "arrived", boolean>;
-type BulkRow = Record<Field, string> & { price: number | null; date: string | null; arrivedValue: boolean | null; errors: Field[] };
+type BulkRow = Record<Field, string> & { price: number | null; date: string | null; dateIssue: string | null; arrivedValue: boolean | null; errors: Field[] };
 
 const fields: { key: Field; label: string; placeholder: string }[] = [
   { key: "sku", label: "SKU", placeholder: "1801\n1802\n1803" },
   { key: "item_description", label: "Item Description", placeholder: "Nike Air Max 95 Black\nNew Balance 2002R Grey" },
   { key: "item_size", label: "Item Size", placeholder: "9\n8.5\n10" },
   { key: "item_condition", label: "Item Condition", placeholder: "Brand new\nGood condition from photos" },
+  { key: "category", label: "Category", placeholder: `${purchaseCategories[0]}\n${purchaseCategories[1]}` },
   { key: "price_purchased", label: "Price Purchased", placeholder: "13.49\n£15\n22.50" },
   { key: "seller_name", label: "Seller Name", placeholder: "seller_one\nseller_two" },
   { key: "purchased_from", label: "Purchased From", placeholder: "Vinted\neBay" },
@@ -35,22 +38,9 @@ function parsePrice(value: string) {
   const number = Number(clean);
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
-function parseDate(value: string) {
-  const clean = value.trim();
-  if (!clean) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
-  const match = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (!match) return null;
-  const [, day, month, year] = match;
-  const iso = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  const date = new Date(`${iso}T00:00:00`);
-  return date.getFullYear() === Number(year) && date.getMonth() + 1 === Number(month) && date.getDate() === Number(day) ? iso : null;
-}
 function displayDate(value: string) {
-  const iso = parseDate(value);
-  if (!iso) return value;
-  const [year, month, day] = iso.split("-");
-  return `${day}/${month}/${year}`;
+  const result = parseUkDate(value);
+  return result.ok ? formatUkDate(result.iso) : value;
 }
 function parseArrived(value: string) {
   const clean = value.trim().toLowerCase();
@@ -61,12 +51,20 @@ function parseArrived(value: string) {
 function arrivedIsValid(value: string) {
   return !value.trim() || /^(yes|no|true|false|1|0)$/i.test(value.trim());
 }
+// Blank is valid (server-side defaults it to "Other" — see resolveBulkCategory
+// in app/api/purchases/bulk/route.ts); a non-blank value must exactly match
+// one of the canonical categories, case-insensitively.
+function categoryIsValid(value: string) {
+  const trimmed = value.trim();
+  return !trimmed || purchaseCategories.some(category => category.toLowerCase() === trimmed.toLowerCase());
+}
 function fieldFromHeading(value: string): Field | "" {
   const heading = value.trim().toLowerCase().replace(/[_-]+/g, " ");
   if (/\bsku\b/.test(heading)) return "sku";
   if (/seller/.test(heading)) return "seller_name";
   if (/arrived/.test(heading)) return "arrived";
   if (/condition/.test(heading)) return "item_condition";
+  if (/category/.test(heading)) return "category";
   if (/size/.test(heading)) return "item_size";
   if (/price|cost|amount/.test(heading)) return "price_purchased";
   if (/description|item|title/.test(heading)) return "item_description";
@@ -80,6 +78,9 @@ export default function BulkInputPage() {
   const submitting = useRef(false);
   const [columns, setColumns] = useState<Columns>(emptyColumns);
   const [shared, setShared] = useState({ order_date: todayIso(), purchased_from: "Vinted", platform: "Vinted", seller_name: "", arrived: "" });
+  const [sharedDateText, setSharedDateText] = useState(() => formatUkDate(todayIso()));
+  const [sharedDateError, setSharedDateError] = useState("");
+  const sharedDateNativeRef = useRef<HTMLInputElement>(null);
   const [apply, setApply] = useState<ApplyState>({ order_date: true, purchased_from: true, seller_name: true, arrived: true });
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -100,17 +101,21 @@ export default function BulkInputPage() {
       return [field.key, value];
     })) as Record<Field, string>;
     const price = parsePrice(values.price_purchased);
-    const date = parseDate(values.order_date);
+    const dateResult = values.order_date.trim() ? parseUkDate(values.order_date) : null;
+    const date = dateResult?.ok ? dateResult.iso : null;
+    const dateIssue = dateResult && !dateResult.ok ? `Order date row ${index + 1}: ${dateResult.error}` : null;
     const errors: Field[] = [];
     if (!values.sku.trim()) errors.push("sku");
     if (!values.item_description.trim()) errors.push("item_description");
     if (price === null) errors.push("price_purchased");
-    if (values.order_date.trim() && date === null) errors.push("order_date");
+    if (dateIssue) errors.push("order_date");
     if (!arrivedIsValid(values.arrived)) errors.push("arrived");
-    return { ...values, price, date, arrivedValue: parseArrived(values.arrived), errors };
+    if (!categoryIsValid(values.category)) errors.push("category");
+    return { ...values, price, date, dateIssue, arrivedValue: parseArrived(values.arrived), errors };
   }), [apply, columns, count, shared]);
   const ready = rows.filter(row => !row.errors.length).length;
   const invalid = rows.length - ready;
+  const dateIssues = rows.map(row => row.dateIssue).filter((issue): issue is string => Boolean(issue));
 
   function updateLine(field: Field, index: number, value: string) {
     setColumns(current => {
@@ -130,6 +135,33 @@ export default function BulkInputPage() {
       return;
     }
     updateLine(field, index, value);
+  }
+
+  function commitSharedDate(value: string) {
+    const result = parseUkDate(value);
+    if (result.ok) {
+      setSharedDateError("");
+      setSharedDateText(formatUkDate(result.iso));
+      setShared(current => ({ ...current, order_date: result.iso }));
+    } else {
+      setSharedDateError(result.error);
+    }
+  }
+
+  function pickSharedDate(iso: string) {
+    if (!iso) return;
+    setSharedDateError("");
+    setSharedDateText(formatUkDate(iso));
+    setShared(current => ({ ...current, order_date: iso }));
+  }
+
+  function openSharedDatePicker() {
+    const native = sharedDateNativeRef.current;
+    if (!native) return;
+    if (typeof native.showPicker === "function") {
+      try { native.showPicker(); return; } catch { /* fall through to focus */ }
+    }
+    native.focus();
   }
 
   function openPasteTable() {
@@ -178,6 +210,7 @@ export default function BulkInputPage() {
       item_description: row.item_description,
       item_size: row.item_size || null,
       item_condition: row.item_condition || null,
+      category: row.category || null,
       price_purchased: row.price,
       arrived: row.arrivedValue,
     }));
@@ -185,7 +218,15 @@ export default function BulkInputPage() {
       const response = await fetch("/api/purchases/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows: validRows }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not save purchases.");
-      setResult({ added: body.added, failures: [...rows.flatMap((row, index) => row.errors.length ? [{ row: index + 1, reason: `Missing ${row.errors.map(field => fields.find(item => item.key === field)?.label).join(", ")}` }] : []), ...(body.failures || [])] });
+      setResult({ added: body.added, failures: [...rows.flatMap((row, index) => {
+        if (!row.errors.length) return [];
+        const otherFields = row.errors.filter(field => field !== "order_date");
+        const reasons = [
+          ...(otherFields.length ? [`Missing ${otherFields.map(field => fields.find(item => item.key === field)?.label).join(", ")}`] : []),
+          ...(row.dateIssue ? [row.dateIssue] : []),
+        ];
+        return [{ row: index + 1, reason: reasons.join("; ") }];
+      }), ...(body.failures || [])] });
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "Could not save purchases.");
     } finally {
@@ -196,7 +237,10 @@ export default function BulkInputPage() {
 
   function resetBatch() {
     setColumns(emptyColumns);
-    setShared({ order_date: todayIso(), purchased_from: "Vinted", platform: "Vinted", seller_name: "", arrived: "" });
+    const today = todayIso();
+    setShared({ order_date: today, purchased_from: "Vinted", platform: "Vinted", seller_name: "", arrived: "" });
+    setSharedDateText(formatUkDate(today));
+    setSharedDateError("");
     setApply({ order_date: true, purchased_from: true, seller_name: true, arrived: true });
     setResult(null);
     setSaveError("");
@@ -208,7 +252,36 @@ export default function BulkInputPage() {
     <header className="bulk-header"><div><h1>Bulk Input</h1><span>Paste purchase data by column and review it before saving.</span></div><button className="button-secondary" type="button" onClick={openPasteTable}>Paste Table</button></header>
 
     <section className="bulk-panel shared-panel"><div className="bulk-section-heading"><h2>Shared fields</h2><span>Applied values override the matching column below.</span></div><div className="shared-grid">
-      <label className="field"><span className="label">Order Date</span><input className="input" type="date" value={shared.order_date} onChange={event => setShared(current => ({ ...current, order_date: event.target.value }))} /><Apply checked={apply.order_date} onChange={checked => setApply(current => ({ ...current, order_date: checked }))} /></label>
+      <label className="field"><span className="label">Order Date</span><div style={{ display: "flex", alignItems: "center", gap: 4, position: "relative" }}>
+        <input
+          className="input"
+          style={{ flex: 1, minWidth: 0 }}
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          placeholder="DD/MM/YYYY"
+          value={sharedDateText}
+          aria-invalid={sharedDateError ? true : undefined}
+          onChange={event => setSharedDateText(event.target.value)}
+          onBlur={event => commitSharedDate(event.target.value)}
+          onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commitSharedDate((event.target as HTMLInputElement).value); } }}
+        />
+        <button
+          type="button"
+          onClick={openSharedDatePicker}
+          aria-label="Choose order date from calendar"
+          style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 6, border: "1px solid var(--line-strong)", background: "var(--surface-2)", color: "var(--text)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, fontSize: 14, lineHeight: 1 }}
+        >📅</button>
+        <input
+          ref={sharedDateNativeRef}
+          type="date"
+          tabIndex={-1}
+          aria-label="Order date calendar value"
+          value={shared.order_date}
+          onChange={event => pickSharedDate(event.target.value)}
+          style={{ position: "absolute", top: 0, left: 0, width: 1, height: 1, opacity: 0, pointerEvents: "none", border: "none" }}
+        />
+      </div>{sharedDateError && <span style={{ color: "var(--danger, #d92d20)", fontSize: 10, fontWeight: 600 }}>{sharedDateError}</span>}<Apply checked={apply.order_date} onChange={checked => setApply(current => ({ ...current, order_date: checked }))} /></label>
       <label className="field"><span className="label">Platform</span><select className="input" value={shared.platform} onChange={event => setShared(current => ({ ...current, platform: event.target.value, purchased_from: event.target.value === "Other" ? "" : event.target.value }))}>{["Vinted", "eBay", "Facebook", "Depop", "Other"].map(value => <option key={value}>{value}</option>)}</select><Apply checked={apply.purchased_from} onChange={checked => setApply(current => ({ ...current, purchased_from: checked }))} /></label>
       <label className="field"><span className="label">Purchased From</span><input className="input" value={shared.purchased_from} onChange={event => setShared(current => ({ ...current, purchased_from: event.target.value }))} placeholder="Vinted" /><Apply checked={apply.purchased_from} onChange={checked => setApply(current => ({ ...current, purchased_from: checked }))} /></label>
       <label className="field"><span className="label">Seller Name</span><input className="input" value={shared.seller_name} onChange={event => setShared(current => ({ ...current, seller_name: event.target.value }))} /><Apply checked={apply.seller_name} onChange={checked => setApply(current => ({ ...current, seller_name: checked }))} /></label>
@@ -217,10 +290,10 @@ export default function BulkInputPage() {
 
     <section className="bulk-panel"><div className="bulk-section-heading"><h2>Column inputs</h2><span>One line equals one purchase. Blank lines stay in position.</span></div><div className="bulk-columns">{fields.map(field => <label key={field.key}><span>{field.label}{["sku", "item_description", "price_purchased"].includes(field.key) && <b>*</b>}{sharedKeys.has(field.key) && apply[field.key as keyof ApplyState] && <i>Shared</i>}</span><textarea value={columns[field.key]} onChange={event => setColumns(current => ({ ...current, [field.key]: event.target.value }))} placeholder={field.placeholder} spellCheck={field.key === "item_description"} /></label>)}</div></section>
 
-    <section className="bulk-panel preview-panel"><div className="bulk-preview-toolbar"><div><h2>Live preview</h2><span>Click any cell to edit it.</span></div><div className="bulk-counts"><span>Rows detected <strong>{count}</strong></span><span>Ready to save <strong>{ready}</strong></span><span className={invalid ? "count-error" : ""}>Rows with errors <strong>{invalid}</strong></span></div></div><div className="bulk-table-scroll"><table className="bulk-table"><thead><tr><th>#</th>{fields.filter(field => field.key !== "price_purchased").sort((a, b) => ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition"].indexOf(a.key) - ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition"].indexOf(b.key)).map(field => <th key={field.key}>{field.label}</th>)}<th>Price Purchased</th></tr></thead><tbody>{rows.length ? rows.map((row, index) => <tr key={index}><td>{index + 1}</td>{(["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "price_purchased"] as Field[]).map(field => <td key={field} className={row.errors.includes(field) ? "bulk-cell-error" : ""}><input value={field === "order_date" ? displayDate(row[field]) : field === "price_purchased" && row.price !== null ? String(row.price) : row[field]} onChange={event => editCell(field, index, event.target.value)} aria-label={`${fields.find(item => item.key === field)?.label} row ${index + 1}`} /></td>)}</tr>) : <tr className="bulk-empty-row"><td colSpan={10}>Paste or type values into a column to create preview rows.</td></tr>}</tbody></table></div></section>
+    <section className="bulk-panel preview-panel"><div className="bulk-preview-toolbar"><div><h2>Live preview</h2><span>Click any cell to edit it.</span></div><div className="bulk-counts"><span>Rows detected <strong>{count}</strong></span><span>Ready to save <strong>{ready}</strong></span><span className={invalid ? "count-error" : ""}>Rows with errors <strong>{invalid}</strong></span></div></div>{dateIssues.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "8px 11px", color: "var(--danger, #d92d20)", fontSize: 11 }}>{dateIssues.map(issue => <span key={issue}>{issue}</span>)}</div>}<div className="bulk-table-scroll"><table className="bulk-table"><thead><tr><th>#</th>{fields.filter(field => field.key !== "price_purchased").sort((a, b) => ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category"].indexOf(a.key) - ["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category"].indexOf(b.key)).map(field => <th key={field.key}>{field.label}</th>)}<th>Price Purchased</th></tr></thead><tbody>{rows.length ? rows.map((row, index) => <tr key={index}><td>{index + 1}</td>{(["order_date", "purchased_from", "seller_name", "sku", "arrived", "item_description", "item_size", "item_condition", "category", "price_purchased"] as Field[]).map(field => <td key={field} className={row.errors.includes(field) ? "bulk-cell-error" : ""}><input value={field === "order_date" ? displayDate(row[field]) : field === "price_purchased" && row.price !== null ? String(row.price) : row[field]} onChange={event => editCell(field, index, event.target.value)} aria-label={`${fields.find(item => item.key === field)?.label} row ${index + 1}`} /></td>)}</tr>) : <tr className="bulk-empty-row"><td colSpan={11}>Paste or type values into a column to create preview rows.</td></tr>}</tbody></table></div></section>
 
     {saveError && <div className="bulk-save-error">{saveError}</div>}
-    <div className="bulk-save-bar"><div><strong>{ready} purchases ready</strong><span>{invalid ? `${invalid} invalid rows will be skipped.` : "Only valid rows will be saved."}</span></div><button className="button" disabled={!ready || saving} onClick={() => setConfirming(true)}>{saving ? "Saving..." : "Save All Purchases"}</button></div>
+    <div className="bulk-save-bar"><div><strong>{ready} purchases ready</strong><span>{invalid ? `${invalid} invalid rows will be skipped.` : "Only valid rows will be saved."}</span></div><button className="button" disabled={!ready || saving || !!sharedDateError} onClick={() => setConfirming(true)}>{saving ? "Saving..." : "Save All Purchases"}</button></div>
 
     {pasteOpen && <PasteDialog text={pasteText} onText={inspectPaste} mapping={mapping} setMapping={setMapping} hasHeader={hasHeader} setHasHeader={setHasHeader} onCancel={() => setPasteOpen(false)} onImport={importTable} />}
     {confirming && <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setConfirming(false); }}><div className="bulk-confirm" role="dialog" aria-modal="true"><h2>Save {ready} purchases?</h2><p>You are about to save {ready} purchases. {invalid ? `${invalid} rows with errors will be skipped.` : "All detected rows are valid."}</p><div><button className="button-secondary" onClick={() => setConfirming(false)}>Go back</button><button className="button" onClick={saveAll}>Save {ready} purchases</button></div></div></div>}

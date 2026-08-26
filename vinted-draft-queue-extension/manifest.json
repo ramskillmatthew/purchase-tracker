@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Trotters Attire — Vinted Draft Queue",
+  "short_name": "Vinted Draft Queue",
+  "version": "1.0.0",
+  "description": "Fills Vinted's Create Listing form from Trotters Attire Listing Studio and saves each item as a Vinted draft. Drafts only — never publishes.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxw1SiEL1XqNPpGFhbxnaERtuu42dcPCnWDpU4oniltXQRnan8wEoau0W+Vt0kk8SZ1PhvFQANG4l2s2zFymz4JbTmUHBP4qLGRk2/s0syA+jMGfep2RN3ufj19BMdmXM2vWfde/KnBbhVbBChzWT36nN4VV84GAJ89GZ54am123XIhmWMhxNjnO4azOQ5PCUu3dEWd1TU3V7tYaGoBYlc59XyduBOWED7kPIZqsnpVnEqtBZ+H2qv8laySQbLwhvqalWuIU6eQ6TbQtJfqbOXepy0a5esCXY+x3nmc5SXrut5ER1KD9b0KCqf24KnYDqaPrSjgt+BgPFPhazkdZ2hwIDAQAB",
+  "permissions": ["storage", "tabs", "scripting", "sidePanel", "alarms"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://localhost:3001/*",
+    "http://localhost:3002/*",
+    "https://purchase-tracker-one.vercel.app/*",
+    "https://www.vinted.co.uk/*",
+    "http://localhost:3006/*",
+    "http://localhost:3005/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Vinted Draft Queue — open the side panel"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.vinted.co.uk/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["shared/messages.js", "shared/validation.js", "shared/vinted-fields.js", "shared/queue-state.js", "shared/form-steps.js", "shared/photo-transfer.js"],
+      "matches": ["https://www.vinted.co.uk/*"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

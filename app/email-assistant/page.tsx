@@ -1,5 +1,8 @@
 "use client";
 import { FormEvent, useState } from "react";
+import { OrderExplorer } from "./OrderCards";
+import { Narrative } from "./Narrative";
+import type { PublicOrder } from "@/lib/orders/public";
 
 type Result = { id: string; sender: string; subject: string; date: string | null; folder: string; excerpt: string; whyMatched: string; hasAttachments: boolean; unread: boolean };
 type Email = Result & { html: string; recipient: string; attachments: { filename: string; contentType: string; size: number }[] };
@@ -8,6 +11,9 @@ export default function EmailAssistantPage() {
   const [query, setQuery] = useState("");
   const [answer, setAnswer] = useState("");
   const [results, setResults] = useState<Result[]>([]);
+  const [totalMatches, setTotalMatches] = useState<number | null>(null);
+  const [orders, setOrders] = useState<PublicOrder[]>([]);
+  const [usedEmailIds, setUsedEmailIds] = useState<string[]>([]);
   const [selected, setSelected] = useState<Email | null>(null);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -15,12 +21,12 @@ export default function EmailAssistantPage() {
   const [suggestion, setSuggestion] = useState<{ original: string; corrected: string } | null>(null);
 
   async function search(message: string) {
-    setSuggestion(null); setBusy(true); setError(""); setAnswer(""); setResults([]); setSelected(null);
-    const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 40_000);
+    setSuggestion(null); setBusy(true); setError(""); setAnswer(""); setResults([]); setTotalMatches(null); setOrders([]); setUsedEmailIds([]); setSelected(null);
+    const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 65_000);
     try {
       const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }), signal: controller.signal });
       const body = await response.json();
-      if (response.ok) { setAnswer(body.answer); setResults(body.results || []); } else setError(body.error || "Search failed.");
+      if (response.ok) { setAnswer(body.answer); setResults(body.results || []); setTotalMatches(typeof body.totalMatches === "number" ? body.totalMatches : (body.results || []).length); setOrders(body.orders || []); setUsedEmailIds(body.usedEmailIds || []); } else setError(body.error || "Search failed.");
     } catch { setError("The email search took too long or the connection was interrupted. Please try again."); }
     finally { window.clearTimeout(timeout); setBusy(false); }
   }
@@ -43,11 +49,25 @@ export default function EmailAssistantPage() {
     finally { setBusy(false); }
   }
 
-  return <section className="page-shell email-page"><header className="page-header"><div><span className="purchase-form-kicker">Read-only Yahoo Mail</span><h1>Email Assistant</h1><p>Search and summarise your mailbox with controlled Anthropic tools.</p></div></header>
+  return <section className="page-shell email-page"><header className="page-header"><div><span className="purchase-form-kicker">Connected Yahoo and Gmail</span><h1>Email Assistant</h1><p>Search and summarise your connected mailboxes with controlled Anthropic tools.</p></div></header>
     <form className="card assistant-search" onSubmit={ask}><label className="field"><span className="label">What would you like to find?</span><textarea className="input" value={query} onChange={event => { setQuery(event.target.value); setSuggestion(null); }} placeholder="Find receipts over £100 from last month." required maxLength={2000} /></label><div><span>Mailbox content is treated as untrusted data.</span><button className="button" disabled={busy || checking}>{checking ? "Checking spelling…" : busy ? "Searching…" : "Search emails"}</button></div></form>
     {suggestion && <div className="card search-suggestion" role="status"><div><strong>Did you mean:</strong><p>{suggestion.corrected}</p></div><div><button className="button" onClick={() => { setQuery(suggestion.corrected); void search(suggestion.corrected); }}>Search corrected</button><button className="button secondary" onClick={() => void search(suggestion.original)}>Keep original</button></div></div>}
-    {error && <p className="bulk-save-error" role="alert">{error}</p>}{answer && <div className="card assistant-answer"><strong>Assistant</strong><p>{answer}</p></div>}
-    <div className="email-layout"><div className="data-panel email-results"><div className="grid-toolbar"><strong>{results.length} results</strong><span>{busy ? "Working…" : "Newest relevant matches"}</span></div>{results.length ? results.map(row => <button className="email-result" key={row.id} onClick={() => read(row.id)}><span><strong>{row.sender}</strong><time>{row.date ? new Date(row.date).toLocaleString() : "Unknown date"}</time></span><b>{row.unread && <i>Unread</i>}{row.subject}</b><p>{row.excerpt || "No text preview available."}</p><small>{row.folder} · {row.whyMatched}{row.hasAttachments ? " · Attachment" : ""}</small></button>) : <div className="email-empty">Ask a question to search your Yahoo mailbox.</div>}</div>
+    {error && <p className="bulk-save-error" role="alert">{error}</p>}
+    {/* Layout is driven purely by whether any orders were reconstructed —
+        never by which kind of question was asked. Whenever there is at
+        least one reconstructed order (including exactly one, once
+        lib/orders/select.ts has narrowed a query down to the single order
+        it specifically identified), the deterministic summary and card(s)
+        render first, with Claude's own narrative underneath, visually
+        distinguished as an interpretation of that structured data. No
+        reconstructed orders falls back to the plain markdown answer,
+        unchanged from before this phase. */}
+    {orders.length > 0 && <>
+      <OrderExplorer orders={orders} />
+      {answer && <div className="card assistant-answer"><strong>Assistant&rsquo;s summary</strong><Narrative text={answer} /></div>}
+    </>}
+    {orders.length === 0 && answer && <div className="card assistant-answer"><strong>Assistant&rsquo;s summary</strong><Narrative text={answer} /></div>}
+    <div className="email-layout"><div className="data-panel email-results"><div className="grid-toolbar"><strong>{totalMatches !== null && totalMatches > results.length ? `Showing ${results.length} of ${totalMatches} matching emails` : `${results.length} results`}</strong><span>{busy ? "Working…" : "Newest relevant matches"}</span></div>{results.length ? results.map(row => <button className={`email-result${usedEmailIds.includes(row.id) ? " email-result-used" : ""}`} key={row.id} onClick={() => read(row.id)}><span><strong>{row.sender}</strong><time>{row.date ? new Date(row.date).toLocaleString() : "Unknown date"}</time></span><b>{usedEmailIds.includes(row.id) && <i className="email-used-badge">Used to reconstruct order</i>}{row.unread && <i>Unread</i>}{row.subject}</b><p>{row.excerpt || "No text preview available."}</p><small>{row.folder} · {row.whyMatched}{row.hasAttachments ? " · Attachment" : ""}</small></button>) : <div className="email-empty">Ask a question to search your connected mailboxes.</div>}</div>
       <div className="card email-reader">{selected ? <><header><button onClick={() => setSelected(null)}>Close</button><span>{selected.folder}</span><h2>{selected.subject}</h2><p>From {selected.sender}<br/>To {selected.recipient}</p></header><article dangerouslySetInnerHTML={{ __html: selected.html }} />{selected.attachments.length > 0 && <footer><strong>Attachments (not downloaded)</strong>{selected.attachments.map(item => <span key={item.filename}>{item.filename} · {item.contentType}</span>)}</footer>}</> : <div className="email-empty">Select a result to read its sanitized content.</div>}</div></div>
   </section>;
 }

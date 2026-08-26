@@ -1,0 +1,8 @@
+import { NextResponse } from "next/server";
+import { requireOwner } from "@/lib/auth/server";
+import { safeApiError } from "@/lib/auth/api";
+import { supabaseRequest } from "@/lib/supabase";
+import { uploadVaultObject } from "@/lib/vault-storage-server";
+const MAX=50*1024*1024;
+function clean(name:string){return name.replace(/[^a-zA-Z0-9._-]+/g,"-").slice(-180)||"file"}
+export async function POST(request:Request){try{const user=await requireOwner(),form=await request.formData(),itemId=String(form.get("itemId")||""),file=form.get("file");if(!(file instanceof File)||!itemId)return NextResponse.json({error:"Item and file are required."},{status:400});if(file.size>MAX)return NextResponse.json({error:"Files must be 50 MB or smaller."},{status:400});const owned=await(await supabaseRequest(`vault_items?id=eq.${encodeURIComponent(itemId)}&owner_id=eq.${user.id}&select=id`)).json() as {id:string}[];if(!owned.length)return NextResponse.json({error:"Vault item not found."},{status:404});const id=crypto.randomUUID(),path=`${user.id}/${itemId}/${id}-${clean(file.name)}`;await uploadVaultObject(path,file);const response=await supabaseRequest("vault_attachments",{method:"POST",headers:{Prefer:"return=representation"},body:JSON.stringify({id,owner_id:user.id,item_id:itemId,name:file.name,storage_path:path,size:file.size,mime_type:file.type||"application/octet-stream"})});const row=(await response.json() as {id:string;name:string;size:number;mime_type:string}[])[0];return NextResponse.json({id:row.id,name:row.name,size:Number(row.size),type:row.mime_type},{status:201})}catch(e){return safeApiError(e,"Could not upload Vault file. Run supabase-vault.sql if Vault Storage has not been installed.")}}

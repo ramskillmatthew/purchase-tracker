@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Vinted Draft Queue</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="panel">
+    <!-- Header — brand mark + name + connection badge + settings toggle. -->
+    <header class="app-header">
+      <div class="brand">
+        <span id="brand-mark" class="brand-mark">TA</span>
+        <h1 class="brand-name" title="Vinted Draft Queue">Vinted Draft Queue</h1>
+      </div>
+      <div class="header-actions">
+        <span id="connection-badge" class="connection-badge" role="status">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-badge-label">Not connected</span>
+        </span>
+        <button id="settings-toggle" class="icon-button" type="button" aria-label="App connection settings" aria-expanded="false" aria-controls="settings-panel">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" stroke="currentColor" stroke-width="1.5"/><path d="M16.2 12.3c-.14.4-.09.85.14 1.2l.06.09a1.3 1.3 0 1 1-2.25 1.3l-.05-.09a1.3 1.3 0 0 0-1.2-.66 1.3 1.3 0 0 0-1.14.66l-.05.1a1.3 1.3 0 1 1-2.25-1.3l.05-.1c.2-.35.24-.78.1-1.16a1.3 1.3 0 0 0-1-.8l-.1-.02a1.3 1.3 0 1 1 0-2.6l.1-.02c.44-.08.8-.37 1-.78.16-.4.12-.85-.1-1.2l-.06-.09A1.3 1.3 0 1 1 8.7 5.36l.05.09c.24.35.66.56 1.1.56.46 0 .87-.24 1.1-.6l.05-.1a1.3 1.3 0 1 1 2.25 1.3l-.05.1c-.22.35-.26.78-.1 1.17.16.4.5.68.94.78l.1.02a1.3 1.3 0 1 1 0 2.6l-.1.02c-.44.1-.79.4-.94.8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Permanent safety reassurance — one line, never repeated. -->
+    <div class="safety-banner" role="note">
+      <svg class="safety-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.75 4.9v4.6c0 4 2.7 6.9 6.25 8 3.55-1.1 6.25-4 6.25-8V4.9L10 2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7.4 10.1l1.9 1.9 3.3-3.9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Drafts only — never publishes</span>
+    </div>
+
+    <!-- App-connection settings — expanded by default while disconnected, collapsed (behind the gear) once connected. -->
+    <section id="settings-panel" class="panel-card">
+      <p class="panel-label">App connection</p>
+      <div class="app-url-row">
+        <span class="url-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.25" stroke="currentColor" stroke-width="1.4"/><path d="M2.75 10h14.5M10 2.75c1.8 2 2.8 4.6 2.8 7.25s-1 5.25-2.8 7.25c-1.8-2-2.8-4.6-2.8-7.25S8.2 4.75 10 2.75Z" stroke="currentColor" stroke-width="1.4"/></svg>
+        </span>
+        <div class="app-url-copy">
+          <p class="field-caption">App URL</p>
+          <p id="app-url-display" class="field-value">Not set</p>
+          <label class="visually-hidden" for="app-base-url">App URL</label>
+          <input id="app-base-url" class="text-input app-url-input" type="text" placeholder="http://localhost:3000" autocomplete="off" hidden />
+        </div>
+        <span id="app-url-saved" class="saved-indicator" hidden>
+          Saved
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.5 6.4 11.4 12.5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <button id="app-url-edit" class="button-outline button-sm" type="button">Change</button>
+        <button id="app-url-save" class="button-primary button-sm" type="button" hidden>Save</button>
+      </div>
+    </section>
+
+    <!-- Pairing — shown only while not paired. -->
+    <section id="pairing-panel" class="panel-card" hidden>
+      <h2 class="panel-title">Connect to Listing Studio</h2>
+      <p class="panel-subtitle">Enter the one-time pairing code shown in Listings Review.</p>
+      <label class="visually-hidden" for="pairing-code">Pairing code from Listings Review</label>
+      <input id="pairing-code" class="code-input" type="text" autocomplete="off" maxlength="8" placeholder="ABCD1234" />
+      <p id="pairing-error" class="error-text" role="alert" hidden></p>
+      <button id="claim-button" class="button-primary button-block" type="button">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Connect extension
+      </button>
+      <ul class="reassurance-list">
+        <li>
+          <span class="reassurance-icon tone-safe" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.3 7V5a2.7 2.7 0 0 1 5.4 0v2" stroke="currentColor" stroke-width="1.3"/></svg></span>
+          <span>Secure local connection</span>
+        </li>
+        <li>
+          <span class="reassurance-icon tone-primary" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="10.5" r="2.3" stroke="currentColor" stroke-width="1.3"/><path d="M7.3 8.7 12.5 3.5M10.6 5.4l1.4 1.4M12.2 3.8l1.4 1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+          <span>One-time pairing code</span>
+        </li>
+        <li>
+          <span class="reassurance-icon tone-neutral" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="M2 8s2.3-4 6-4 6 4 6 4-2.3 4-6 4-6-4-6-4Z" stroke="currentColor" stroke-width="1.3"/><path d="M2 2l12 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+          <span>Publishing disabled</span>
+        </li>
+      </ul>
+    </section>
+
+    <!-- Compact connection + account summary — shown only once paired. -->
+    <p id="connection-summary" class="connection-summary-line" hidden></p>
+
+    <!-- Mandatory initial account-confirmation gate. -->
+    <section id="account-pending-card" class="panel-card account-pending-card" hidden>
+      <p class="panel-label">Confirm Vinted account</p>
+      <p class="account-pending-name">Detected account: <strong id="account-name">—</strong></p>
+      <p class="panel-subtitle">Make sure this is the account you want to save drafts to.</p>
+      <button id="confirm-account" class="button-primary button-block" type="button">Confirm this account</button>
+    </section>
+
+    <section id="account-error-box" class="alert-banner tone-danger" role="alert" hidden>
+      <p id="account-error-message" class="alert-text"></p>
+      <button id="retry-account-detection" class="button-outline button-sm" type="button">Retry detection</button>
+    </section>
+
+    <section id="account-change-banner" class="alert-banner tone-warning" role="alert" hidden>
+      <p class="alert-text"><strong>Vinted account changed.</strong> Was <span id="account-old"></span>, now <span id="account-new"></span>. Processing is paused until you confirm.</p>
+      <button id="confirm-account-change" class="button-primary button-sm" type="button">Confirm and resume</button>
+    </section>
+
+    <section id="vinted-tab-lost-banner" class="alert-banner tone-warning" role="alert" hidden>
+      <p class="alert-text"><strong>Vinted tab lost.</strong> <span id="vinted-tab-lost-message"></span> Reopen the Create Listing page, then Resume below.</p>
+    </section>
+
+    <section id="manual-reload-banner" class="alert-banner tone-warning" role="alert" hidden>
+      <p class="alert-text"><span id="manual-reload-message"></span></p>
+      <button id="retry-manual-reload" class="button-primary button-sm" type="button">Try reload again</button>
+    </section>
+
+    <!-- Empty states. -->
+    <section id="disconnected-empty-state" class="empty-state" hidden>
+      <div class="empty-icon empty-icon-waiting" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <p class="empty-title">Waiting for connection</p>
+      <p class="empty-subtitle">Your draft queue will appear here once paired.</p>
+    </section>
+
+    <section id="idle-empty-state" class="empty-state" hidden>
+      <div class="empty-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><rect x="4.5" y="7" width="15" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M4.5 11h15M8 7V5.5A1.5 1.5 0 0 1 9.5 4h5A1.5 1.5 0 0 1 16 5.5V7" stroke="currentColor" stroke-width="1.5"/></svg>
+      </div>
+      <p class="empty-title">No active batch</p>
+      <p class="empty-subtitle">Send listings from Listings Review to start a batch.</p>
+    </section>
+
+    <!-- Active/completed batch. -->
+    <section id="batch-section" class="batch-section" hidden>
+      <div id="batch-progress-card" class="panel-card batch-progress-card">
+        <div class="batch-progress-header">
+          <h2 id="batch-progress-title" class="panel-title-sm">Current batch</h2>
+          <span id="batch-progress-label" class="muted-text"></span>
+        </div>
+        <div class="progress-track" role="progressbar" id="progress-bar" aria-valuemin="0" aria-valuemax="100">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <div class="progress-percent-row"><span id="progress-percent" class="progress-percent"></span></div>
+        <div id="stat-grid" class="stat-grid">
+          <div class="stat-box">
+            <span class="stat-icon tone-primary" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><rect x="2" y="5.5" width="12" height="8" rx="1.3" stroke="currentColor" stroke-width="1.3"/><path d="M2 5.5 8 2l6 3.5M5.3 8.3h5.4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></span>
+            <span id="stat-total" class="stat-value">0</span>
+            <span class="stat-label">Total</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-icon tone-success" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3"/><path d="M5.3 8.1 7.2 10l3.5-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span id="stat-completed" class="stat-value">0</span>
+            <span class="stat-label">Completed</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-icon tone-active" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2.1" fill="currentColor"/></svg></span>
+            <span id="stat-active" class="stat-value">0</span>
+            <span class="stat-label">Active</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-icon tone-neutral" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.7V8l2.4 1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span id="stat-queued" class="stat-value">0</span>
+            <span class="stat-label">Queued</span>
+          </div>
+          <div id="stat-box-failed" class="stat-box" hidden>
+            <span class="stat-icon tone-danger" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.3"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+            <span id="stat-failed" class="stat-value">0</span>
+            <span class="stat-label">Failed</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Batch-completed summary — replaces the active progress card once
+           every item is terminal; the queue rows and activity log below
+           stay visible (with real draft ids), never hidden after completion. -->
+      <div id="completed-banner" class="completed-banner" hidden>
+        <span class="completed-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.75" stroke="currentColor" stroke-width="1.5"/><path d="M6.6 10.1 8.9 12.4 13.5 7.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <p class="completed-title">Batch completed</p>
+        <p id="completed-summary" class="completed-summary"></p>
+      </div>
+
+      <div class="panel-card queue-table">
+        <div class="queue-table-header" aria-hidden="true">
+          <span class="col-index">#</span><span class="col-listing">Listing</span><span class="col-status">Status</span><span class="col-progress">Progress</span>
+        </div>
+        <ol id="queue-list" class="queue-list"></ol>
+      </div>
+
+      <div class="panel-card activity-panel">
+        <div class="activity-header">
+          <span class="activity-title">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8.5h2.7l1.6-4.3 2.4 7.6 1.6-4.6h3.7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Live activity
+          </span>
+          <label class="auto-scroll-toggle">
+            <span>Auto-scroll</span>
+            <input type="checkbox" id="auto-scroll-toggle" checked />
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          </label>
+        </div>
+        <ol id="activity-log" class="activity-log" aria-live="polite"></ol>
+      </div>
+    </section>
+
+    <!-- Fixed action bar. -->
+    <div id="action-bar" class="action-bar" hidden>
+      <button id="start-button" class="action-button primary" type="button" hidden>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 3.2v9.6l8-4.8-8-4.8Z" fill="currentColor"/></svg>
+        Start batch
+      </button>
+      <button id="pause-button" class="action-button neutral" type="button" hidden>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx="0.8" fill="currentColor"/><rect x="9.4" y="3" width="2.6" height="10" rx="0.8" fill="currentColor"/></svg>
+        Pause
+      </button>
+      <button id="resume-button" class="action-button neutral" type="button" hidden>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 3.2v9.6l8-4.8-8-4.8Z" fill="currentColor"/></svg>
+        Resume
+      </button>
+      <button id="cancel-button" class="action-button danger" type="button">
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2" fill="currentColor"/></svg>
+        Cancel remaining
+      </button>
+      <button id="clear-button" class="action-button quiet" type="button">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M18 7v13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7m3 0V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Clear completed
+      </button>
+    </div>
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
