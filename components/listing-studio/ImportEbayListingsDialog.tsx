@@ -16,7 +16,7 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
   const [batches, setBatches] = useState<ImportBatch[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [clearing, setClearing] = useState(false);
+  const [clearing, setClearing] = useState<"waiting" | "history" | null>(null);
   const [error, setError] = useState("");
   const lines = useMemo(() => rawUrls.split(/\r?\n/).map(value => value.trim()).filter(Boolean), [rawUrls]);
   const validation = useMemo(() => validateAndDedupeEbayUrls(lines), [lines]);
@@ -55,21 +55,33 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
 
   async function clearWaiting() {
     if (!queueItems.some(item => item.status === "waiting")) return;
-    setClearing(true); setError("");
+    setClearing("waiting"); setError("");
     try {
-      const response = await fetch("/api/listing-studio/ebay-imports", { method: "DELETE" });
+      const response = await fetch("/api/listing-studio/ebay-imports?scope=waiting", { method: "DELETE" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not clear waiting imports.");
       await loadImports();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not clear waiting imports."); }
-    finally { setClearing(false); }
+    finally { setClearing(null); }
+  }
+
+  async function clearHistory() {
+    if (!queueItems.some(item => item.status === "imported" || item.status === "failed")) return;
+    setClearing("history"); setError("");
+    try {
+      const response = await fetch("/api/listing-studio/ebay-imports?scope=history", { method: "DELETE" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Could not clear completed and failed imports.");
+      await loadImports();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not clear completed and failed imports."); }
+    finally { setClearing(null); }
   }
 
   if (!open) return null;
   const completed = queueItems.filter(item => item.status === "imported").length;
   const failed = queueItems.filter(item => item.status === "failed").length;
   const waiting = queueItems.filter(item => item.status === "waiting").length;
-  const busy = creating || clearing || queueItems.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status));
+  const busy = creating || Boolean(clearing) || queueItems.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status));
 
   return <div className="ebay-import-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <section className="ebay-import-dialog" role="dialog" aria-modal="true" aria-labelledby="ebay-import-title">
@@ -84,7 +96,7 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
         </div>
 
         {(loading || queueItems.length > 0) && <div className="ebay-import-progress">
-          <div className="ebay-import-progress-head"><div><strong>Import queue</strong><span>{completed} imported{waiting ? ` · ${waiting} waiting` : ""}{failed ? ` · ${failed} failed` : ""}</span></div><div className="ebay-import-progress-actions"><button type="button" className="button-secondary" onClick={clearWaiting} disabled={!waiting || clearing}>{clearing ? "Clearing…" : "Clear waiting"}</button><button type="button" className="button-secondary" onClick={loadImports}>Refresh</button></div></div>
+          <div className="ebay-import-progress-head"><div><strong>Import queue</strong><span>{completed} imported{waiting ? ` · ${waiting} waiting` : ""}{failed ? ` · ${failed} failed` : ""}</span></div><div className="ebay-import-progress-actions"><button type="button" className="button-secondary" onClick={clearWaiting} disabled={!waiting || Boolean(clearing)}>{clearing === "waiting" ? "Clearing…" : "Clear waiting"}</button><button type="button" className="button-secondary" onClick={clearHistory} disabled={(!completed && !failed) || Boolean(clearing)}>{clearing === "history" ? "Clearing…" : "Clear completed & failed"}</button><button type="button" className="button-secondary" onClick={loadImports}>Refresh</button></div></div>
           {loading && !queueItems.length ? <p className="ebay-import-loading">Loading imports…</p> : <div className="ebay-import-items">{queueItems.map(item => <article key={item.id} className={`ebay-import-item ebay-import-item-${item.status}`}>
             <span className="ebay-import-item-icon" aria-hidden="true">{item.status === "imported" ? "✓" : item.status === "failed" ? "!" : item.status === "waiting" ? "·" : "↻"}</span>
             <div><strong>{item.title || `eBay item ${item.ebay_item_id}`}</strong><small>{STATUS_LABELS[item.status]}{item.photo_count ? ` · ${item.photo_count} photos` : ""}</small>{item.safe_error && <p>{item.safe_error}</p>}</div>
