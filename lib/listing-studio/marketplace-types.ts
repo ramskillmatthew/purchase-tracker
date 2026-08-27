@@ -148,6 +148,11 @@ export type MarketplaceDraft = {
   categoryPath: string | null;
   categorySource: CategorySource | null;
   categoryConfidence: "high" | "medium" | "low" | null;
+  // Stage 4 — the top alternatives eBay returned alongside the selected
+  // category, and the exact search terms that produced them. See
+  // supabase-listing-studio-ebay-taxonomy.sql's own comment.
+  categoryAlternatives: EbayCategoryAlternative[];
+  categorySearchTerms: string | null;
   conditionValue: string | null;
   pricePence: number | null;
   quantity: number | null;
@@ -191,3 +196,18 @@ export const sharedFactNames = [
 export type SharedFactName = typeof sharedFactNames[number];
 
 export type SharedFacts = Partial<Record<string, SharedFact>>;
+
+// Stage 4 (eBay UK category suggestion service). categoryId is always a
+// real id eBay's own Taxonomy API returned — never invented by this app or
+// by the AI ranking step (see lib/listing-studio/ebay-category-ranking-ai.ts's
+// own top comment). `reason` is a short, human-facing explanation of why
+// this candidate matched (e.g. "Matched search terms" or the AI's own
+// one-line justification) — never exposes a raw relevancy score to the UI.
+export type EbayCategoryAlternative = {
+  categoryId: string;
+  categoryName: string;
+  categoryPath: string;
+  rank: number;
+  confidence: "high" | "medium" | "low";
+  reason: string;
+};

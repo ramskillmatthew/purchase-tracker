@@ -3,7 +3,7 @@ import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import type {
   Marketplace, MarketplaceDraft, MarketplaceDraftSourceType, ContentMode, MarketplaceDraftStatus,
   CategorySource, MarketplaceReadiness, MarketplaceValidationMessage, MarketplaceDynamicData,
-  PartialMarketplaceDraftSettings,
+  PartialMarketplaceDraftSettings, EbayCategoryAlternative,
 } from "@/lib/listing-studio/marketplace-types";
 
 /**
@@ -20,6 +20,7 @@ type MarketplaceDraftRow = {
   title: string | null; description: string | null;
   category_id: string | null; category_name: string | null; category_path: string | null;
   category_source: CategorySource | null; category_confidence: "high" | "medium" | "low" | null;
+  category_alternatives_json: EbayCategoryAlternative[]; category_search_terms: string | null;
   condition_value: string | null;
   price_pence: number | null; quantity: number | null; currency: string;
   status: MarketplaceDraftStatus;
@@ -35,7 +36,7 @@ type MarketplaceDraftRow = {
 const EMPTY_READINESS: MarketplaceReadiness = { ready: false, completionPercent: 0, requiredComplete: 0, requiredTotal: 0, recommendedComplete: 0, recommendedTotal: 0 };
 
 export const MARKETPLACE_DRAFT_SELECT =
-  "id,product_draft_id,owner_id,marketplace,source_type,content_mode,title,description,category_id,category_name,category_path,category_source,category_confidence,condition_value,price_pence,quantity,currency,status,readiness_json,validation_messages_json,ai_generation_json,source_draft_id,source_ebay_item_id,dynamic_data_json,settings_json,created_at,updated_at";
+  "id,product_draft_id,owner_id,marketplace,source_type,content_mode,title,description,category_id,category_name,category_path,category_source,category_confidence,category_alternatives_json,category_search_terms,condition_value,price_pence,quantity,currency,status,readiness_json,validation_messages_json,ai_generation_json,source_draft_id,source_ebay_item_id,dynamic_data_json,settings_json,created_at,updated_at";
 
 function rowToMarketplaceDraft(row: MarketplaceDraftRow): MarketplaceDraft {
   return {
@@ -44,6 +45,7 @@ function rowToMarketplaceDraft(row: MarketplaceDraftRow): MarketplaceDraft {
     title: row.title, description: row.description,
     categoryId: row.category_id, categoryName: row.category_name, categoryPath: row.category_path,
     categorySource: row.category_source, categoryConfidence: row.category_confidence,
+    categoryAlternatives: row.category_alternatives_json ?? [], categorySearchTerms: row.category_search_terms,
     conditionValue: row.condition_value,
     pricePence: row.price_pence, quantity: row.quantity, currency: row.currency,
     status: row.status,

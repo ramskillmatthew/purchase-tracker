@@ -97,7 +97,7 @@ export const STATUS_LABELS: Record<CardStatus, string> = {
  */
 function ProductGroupCard({
   group, photos, selectedIds, onToggleSelect, onSelectAll, onClearSelection, onSelectRange, onRename, onReorder, onSetCover, onRemovePhoto,
-  onSplitSelected, onMoveSelected, onMerge, onDelete, saveState, autoEdit, onAutoEditConsumed, listing, onEditFields, onPreviewListing,
+  onSplitSelected, onMoveSelected, onMerge, onDelete, saveState, autoEdit, onAutoEditConsumed, listing, onEditFields, onPreviewListing, onOpenEbayDetails,
   expanded, onToggleExpand, isGenerating, hasFailedGeneration,
 }: {
   group: GroupSummary;
@@ -131,6 +131,11 @@ function ProductGroupCard({
   // description, never truncated) since the card itself only ever shows a
   // truncated description.
   onPreviewListing: (draftId: string) => void;
+  // Stage 4/5 (marketplace-aware drafts) — opens the eBay category/item-
+  // specifics editor. Shown once this group has a generated listing, same
+  // gate as Preview/Edit fields above; the dialog itself handles the case
+  // where no eBay draft has actually been created yet.
+  onOpenEbayDetails: (draftId: string) => void;
   // Visual redesign — compact by default; the full photo-management body
   // (select-all/Move/Split/SortablePhotoGrid) only renders when expanded.
   expanded: boolean;
@@ -269,6 +274,7 @@ function ProductGroupCard({
         <div className="product-group-compact-actions">
           {listing && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}
           {listing && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}
+          {listing && <button type="button" className="button-secondary" onClick={() => onOpenEbayDetails(group.id)}>eBay details</button>}
           <button type="button" className="button-secondary" onClick={() => onToggleExpand(group.id)} aria-expanded={expanded}>
             {expanded ? "Collapse" : "Manage photos"}
           </button>
