@@ -23,6 +23,7 @@ import { planUploadChunks, type PlannableFile } from "@/lib/listing-studio/uploa
 import { parseRegistrationFailure } from "@/lib/listing-studio/upload-error-messages";
 import { MarketplaceSelector } from "./MarketplaceSelector";
 import { EbayDraftSettingsPanel } from "./EbayDraftSettingsPanel";
+import EbayCategoryAndAspectsDialog from "./EbayCategoryAndAspectsDialog";
 import { marketplacesForTarget, type GenerationTarget } from "@/lib/listing-studio/marketplace-types";
 
 type WorkspaceDraft = {
@@ -196,6 +197,8 @@ export default function GroupingWorkspace() {
   const [editFieldsError, setEditFieldsError] = useState("");
   // Milestone 4 UX fix — read-only full preview, distinct from Edit fields.
   const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);
+  // Stage 4/5 (marketplace-aware drafts) — eBay category/item-specifics editor.
+  const [ebayDetailsGroupId, setEbayDetailsGroupId] = useState<string | null>(null);
   // Visual redesign (compact/expandable product cards) — display-only,
   // never persisted: which single card currently shows its full photo
   // grid. Safe to switch freely between groups since every real piece of
@@ -1238,6 +1241,7 @@ export default function GroupingWorkspace() {
   const editFieldsTarget = drafts.find(draft => draft.id === editFieldsGroupId) ?? null;
   const previewTarget = drafts.find(draft => draft.id === previewGroupId) ?? null;
   const previewListing = previewGroupId ? listingsByDraftId.get(previewGroupId) ?? null : null;
+  const ebayDetailsTarget = drafts.find(draft => draft.id === ebayDetailsGroupId) ?? null;
 
   const movableGroups: MovableGroup[] = drafts.filter(draft => draft.id !== moveDialogGroupId).map(draft => ({ id: draft.id, title: draft.title, photoCount: images.filter(image => image.draft_id === draft.id).length }));
   const mergeSourceGroup = drafts.find(draft => draft.id === mergeDialogGroupId);
@@ -1311,6 +1315,7 @@ export default function GroupingWorkspace() {
       listing={listingsByDraftId.get(draft.id) ?? null}
       onEditFields={setEditFieldsGroupId}
       onPreviewListing={setPreviewGroupId}
+      onOpenEbayDetails={setEbayDetailsGroupId}
       expanded={draft.id === expandedGroupId}
       onToggleExpand={handleToggleExpand}
       isGenerating={draft.id === currentlyGeneratingGroupId}
@@ -1581,6 +1586,11 @@ export default function GroupingWorkspace() {
       ukSize={previewListing.ukSize}
       sku={previewListing.sku}
       onClose={() => setPreviewGroupId(null)}
+    />}
+    {ebayDetailsTarget && <EbayCategoryAndAspectsDialog
+      draftId={ebayDetailsTarget.id}
+      groupTitle={ebayDetailsTarget.title || "this group"}
+      onClose={() => setEbayDetailsGroupId(null)}
     />}
   </div>;
 }

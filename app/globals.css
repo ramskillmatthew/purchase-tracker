@@ -461,6 +461,40 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .ebay-settings-checkbox { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text); }
 .ebay-settings-checkbox input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
 .ebay-settings-save-state { font-size: 10px; color: var(--muted); min-height: 14px; }
+
+/* eBay category/item-specifics editor (Stages 4-5) */
+.ebay-details-modal { width: min(640px, 100%); max-height: 85vh; display: flex; flex-direction: column; }
+.ebay-details-modal .task-modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.ebay-details-readiness { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 11px; color: var(--muted); }
+.ebay-details-readiness strong { font-size: 13px; color: var(--text); }
+.ebay-details-section { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ebay-details-section:first-of-type { border-top: none; padding-top: 0; }
+.ebay-details-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ebay-details-section-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ebay-details-category-name { font-size: 13px; font-weight: 650; color: var(--text); margin: 0; }
+.ebay-details-category-path { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
+.ebay-details-empty { font-size: 12px; color: var(--muted); }
+.ebay-details-alternatives { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.ebay-details-alternatives ul, .ebay-details-search-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ebay-details-alternative-button { text-align: left; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text); font-size: 11px; }
+.ebay-details-alternative-button:hover { border-color: var(--line-strong); background: var(--surface-3); }
+.ebay-details-search { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.ebay-aspect-group { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.ebay-aspect-group-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0; }
+.ebay-aspect-field { gap: 5px; }
+.ebay-aspect-required-mark { color: var(--danger); }
+.ebay-aspect-multi-options { display: flex; flex-wrap: wrap; gap: 10px; }
+.ebay-aspect-multi-option { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
+.ebay-aspect-multi-option input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
+.ebay-details-optional { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.ebay-details-optional-toggle { align-self: flex-start; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text); font-size: 11px; font-weight: 650; }
+.ebay-details-optional-toggle:hover { border-color: var(--line-strong); }
+.ebay-confidence-badge { display: inline-flex; align-self: flex-start; font-size: 9px; font-weight: 650; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+.ebay-confidence-high { color: #16845d; background: rgba(38, 190, 131, .12); }
+.ebay-confidence-medium { color: var(--primary); background: var(--primary-soft); }
+.ebay-confidence-low, .ebay-confidence-review { color: var(--danger); background: var(--danger-soft); }
+.ebay-confidence-unknown { color: var(--muted); background: var(--surface-3); }
+.task-modal-loading { padding: 24px; text-align: center; color: var(--muted); font-size: 12px; }
 .home-error { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 8px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
 .summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .summary-grid article { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-sm); }
