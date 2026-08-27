@@ -49,7 +49,7 @@ revoke all on public.ebay_category_aspects_cache from anon, authenticated;
 
 -- The top alternative suggestions eBay returned alongside the selected
 -- category — { categoryId, categoryName, categoryPath, rank, confidence,
--- relevancy }[] — see lib/listing-studio/marketplace-types.ts's
+-- reason }[] — see lib/listing-studio/marketplace-types.ts's
 -- EbayCategoryAlternative. Lets "Manual change" offer the same short list
 -- shown at generation time without a redundant live re-fetch, and lets the
 -- PATCH category-confirm endpoint verify a chosen id was genuinely one eBay
