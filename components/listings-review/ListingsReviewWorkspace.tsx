@@ -226,6 +226,14 @@ export default function ListingsReviewWorkspace() {
   const [ebayVisibleBatchIds, setEbayVisibleBatchIds] = useState<Set<string>>(new Set());
   const [ebayBatchStatusById, setEbayBatchStatusById] = useState<Map<string, EbayBatchStatus>>(new Map());
   const [ebayStuckBatches, setEbayStuckBatches] = useState<EbayStuckBatch[]>([]);
+  // Corrective pass — true until the resume-batches poll below tells us
+  // otherwise. false means the eBay draft-batches migration
+  // (supabase-ebay-draft-batches.sql) hasn't been applied to this database
+  // yet: batch-dependent controls (Create eBay drafts, bulk policy assign,
+  // stuck-batch recovery) are disabled with an explanatory note, but the
+  // per-item eBay editor (title/description/category/price/policies) has
+  // no dependency on this and stays fully visible and usable regardless.
+  const [ebayBatchingAvailable, setEbayBatchingAvailable] = useState(true);
   const [ebayDismissTarget, setEbayDismissTarget] = useState<EbayStuckBatch | { batchId: string; displayNumber: number } | null>(null);
   const [ebayActivityEvents, setEbayActivityEvents] = useState<ActivityEvent[]>([]);
   const [ebayActivityDismissedBatchIds, setEbayActivityDismissedBatchIds] = useState<Set<string>>(new Set());
@@ -452,8 +460,9 @@ export default function ListingsReviewWorkspace() {
       try {
         const response = await fetch("/api/listing-studio/ebay-draft-batches");
         if (!response.ok || cancelled) return;
-        const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[]; stuck?: EbayStuckBatch[] };
+        const body = await response.json() as { available?: boolean; batchIds: { batchId: string; displayNumber: number }[]; stuck?: EbayStuckBatch[] };
         if (cancelled) return;
+        if (body.available === false) setEbayBatchingAvailable(false);
         setEbayStuckBatches(body.stuck ?? []);
         if (body.batchIds.length === 0) return;
         setEbayVisibleBatchIds(current => { const next = new Set(current); for (const entry of body.batchIds) next.add(entry.batchId); return next; });
@@ -2060,17 +2069,25 @@ export default function ListingsReviewWorkspace() {
                 has an eBay preparation, matching the Workflow toggle's own
                 visibility rule. */}
             {marketplaceToggleOptions.includes("EBAY_UK") && <>
-              <BulkEbayPolicyControl eligibleCount={eligibleEbayCount} policies={ebayPolicies} onApply={handleApplyBulkEbayPolicy} />
+              <BulkEbayPolicyControl
+                eligibleCount={eligibleEbayCount}
+                policies={ebayPolicies}
+                onApply={handleApplyBulkEbayPolicy}
+                disabledReason={ebayBatchingAvailable ? undefined : "Not enabled yet on this database — the eBay batch-drafting migration hasn't been applied."}
+              />
               <button
                 type="button"
                 className="button"
-                disabled={ebayCreatingDrafts || eligibleEbayCount === 0}
-                title="Creates unpublished eBay Inventory items and offers — never publishes anything"
+                disabled={ebayCreatingDrafts || eligibleEbayCount === 0 || !ebayBatchingAvailable}
+                title={ebayBatchingAvailable ? "Creates unpublished eBay Inventory items and offers — never publishes anything" : "Not enabled yet on this database — the eBay batch-drafting migration hasn't been applied."}
                 onClick={handleCreateEbayDrafts}
               >
                 {ebayCreatingDrafts ? "Creating…" : `Create ${eligibleEbayCount} eBay draft${eligibleEbayCount === 1 ? "" : "s"}`}
               </button>
             </>}
+            {marketplaceToggleOptions.includes("EBAY_UK") && !ebayBatchingAvailable && (
+              <p className="lr-bulk-ebay-unavailable-note" role="status">Batch eBay drafting is not enabled on this database yet — per-item eBay editing above is unaffected.</p>
+            )}
           </div>
         </div>}
         {ebayCreateError && <div className="home-error" role="alert">{ebayCreateError}</div>}

@@ -254,10 +254,6 @@ end;
 $$;
 
 revoke all on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) from public;
-do $$ begin
-  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) from anon; end if;
-  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) from authenticated; end if;
-end $$;
 
 -- ---------------------------------------------------------------------
 -- listing_studio_latest_ebay_draft_status — the eBay equivalent of
@@ -299,10 +295,6 @@ as $$
 $$;
 
 revoke all on function public.listing_studio_latest_ebay_draft_status(uuid) from public;
-do $$ begin
-  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_latest_ebay_draft_status(uuid) from anon; end if;
-  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_latest_ebay_draft_status(uuid) from authenticated; end if;
-end $$;
 
 -- ---------------------------------------------------------------------
 -- Corrective pass — listing_studio_claim_ebay_draft_batch_items: the ONE
@@ -375,10 +367,6 @@ end;
 $$;
 
 revoke all on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) from public;
-do $$ begin
-  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) from anon; end if;
-  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) from authenticated; end if;
-end $$;
 
 -- listing_studio_owners_with_claimable_ebay_work — the bounded lookup a
 -- future/cron sweep uses to find WHICH owners currently have claimable
@@ -398,7 +386,56 @@ as $$
 $$;
 
 revoke all on function public.listing_studio_owners_with_claimable_ebay_work(integer) from public;
+
+-- ============================================================================
+-- FUNCTION EXECUTION LOCKDOWN — for every function this migration defines:
+--   1. REVOKE EXECUTE from PUBLIC (removes the default grant every new
+--      function gets), and
+--   2. REVOKE EXECUTE from anon / authenticated when those roles exist, and
+--   3. explicitly GRANT EXECUTE to service_role when it exists.
+--
+-- Step 3 is NOT optional (corrective pass — this file previously omitted it,
+-- relying on Supabase's default privileges giving service_role its own
+-- direct grant; that was verified true for this project's database by
+-- calling an existing production RPC with the same revoke-only pattern
+-- directly via the service-role key and confirming it still executes, but
+-- the returns-losses migrations already established — see
+-- supabase-returns-losses.sql's own identical comment — that this must not
+-- be relied on as a general rule: a newly created function's only EXECUTE
+-- grant is to PUBLIC; anon, authenticated AND service_role all reach it only
+-- by INHERITING that PUBLIC grant unless service_role holds its own
+-- explicit one. `revoke ... from public` therefore can remove service_role's
+-- own ability to run the function on a database where the environment-
+-- dependent default grant doesn't exist. The server (PostgREST with the
+-- service key -> SET ROLE service_role) calls every listing_studio_*_ebay_*
+-- RPC here, so we grant it back explicitly and idempotently, matching
+-- supabase-returns-losses.sql's own established pattern exactly.
+--
+-- Guarded-literal style, matching supabase-returns-losses.sql /
+-- supabase-listing-studio.sql. No dynamic SQL. Idempotent: re-revoking an
+-- absent grant and re-granting an existing one are both no-ops. postgres
+-- (object owner) always retains EXECUTE regardless and is never named.
+-- ============================================================================
 do $$ begin
-  if exists (select 1 from pg_roles where rolname = 'anon') then revoke all on function public.listing_studio_owners_with_claimable_ebay_work(integer) from anon; end if;
-  if exists (select 1 from pg_roles where rolname = 'authenticated') then revoke all on function public.listing_studio_owners_with_claimable_ebay_work(integer) from authenticated; end if;
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) from anon;
+    revoke all on function public.listing_studio_latest_ebay_draft_status(uuid) from anon;
+    revoke all on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) from anon;
+    revoke all on function public.listing_studio_owners_with_claimable_ebay_work(integer) from anon;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'authenticated') then
+    revoke all on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) from authenticated;
+    revoke all on function public.listing_studio_latest_ebay_draft_status(uuid) from authenticated;
+    revoke all on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) from authenticated;
+    revoke all on function public.listing_studio_owners_with_claimable_ebay_work(integer) from authenticated;
+  end if;
+  -- Re-grant the access the PUBLIC revoke above might otherwise have left
+  -- service_role without, on a database where the default-privileges grant
+  -- doesn't already cover it.
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    grant execute on function public.listing_studio_create_ebay_draft_batch(uuid, uuid[], uuid[]) to service_role;
+    grant execute on function public.listing_studio_latest_ebay_draft_status(uuid) to service_role;
+    grant execute on function public.listing_studio_claim_ebay_draft_batch_items(uuid, uuid, integer, text, integer) to service_role;
+    grant execute on function public.listing_studio_owners_with_claimable_ebay_work(integer) to service_role;
+  end if;
 end $$;

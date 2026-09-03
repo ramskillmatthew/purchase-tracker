@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { supabaseRequestAll } from "@/lib/supabase";
+import { supabaseRequestAll, isMissingSchemaError } from "@/lib/supabase";
 
 function jsonResponse(rows: unknown[], status = 200) {
   return new Response(JSON.stringify(rows), { status, headers: { "Content-Type": "application/json" } });
@@ -232,5 +232,45 @@ describe("supabaseRequestAll — REGRESSION: PGRST103 (\"Requested range not sat
     const result = await supabaseRequestAll("purchases?select=*", { pageSize: 5 });
     expect(result).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Corrective pass (eBay drafter) — the shared "is this a missing
+// table/column" classifier every migration-optional query in this codebase
+// should use instead of a bespoke check per call site.
+function schemaError(status: number, code: string, message: string): Error & { status: number } {
+  const error = new Error(JSON.stringify({ code, message })) as Error & { status: number };
+  error.status = status;
+  return error;
+}
+
+describe("isMissingSchemaError", () => {
+  it("recognises PostgREST's own schema-cache miss for an unknown table (PGRST205, HTTP 404)", () => {
+    expect(isMissingSchemaError(schemaError(404, "PGRST205", "Could not find the table 'public.ebay_draft_batches' in the schema cache"))).toBe(true);
+  });
+
+  it("recognises Postgres' own undefined_column error (42703, HTTP 400)", () => {
+    expect(isMissingSchemaError(schemaError(400, "42703", "column listing_marketplace_drafts.ebay_offer_id does not exist"))).toBe(true);
+  });
+
+  it("recognises an undefined_relation-style message even at a different status", () => {
+    expect(isMissingSchemaError(schemaError(400, "42P01", "relation \"public.ebay_draft_batches\" does not exist"))).toBe(true);
+  });
+
+  it("REQUIREMENT 7: does NOT recognise an auth/permission failure (401) — this must propagate as a real error", () => {
+    expect(isMissingSchemaError(schemaError(401, "42501", "permission denied for table listing_marketplace_drafts"))).toBe(false);
+  });
+
+  it("does NOT recognise a rate limit (429)", () => {
+    expect(isMissingSchemaError(schemaError(429, "", "Too many requests"))).toBe(false);
+  });
+
+  it("does NOT recognise a 400 that isn't actually a missing-schema message (e.g. a genuine constraint violation)", () => {
+    expect(isMissingSchemaError(schemaError(400, "23505", "duplicate key value violates unique constraint"))).toBe(false);
+  });
+
+  it("does NOT recognise a plain non-Error value, or an Error with no status property", () => {
+    expect(isMissingSchemaError("just a string")).toBe(false);
+    expect(isMissingSchemaError(new Error("column does not exist"))).toBe(false);
   });
 });

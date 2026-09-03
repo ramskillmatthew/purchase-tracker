@@ -16,10 +16,15 @@ export type BulkPolicyApplyResult = { appliedCount: number; skippedCount: number
  * draft (see the /ebay-bulk-policy route's own skip rules) and reports
  * exactly how many were applied vs. skipped and why.
  */
-export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply }: {
+export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply, disabledReason }: {
   eligibleCount: number;
   policies: EbayPolicyOption[];
   onApply: (ebayPolicyId: string) => Promise<BulkPolicyApplyResult>;
+  // Corrective pass — set only when the eBay draft-batches migration
+  // (which also adds the ebay_*_policy_id columns this control writes to)
+  // hasn't been applied yet. The button stays visible but disabled, with
+  // this text as its title, rather than disappearing without explanation.
+  disabledReason?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState("");
@@ -27,6 +32,7 @@ export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply
   const [result, setResult] = useState<BulkPolicyApplyResult | null>(null);
 
   const shippingPolicies = policies.filter(p => p.policyType === "FULFILLMENT" && p.available);
+  const disabled = Boolean(disabledReason);
 
   async function handleApply() {
     if (!selected || applying) return;
@@ -41,10 +47,10 @@ export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply
   }
 
   return <div className="lr-bulk-ebay-policy">
-    <button type="button" className="button-secondary" onClick={() => setOpen(current => !current)} aria-expanded={open}>
+    <button type="button" className="button-secondary" disabled={disabled} title={disabledReason} onClick={() => setOpen(current => !current)} aria-expanded={open}>
       Set eBay shipping policy
     </button>
-    {open && <div className="lr-bulk-ebay-policy-panel" role="dialog" aria-label="Set eBay shipping policy">
+    {open && !disabled && <div className="lr-bulk-ebay-policy-panel" role="dialog" aria-label="Set eBay shipping policy">
       <label className="field">
         <span className="label">Shipping policy</span>
         <select className="input" value={selected} onChange={event => { setSelected(event.target.value); setResult(null); }}>

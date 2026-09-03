@@ -7,7 +7,6 @@ import { getVintedCategoriesByIds, isPublishableVintedCategory } from "@/lib/lis
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { buildPurchaseMatchIndex, matchSkuToPurchase, buildPurchaseSkuLookupQueries, type PurchaseMatchRecord } from "@/lib/listing-studio/purchase-match";
 import { listMarketplaceDraftsForProducts } from "@/lib/listing-studio/marketplace-drafts";
-import type { MarketplaceDraft } from "@/lib/listing-studio/marketplace-types";
 
 // Stage 6 (eBay draft batches) — the eBay equivalent of
 // LatestExtensionStatusRow, from rpc/listing_studio_latest_ebay_draft_status
@@ -155,17 +154,26 @@ export async function GET() {
       // supabase-listing-studio-marketplace.sql's own header comment — but
       // filtering explicitly here is future-proof and self-documenting).
       //
-      // CORRECTIVE PASS — this now selects columns
-      // (ebay_fulfillment_policy_id and friends) that only exist once
-      // supabase-ebay-draft-batches.sql has been applied. Before that,
-      // this call would 400 ("column does not exist"), and — because
-      // this whole array feeds ONE Promise.all — would take the ENTIRE
-      // Listings Review page down for every listing, Vinted-only included,
-      // not just eBay ones. Wrapped in the exact same degrade-gracefully
-      // pattern as the two RPC calls in this Promise.all: before the
-      // migration is applied, every listing simply shows no eBay data at
-      // all (exactly as if it had none), never a broken page.
-      listMarketplaceDraftsForProducts(user.id, draftIds).catch(() => new Map<string, MarketplaceDraft[]>()),
+      // CORRECTIVE PASS — no `.catch()` here anymore. The earlier version
+      // swallowed EVERY failure from this call into an empty Map, which
+      // hid a real bug: listMarketplaceDraftsForProducts used to select
+      // ebay_fulfillment_policy_id and friends (columns that only exist
+      // once supabase-ebay-draft-batches.sql has been applied) in the same
+      // query as core title/description/category/price fields, so on a
+      // database without that migration the WHOLE query 400'd and every
+      // eBay marketplace draft vanished from this page — including ones,
+      // like the real "On Running Cloud 5" test listing, whose title,
+      // description, category, price and photos were already fully
+      // populated by Stage 2-5 and never needed the missing migration at
+      // all. listMarketplaceDraftsForProducts now queries those two column
+      // sets separately and degrades ONLY the migration-dependent fields
+      // (see lib/listing-studio/marketplace-drafts.ts's own comments), so
+      // it never throws for that specific, expected case — it can still
+      // throw for a genuine fault (bad auth, network, an unrelated schema
+      // problem), which is deliberately left to propagate to this route's
+      // own top-level catch (safeApiError, which logs it) rather than
+      // being silently hidden here.
+      listMarketplaceDraftsForProducts(user.id, draftIds),
       // Same degrade-gracefully pattern as the Vinted extension-status RPC
       // above — a missing migration never fails this whole page.
       supabaseRequest("rpc/listing_studio_latest_ebay_draft_status", {

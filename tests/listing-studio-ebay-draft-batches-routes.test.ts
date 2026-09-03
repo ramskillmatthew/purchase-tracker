@@ -58,8 +58,35 @@ describe("GET /api/listing-studio/ebay-draft-batches", () => {
     });
     const response = await listRoute();
     const body = await response.json();
+    expect(body.available).toBe(true);
     expect(body.batchIds).toEqual([{ batchId: "b1", displayNumber: 1 }]);
     expect(body.stuck).toEqual([{ batchId: "b2", displayNumber: 2, status: "in_progress", listingCount: 3, createdAt: "x" }]);
+  });
+
+  describe("CORRECTIVE PASS — missing batch-migration schema degrades safely (never an uncontrolled 500)", () => {
+    function schemaError(status: number, code: string, message: string): Error & { status: number } {
+      const error = new Error(JSON.stringify({ code, message })) as Error & { status: number };
+      error.status = status;
+      return error;
+    }
+
+    it("REQUIREMENT 5: a missing ebay_draft_batches table (PGRST205, 404) never crashes Listings Review — returns 200 with available:false and empty lists", async () => {
+      listOwnerEbayBatches.mockRejectedValue(schemaError(404, "PGRST205", "Could not find the table 'public.ebay_draft_batches' in the schema cache"));
+      const response = await listRoute();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual({ available: false, batchIds: [], stuck: [] });
+    });
+
+    it("REQUIREMENT 7: an unrelated failure (auth/permission/network) still returns a real error response, never disguised as available:false", async () => {
+      const error = new Error(JSON.stringify({ code: "42501", message: "permission denied" })) as Error & { status: number };
+      error.status = 401;
+      listOwnerEbayBatches.mockRejectedValue(error);
+      const response = await listRoute();
+      expect(response.status).not.toBe(200);
+      const body = await response.json();
+      expect(body).not.toHaveProperty("available");
+    });
   });
 });
 
@@ -104,6 +131,19 @@ describe("POST /api/listing-studio/ebay-draft-batches", () => {
     resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }]]));
     await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
     expect(enforceRateLimit).toHaveBeenCalledWith("owner-1", "ebay_draft_batch_create", expect.any(Number), expect.any(Number));
+  });
+
+  it("REQUIREMENT 5/6: a missing ebay_draft_batches table returns a deliberate, clearly-worded 409 (available:false) instead of an uncontrolled 500 — batch creation genuinely cannot succeed without this table, so this is the one route where 'unavailable' IS the terminal response, not a fallback to empty success", async () => {
+    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }]]));
+    const error = new Error(JSON.stringify({ code: "PGRST205", message: "Could not find the table 'public.ebay_draft_batches' in the schema cache" })) as Error & { status: number };
+    error.status = 404;
+    createEbayDraftBatch.mockRejectedValue(error);
+    const response = await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body.available).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
   });
 });
 

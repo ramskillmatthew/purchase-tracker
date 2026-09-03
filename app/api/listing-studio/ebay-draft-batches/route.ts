@@ -5,6 +5,7 @@ import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 import { createEbayDraftBatch, listOwnerEbayBatches, runEbayDraftBatchProcessTick, resolveEbayDraftEligibilityForProducts } from "@/lib/listing-studio/ebay-draft-batches";
 import { enforceRateLimit } from "@/lib/security/activity";
+import { isMissingSchemaError } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -40,15 +41,39 @@ const RATE_LIMIT_WINDOW_SECONDS = 10 * 60;
  * app/api/cron/ebay-draft-processing/route.ts) — never by this route
  * continuing to do work after it has already returned.
  */
+/**
+ * CORRECTIVE PASS — before this fix, a missing `ebay_draft_batches` table
+ * (supabase-ebay-draft-batches.sql not yet applied) made this handler
+ * throw straight into safeApiError's generic 500 path — an uncontrolled
+ * fault, not a deliberate response, even though "the batch migration isn't
+ * applied yet" is an entirely expected, recoverable state this route
+ * should describe on purpose. `available: false` is that deliberate
+ * signal: batch creation/processing/dismissal genuinely cannot work yet,
+ * but that must never be confused with "something is broken" — the eBay
+ * per-item editor (title/description/category/price/policies) has no
+ * dependency on this table at all and keeps working regardless (see
+ * lib/listing-studio/marketplace-drafts.ts's own corrective-pass fix).
+ * `batchIds`/`stuck` are simply empty in that case, matching what an
+ * owner with zero real batches would also see — the client already
+ * treats both the same way, but now the UI can also say WHY instead of
+ * staying silent. Any OTHER failure (auth, network, a genuine fault) is
+ * still a real error and still goes through safeApiError.
+ */
 export async function GET() {
   try {
     const user = await requireOwner();
     const { visible, stuck } = await listOwnerEbayBatches(user.id);
     return NextResponse.json({
+      available: true,
       batchIds: visible.map(b => ({ batchId: b.batchId, displayNumber: b.displayNumber })),
       stuck: stuck.map(b => ({ batchId: b.batchId, displayNumber: b.displayNumber, status: b.status, listingCount: b.listingCount, createdAt: b.createdAt })),
     });
-  } catch (error) { return safeApiError(error, "Could not check for active eBay draft batches."); }
+  } catch (error) {
+    if (isMissingSchemaError(error)) {
+      return NextResponse.json({ available: false, batchIds: [], stuck: [] });
+    }
+    return safeApiError(error, "Could not check for active eBay draft batches.");
+  }
 }
 
 const createRequestSchema = z.object({ draftIds: z.array(uuidSchema).min(1).max(MAX_EBAY_BATCH_LISTINGS) }).strict();
@@ -87,5 +112,16 @@ export async function POST(request: Request) {
     await runEbayDraftBatchProcessTick(user.id, batchId).catch(() => {});
 
     return NextResponse.json({ batchId, displayNumber, eligibleCount: eligibleProductIds.length, skippedCount: skipped.length, skipped });
-  } catch (error) { return safeApiError(error, "Could not create an eBay draft batch."); }
+  } catch (error) {
+    // Corrective pass — creating a batch genuinely requires
+    // ebay_draft_batches/ebay_draft_batch_items to exist (unlike GET
+    // above, there is no meaningful "available: false" success response
+    // here — the whole point of this call is to write a row into a table
+    // that isn't there yet). Still a deliberate, clearly-worded 409, never
+    // the generic 500 safeApiError would otherwise produce.
+    if (isMissingSchemaError(error)) {
+      return NextResponse.json({ error: "Batch eBay drafting isn't enabled on this database yet — the required migration hasn't been applied.", available: false }, { status: 409 });
+    }
+    return safeApiError(error, "Could not create an eBay draft batch.");
+  }
 }

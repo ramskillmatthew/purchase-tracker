@@ -463,10 +463,20 @@ describe("GET /api/listing-studio/listings-review — CORRECTIVE PASS: canonical
     expect(routeSource).toContain("listing_marketplace_drafts?owner_id=eq.${user.id}&marketplace=eq.EBAY_UK");
   });
 
-  it("REQUIREMENT (robustness — corrective pass): the WHOLE page still loads, with every Vinted listing fully intact, if the eBay migration hasn't been applied yet and listMarketplaceDraftsForProducts's own query 400s (missing ebay_* columns) — never a broken page for Vinted-only users", async () => {
+  it("REQUIREMENT (robustness — corrective pass): the WHOLE page still loads, with every Vinted listing fully intact, if the eBay migration hasn't been applied yet and the eBay batch/policy columns 400 (missing ebay_* columns) — never a broken page for Vinted-only users", async () => {
+    // Corrective pass — the missing-schema failure boundary moved: it now
+    // lives specifically in the second, separate eBay-batch-fields query
+    // (listing_marketplace_drafts?id=in....&select=id,ebay_fulfillment_...)
+    // inside lib/listing-studio/marketplace-drafts.ts's own
+    // fetchEbayBatchFieldsByIds, not in the core
+    // product_draft_id=in....&select=CORE... query this route makes. See
+    // tests/listing-studio-marketplace-drafts-schema-degradation.test.ts
+    // for the dedicated, more granular proof of that internal behaviour;
+    // this test proves the same thing end-to-end through the real route.
     routeMocksFor([draftRow()], [], []);
     supabaseRequestAll.mockImplementation(async (path: string) => {
-      if (path.startsWith("listing_marketplace_drafts?product_draft_id=in.")) throw Object.assign(new Error("column listing_marketplace_drafts.ebay_fulfillment_policy_id does not exist"), { status: 400 });
+      if (path.startsWith("listing_marketplace_drafts?id=in.")) throw Object.assign(new Error(JSON.stringify({ code: "42703", message: "column listing_marketplace_drafts.ebay_fulfillment_policy_id does not exist" })), { status: 400 });
+      if (path.startsWith("listing_marketplace_drafts?product_draft_id=in.")) return [];
       if (path.startsWith("listing_marketplace_drafts?owner_id=eq.")) return [];
       if (path.startsWith("listing_drafts?")) return [draftRow()];
       return [];
@@ -477,6 +487,17 @@ describe("GET /api/listing-studio/listings-review — CORRECTIVE PASS: canonical
     expect(body.drafts).toHaveLength(1);
     expect(body.drafts[0].generated_title).toBe("On Cloud 5");
     expect(body.ebayDrafts).toEqual([]);
+  });
+
+  it("REQUIREMENT 7 (corrective pass): a GENUINE failure from the core marketplace-drafts query (not a recognised missing-schema shape) now correctly fails the request — it is no longer silently hidden behind an empty eBay dataset", async () => {
+    routeMocksFor([draftRow()], [], []);
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_marketplace_drafts?product_draft_id=in.")) throw Object.assign(new Error(JSON.stringify({ code: "42501", message: "permission denied" })), { status: 401 });
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      return [];
+    });
+    const response = await listingsReviewRoute();
+    expect(response.status).not.toBe(200);
   });
 
   it("REQUIREMENT (workspace isolation, behavioural): an eBay marketplace draft belonging to a DIFFERENT owner is never returned, even if its product_draft_id happens to collide", async () => {

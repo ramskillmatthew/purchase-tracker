@@ -2749,3 +2749,4 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-bulk-ebay-policy-panel .input { width: 100%; }
 .lr-bulk-ebay-policy-count { margin: 0; color: var(--lr-muted); font-size: 10.5px; }
 .lr-bulk-ebay-policy-result { margin: 0; color: var(--lr-text); font-size: 10.5px; }
+.lr-bulk-ebay-unavailable-note { margin: 0; padding: 6px 10px; color: var(--lr-muted); font-size: 10.5px; }

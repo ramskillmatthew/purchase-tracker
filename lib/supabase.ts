@@ -20,6 +20,30 @@ export async function supabaseRequest(path: string, init?: RequestInit) {
   return response;
 }
 
+/**
+ * True only for the specific PostgREST/Postgres error shapes that mean "a
+ * table, view or column this query needs doesn't exist in this database
+ * yet" — i.e. a migration genuinely hasn't been applied — never for an
+ * auth failure, rate limit, network error or any other kind of fault.
+ * Matches PGRST205 (PostgREST's own schema-cache miss for a relation it
+ * doesn't know about, surfaced as HTTP 404) and Postgres' own
+ * undefined_column/undefined_table error text (surfaced as HTTP 400),
+ * mirroring the recognition lib/auth/api.ts's safeApiError already uses
+ * for the analogous purchase-import case.
+ *
+ * Every caller of this function MUST re-throw (or otherwise surface) any
+ * error this returns false for — it is only ever safe to silently degrade
+ * for the specific "expected missing schema" case, never for an unknown
+ * failure, per this codebase's own migration-optional-degrade convention
+ * (see e.g. lib/listing-studio/marketplace-drafts.ts's own use of this).
+ */
+export function isMissingSchemaError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("status" in error)) return false;
+  const status = (error as Error & { status?: unknown }).status;
+  if (status !== 400 && status !== 404) return false;
+  return /column .* does not exist|relation .* does not exist|schema cache/i.test(error.message);
+}
+
 // PostgREST silently caps any request that doesn't specify a Range to its
 // configured db-max-rows (confirmed 1000 in this project — that's exactly
 // what previously made the app believe purchases/expenses tables topped
