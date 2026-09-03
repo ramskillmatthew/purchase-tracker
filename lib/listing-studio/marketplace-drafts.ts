@@ -57,20 +57,27 @@ const CORE_MARKETPLACE_DRAFT_SELECT =
 // the missing migration at all — silently vanished from Listings Review.
 // Splitting the query means only THESE specific fields ever degrade to
 // their defaults; the rest of the row is never at risk.
+// ebay_feed_draft_created_at / ebay_feed_last_error (added by the also
+// still-unapplied supabase-ebay-feed-drafts.sql) are fetched in this SAME
+// best-effort query as the legacy Stage 6 fields, for the identical reason
+// — they live on the same table and must degrade the same way on a
+// database where that migration hasn't run yet either.
 const EBAY_BATCH_FIELD_SELECT =
-  "id,ebay_fulfillment_policy_id,ebay_return_policy_id,ebay_payment_policy_id,ebay_merchant_location_key,ebay_offer_id,ebay_inventory_synced_at,ebay_last_draft_error,ebay_photo_state_json";
+  "id,ebay_fulfillment_policy_id,ebay_return_policy_id,ebay_payment_policy_id,ebay_merchant_location_key,ebay_offer_id,ebay_inventory_synced_at,ebay_last_draft_error,ebay_photo_state_json,ebay_feed_draft_created_at,ebay_feed_last_error";
 
 type EbayBatchFieldsRow = {
   id: string;
   ebay_fulfillment_policy_id: string | null; ebay_return_policy_id: string | null; ebay_payment_policy_id: string | null;
   ebay_merchant_location_key: string | null; ebay_offer_id: string | null; ebay_inventory_synced_at: string | null;
   ebay_last_draft_error: string | null; ebay_photo_state_json: MarketplaceDraft["ebayPhotoState"];
+  ebay_feed_draft_created_at: string | null; ebay_feed_last_error: string | null;
 };
 type EbayBatchFields = Omit<EbayBatchFieldsRow, "id">;
 const EMPTY_EBAY_BATCH_FIELDS: EbayBatchFields = {
   ebay_fulfillment_policy_id: null, ebay_return_policy_id: null, ebay_payment_policy_id: null,
   ebay_merchant_location_key: null, ebay_offer_id: null, ebay_inventory_synced_at: null,
   ebay_last_draft_error: null, ebay_photo_state_json: {},
+  ebay_feed_draft_created_at: null, ebay_feed_last_error: null,
 };
 
 /**
@@ -125,6 +132,7 @@ function rowToMarketplaceDraft(row: CoreMarketplaceDraftRow, ebayFields?: EbayBa
     ebayFulfillmentPolicyId: ebay.ebay_fulfillment_policy_id, ebayReturnPolicyId: ebay.ebay_return_policy_id, ebayPaymentPolicyId: ebay.ebay_payment_policy_id,
     ebayMerchantLocationKey: ebay.ebay_merchant_location_key, ebayOfferId: ebay.ebay_offer_id, ebayInventorySyncedAt: ebay.ebay_inventory_synced_at,
     ebayLastDraftError: ebay.ebay_last_draft_error, ebayPhotoState: ebay.ebay_photo_state_json ?? {},
+    ebayFeedDraftCreatedAt: ebay.ebay_feed_draft_created_at, ebayFeedLastError: ebay.ebay_feed_last_error,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }

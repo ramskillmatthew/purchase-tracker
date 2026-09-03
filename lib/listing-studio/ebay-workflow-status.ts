@@ -26,15 +26,25 @@ export function computeEbayDraftWorkflowStatus(itemStatus: EbayDraftItemStatus |
   return null;
 }
 
-// Exact label required for the completed state — "eBay draft completed",
-// never "Unpublished"/"Offer created"/"Complete on eBay"/"Published"/"Live".
+// CORRECTIVE PASS (Phase J — retiring this pipeline from active use) — the
+// completed label was "eBay draft completed", which every user of this app
+// would reasonably read as "a genuine eBay draft now exists". It never did:
+// this pipeline (lib/listing-studio/ebay-draft-batches.ts) only ever calls
+// the Inventory API's createOffer, producing an UNPUBLISHED offer that is
+// never visible in Seller Hub — see
+// lib/listing-studio/ebay-feed/feed-workflow-status.ts's own header for the
+// full architecture story and the NEW pipeline that actually creates a
+// genuine, editable Seller Hub draft. Every historical "completed" row from
+// this retired pipeline is relabelled here with the truthful description of
+// what it actually is — never deleted, never hidden, just no longer
+// mis-described. New work no longer flows through this pipeline at all.
 export const EBAY_WORKFLOW_STATUS_LABELS: Record<EbayWorkflowStatus, string> = {
   queued: "Queued",
   uploading_photos: "Uploading photos",
   creating_inventory_item: "Creating inventory item",
   creating_draft: "Creating draft",
   verifying_draft: "Verifying draft",
-  completed: "eBay draft completed",
+  completed: "Legacy unpublished API offer — not visible in Seller Hub",
   failed: "Failed",
 };
 

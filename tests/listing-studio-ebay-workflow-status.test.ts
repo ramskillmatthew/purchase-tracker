@@ -20,8 +20,14 @@ describe("computeEbayDraftWorkflowStatus", () => {
 });
 
 describe("EBAY_WORKFLOW_STATUS_LABELS", () => {
-  it("uses exactly \"eBay draft completed\" for the completed state — never Unpublished/Offer created/Complete on eBay/Published/Live", () => {
-    expect(EBAY_WORKFLOW_STATUS_LABELS.completed).toBe("eBay draft completed");
+  // CORRECTIVE PASS (Phase J) — this pipeline is retired and never created a
+  // genuine Seller Hub draft; the old "eBay draft completed" label
+  // overclaimed what actually happened. See
+  // lib/listing-studio/ebay-workflow-status.ts's own corrective-pass comment.
+  it("the completed state's label truthfully describes a legacy, unpublished, not-Seller-Hub-visible offer — never claims a draft/publish/live outcome", () => {
+    expect(EBAY_WORKFLOW_STATUS_LABELS.completed).toBe("Legacy unpublished API offer — not visible in Seller Hub");
+    expect(EBAY_WORKFLOW_STATUS_LABELS.completed).not.toMatch(/\bpublish(ed)?\b/i);
+    expect(EBAY_WORKFLOW_STATUS_LABELS.completed).not.toMatch(/\blive\b/i);
   });
   it("every status has a label and a tone — no gaps", () => {
     for (const status of Object.keys(EBAY_WORKFLOW_STATUS_LABELS) as Array<keyof typeof EBAY_WORKFLOW_STATUS_LABELS>) {

@@ -156,6 +156,7 @@ function marketplaceDraft(overrides: Record<string, unknown> = {}) {
     validationMessages: [], aiGeneration: null, sourceDraftId: null, sourceEbayItemId: null, dynamicData: {}, settings: {},
     ebayFulfillmentPolicyId: "FUL-1", ebayReturnPolicyId: "RET-1", ebayPaymentPolicyId: "PAY-1", ebayMerchantLocationKey: "LOC-1",
     ebayOfferId: null, ebayInventorySyncedAt: null, ebayLastDraftError: null, ebayPhotoState: {},
+    ebayFeedDraftCreatedAt: null, ebayFeedLastError: null,
     createdAt: "x", updatedAt: "x",
     ...overrides,
   };

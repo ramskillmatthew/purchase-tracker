@@ -179,6 +179,13 @@ export type MarketplaceDraft = {
   ebayInventorySyncedAt: string | null;
   ebayLastDraftError: string | null;
   ebayPhotoState: Record<string, { status: "pending" | "uploading" | "uploaded" | "failed"; url?: string; checkedAt: string; error?: string }>;
+  // The Sell Feed API pipeline's own success/error signal (Phase J) —
+  // wholly independent of ebayOfferId/ebayInventorySyncedAt above, which
+  // describe the retired Inventory API pipeline's own, different objects.
+  // See supabase-ebay-feed-drafts.sql's own column comment for the exact
+  // "set only once genuinely confirmed" rule.
+  ebayFeedDraftCreatedAt: string | null;
+  ebayFeedLastError: string | null;
   createdAt: string;
   updatedAt: string;
 };

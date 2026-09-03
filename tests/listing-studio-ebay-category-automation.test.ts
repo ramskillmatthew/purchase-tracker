@@ -27,6 +27,7 @@ function ebayDraft(overrides: Record<string, unknown> = {}) {
     validationMessages: [], aiGeneration: null, sourceDraftId: null, sourceEbayItemId: null, dynamicData: {}, settings: {},
     ebayFulfillmentPolicyId: null, ebayReturnPolicyId: null, ebayPaymentPolicyId: null, ebayMerchantLocationKey: null,
     ebayOfferId: null, ebayInventorySyncedAt: null, ebayLastDraftError: null, ebayPhotoState: {},
+    ebayFeedDraftCreatedAt: null, ebayFeedLastError: null,
     createdAt: "x", updatedAt: "x",
     ...overrides,
   };

@@ -1766,7 +1766,11 @@ export default function ListingsReviewWorkspace() {
           if (!prev || item.status === prev.status) continue;
           const label = item.generatedTitle || item.sku || "Listing";
           if (item.status === "completed") {
-            newEvents.push({ id: `${item.itemId}:completed`, batchId, batchLabel, tone: "success", message: `${label} — eBay draft completed`, timestampIso: item.completedAt ?? new Date().toISOString() });
+            // Truthful wording for this RETIRED pipeline's own outcome — see
+            // lib/listing-studio/ebay-workflow-status.ts's own corrective-pass
+            // comment: this only ever creates an unpublished Inventory API
+            // offer, never a genuine Seller Hub draft.
+            newEvents.push({ id: `${item.itemId}:completed`, batchId, batchLabel, tone: "success", message: `${label} — Legacy unpublished eBay API offer created`, timestampIso: item.completedAt ?? new Date().toISOString() });
           } else if (item.status === "failed") {
             newEvents.push({ id: `${item.itemId}:failed`, batchId, batchLabel, tone: "failure", message: `${label} — failed: ${item.errorMessage ?? "Unknown error"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
           } else {
