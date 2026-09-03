@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EbayPolicyOption } from "./EbayPolicySelectors";
 
 export type BulkPolicyApplyResult = { appliedCount: number; skippedCount: number; skipped: Array<{ draftId: string; reason: string }> };
@@ -15,6 +15,21 @@ export type BulkPolicyApplyResult = { appliedCount: number; skippedCount: number
  * only to selected listings that have an eBay preparation and no existing
  * draft (see the /ebay-bulk-policy route's own skip rules) and reports
  * exactly how many were applied vs. skipped and why.
+ *
+ * CORRECTIVE PASS — the panel previously had no way to close it once open
+ * other than re-clicking the trigger: no visible × control, no outside-
+ * click dismissal, no Escape handling, and no focus restoration. Mirrors
+ * components/listing-studio/OverflowMenu.tsx's own established close
+ * conventions (outside-click via a capture-phase mousedown check against
+ * the container ref, Escape closes and returns focus to the trigger) —
+ * adapted for a panel with real interactive controls (a <select> and an
+ * Apply button) rather than a list of menu items. Never closes while the
+ * user is genuinely interacting with the <select> — a native <select>'s
+ * own open listbox is OS chrome, not a DOM node a mousedown/outside-click
+ * check ever sees as "outside" this panel, so choosing an option never
+ * triggers an accidental close. Closes automatically once an Apply
+ * actually succeeds (a failed attempt keeps the panel open so the result/
+ * error stays visible and the user can retry without reopening).
  */
 export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply, disabledReason }: {
   eligibleCount: number;
@@ -31,8 +46,16 @@ export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<BulkPolicyApplyResult | null>(null);
 
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
   const shippingPolicies = policies.filter(p => p.policyType === "FULFILLMENT" && p.available);
   const disabled = Boolean(disabledReason);
+
+  function closePanel() {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
 
   async function handleApply() {
     if (!selected || applying) return;
@@ -41,16 +64,43 @@ export default function BulkEbayPolicyControl({ eligibleCount, policies, onApply
     try {
       const outcome = await onApply(selected);
       setResult(outcome);
+      // Only auto-close on a real success (something was actually
+      // applied) — a 0-applied/all-skipped outcome keeps the panel open
+      // so the skip reasons stay visible instead of vanishing instantly.
+      if (outcome.appliedCount > 0) closePanel();
     } finally {
       setApplying(false);
     }
   }
 
-  return <div className="lr-bulk-ebay-policy">
-    <button type="button" className="button-secondary" disabled={disabled} title={disabledReason} onClick={() => setOpen(current => !current)} aria-expanded={open}>
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closePanel();
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return <div className="lr-bulk-ebay-policy" ref={containerRef}>
+    <button ref={triggerRef} type="button" className="button-secondary" disabled={disabled} title={disabledReason} onClick={() => setOpen(current => !current)} aria-expanded={open} aria-haspopup="dialog">
       Set eBay shipping policy
     </button>
     {open && !disabled && <div className="lr-bulk-ebay-policy-panel" role="dialog" aria-label="Set eBay shipping policy">
+      <div className="lr-bulk-ebay-policy-panel-header">
+        <span className="lr-bulk-ebay-policy-panel-title">Set eBay shipping policy</span>
+        <button type="button" className="lr-bulk-ebay-policy-close" aria-label="Close" onClick={closePanel}>×</button>
+      </div>
       <label className="field">
         <span className="label">Shipping policy</span>
         <select className="input" value={selected} onChange={event => { setSelected(event.target.value); setResult(null); }}>

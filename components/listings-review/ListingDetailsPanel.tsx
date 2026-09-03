@@ -104,6 +104,7 @@ export type EbayTabData = {
   sellingPricePence: number | null;
   costPence: number | null;
   profitPence: number | null;
+  quantity: number | null;
   selection: EbayPolicySelection;
   offerId: string | null;
   workflowStatus: EbayWorkflowStatus | null;

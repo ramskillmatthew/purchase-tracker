@@ -27,6 +27,7 @@ import type { ListingGenerationFields } from "@/lib/listing-studio/listing-gener
 import { computeCostPence, computeProfitPence, type SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
 import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-export-schema";
 import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
+import { evaluateEbayDraftEligibility, type EbayDraftEligibilityResult } from "@/lib/listing-studio/ebay-draft-eligibility";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
 
@@ -586,6 +587,7 @@ export default function ListingsReviewWorkspace() {
         sellingPricePence: ebayDraft.pricePence,
         costPence,
         profitPence: ebayProfitPence,
+        quantity: ebayDraft.quantity,
         selection: {
           fulfillmentPolicyId: ebayDraft.ebayFulfillmentPolicyId, returnPolicyId: ebayDraft.ebayReturnPolicyId,
           paymentPolicyId: ebayDraft.ebayPaymentPolicyId, merchantLocationKey: ebayDraft.ebayMerchantLocationKey,
@@ -881,19 +883,59 @@ export default function ListingsReviewWorkspace() {
     }));
   }, []);
 
-  // A conservative CLIENT-SIDE estimate only, for the "Create N eBay
-  // drafts" button's own label/enabled state — the server independently
-  // re-verifies full eligibility (price, content readiness, all three
-  // policies, location, no existing offer) before ever creating a batch;
-  // this never skips that server-side check, it only avoids showing a
-  // wildly wrong count in the UI before the click.
-  const eligibleEbayCount = useMemo(() => [...bulkSelectedIds].filter(id => {
-    const row = listingsById.get(id);
-    if (!row?.ebay || row.ebay.offerId !== null || !row.ebay.contentReady) return false;
-    const s = row.ebay.selection;
-    return row.ebay.sellingPricePence != null && row.ebay.sellingPricePence > 0
-      && Boolean(s.fulfillmentPolicyId) && Boolean(s.returnPolicyId) && Boolean(s.paymentPolicyId) && Boolean(s.merchantLocationKey);
-  }).length, [bulkSelectedIds, listingsById]);
+  // CORRECTIVE PASS — calls the exact SAME evaluateEbayDraftEligibility
+  // function the server uses (lib/listing-studio/ebay-draft-eligibility.ts,
+  // also used by resolveEbayDraftEligibilityForProducts in
+  // lib/listing-studio/ebay-draft-batches.ts) rather than a separate,
+  // hand-rolled boolean check — the previous version of this file
+  // duplicated a simplified version of this logic that, among other
+  // things, wrongly required merchantLocationKey (eBay's own Inventory API
+  // documentation confirms that field is only required to PUBLISH an
+  // offer, never to create one — this app never publishes). One function,
+  // two call sites, never two contradictory implementations. This is still
+  // only a CLIENT-SIDE preview for the button's label/enabled state and
+  // for explaining blockers inline — the server independently re-runs the
+  // same function against fresh data before ever creating a batch.
+  const isEbayPolicyStale = useCallback((type: "FULFILLMENT" | "RETURN" | "PAYMENT", id: string | null) =>
+    id !== null && !ebayPolicies.some(p => p.policyType === type && p.ebayPolicyId === id && p.available), [ebayPolicies]);
+
+  const ebayEligibilityById = useMemo(() => {
+    const map = new Map<string, EbayDraftEligibilityResult>();
+    for (const id of bulkSelectedIds) {
+      const row = listingsById.get(id);
+      if (!row?.ebay) { map.set(id, { eligible: false, reasons: ["No eBay preparation for this listing"], notes: [] }); continue; }
+      const s = row.ebay.selection;
+      map.set(id, evaluateEbayDraftEligibility({
+        hasEbayPreparation: true,
+        accountUsable: ebayAccountUsable,
+        alreadyHasOffer: row.ebay.offerId !== null,
+        contentReady: row.ebay.contentReady,
+        hasValidPrice: row.ebay.sellingPricePence != null && row.ebay.sellingPricePence > 0,
+        hasPhoto: row.photoIds.length > 0,
+        hasSku: Boolean(row.sku),
+        hasQuantity: row.ebay.quantity != null,
+        fulfillmentPolicyId: s.fulfillmentPolicyId, fulfillmentPolicyStale: isEbayPolicyStale("FULFILLMENT", s.fulfillmentPolicyId),
+        returnPolicyId: s.returnPolicyId, returnPolicyStale: isEbayPolicyStale("RETURN", s.returnPolicyId),
+        paymentPolicyId: s.paymentPolicyId, paymentPolicyStale: isEbayPolicyStale("PAYMENT", s.paymentPolicyId),
+        merchantLocationKey: s.merchantLocationKey,
+      }));
+    }
+    return map;
+  }, [bulkSelectedIds, listingsById, ebayAccountUsable, isEbayPolicyStale]);
+
+  const eligibleEbayCount = useMemo(() =>
+    [...ebayEligibilityById.values()].filter(result => result.eligible).length,
+  [ebayEligibilityById]);
+
+  // Every DISTINCT blocking reason across every selected-but-ineligible
+  // listing, deduplicated — surfaced next to the button/popover instead of
+  // an unexplained "Create 0 eBay drafts" (product requirement).
+  const ebayIneligibleBlockingReasons = useMemo(() => {
+    if (eligibleEbayCount > 0 || ebayEligibilityById.size === 0) return [] as string[];
+    const reasons = new Set<string>();
+    for (const result of ebayEligibilityById.values()) for (const reason of result.reasons) reasons.add(reason);
+    return [...reasons];
+  }, [ebayEligibilityById, eligibleEbayCount]);
 
   async function handleCreateEbayDrafts() {
     const ids = [...bulkSelectedIds];
@@ -959,18 +1001,36 @@ export default function ListingsReviewWorkspace() {
   // Stuck-batch dismissal (product spec requirement) — a small × on each
   // stuck eBay batch row opens a real confirmation dialog (never a browser
   // alert), explaining that dismissing only removes it from the recovery
-  // list and never deletes listings or completed drafts. Reuses the box-
-  // dismiss action/endpoint above — dismissing a still-non-terminal batch
-  // is safe for eBay (no browser-extension pairing to interrupt, unlike
-  // the Vinted recover flow this deliberately does NOT reuse).
+  // list and never deletes listings or completed drafts.
+  //
+  // CORRECTIVE PASS — the previous version of this handler called ONLY
+  // dismiss_box, never DELETE (cancel), for a batch that might still be
+  // genuinely non-terminal (pending_claim/in_progress). That hid the box
+  // from view but left every still-queued item exactly as claimable as
+  // before (rpc/listing_studio_claim_ebay_draft_batch_items only skips
+  // completed/failed/cancelled items — a dismissed-but-not-cancelled batch
+  // is invisible yet still fully claimable, and listing_studio_create_
+  // ebay_draft_batch would still refuse to let the SAME listing start a
+  // new batch, reporting a conflict the user can no longer see or resolve).
+  // Cancelling FIRST (only ever touches still-queued items — anything
+  // already mid-processing finishes or fails on its own, never
+  // interrupted) makes the batch genuinely terminal, so the dismiss that
+  // follows is the real, final word: hidden AND no longer claimable.
   const [ebayStuckConfirmOpen, setEbayStuckConfirmOpen] = useState(false);
+  const [ebayStuckDismissing, setEbayStuckDismissing] = useState(false);
   function openEbayStuckDismissConfirm(batch: EbayStuckBatch) { setEbayDismissTarget(batch); setEbayStuckConfirmOpen(true); }
   async function confirmEbayStuckDismiss() {
-    if (!ebayDismissTarget) return;
-    setEbayStuckConfirmOpen(false);
-    setEbayStuckBatches(current => current.filter(b => b.batchId !== ebayDismissTarget.batchId));
-    await handleDismissEbayBatchBox(ebayDismissTarget.batchId);
-    setEbayDismissTarget(null);
+    if (!ebayDismissTarget || ebayStuckDismissing) return;
+    setEbayStuckDismissing(true);
+    try {
+      await fetch(`/api/listing-studio/ebay-draft-batches/${ebayDismissTarget.batchId}`, { method: "DELETE" }).catch(() => {});
+      setEbayStuckConfirmOpen(false);
+      setEbayStuckBatches(current => current.filter(b => b.batchId !== ebayDismissTarget.batchId));
+      await handleDismissEbayBatchBox(ebayDismissTarget.batchId);
+      setEbayDismissTarget(null);
+    } finally {
+      setEbayStuckDismissing(false);
+    }
   }
 
   async function handleMarkReady(listingId: string) {
@@ -1284,6 +1344,49 @@ export default function ListingsReviewWorkspace() {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_box" }),
     }).catch(() => {});
   }, []);
+
+  // CORRECTIVE PASS — stuck-batch dismissal for the "Hidden active batch"
+  // recovery panel. Previously this panel offered only "Recover stuck
+  // batch", with no way to make an unwanted stale alert go away. A stale/
+  // hidden batch is usually still genuinely non-terminal (pending_claim/
+  // in_progress), so — unlike handleDismissBatchBox above, which the
+  // ExtensionBatchGrid box only ever calls once a batch is ALREADY
+  // terminal — dismissing here must first CANCEL it (only still-queued
+  // items are affected; anything already preparing/filling/saving
+  // finishes or fails on its own, exactly like the existing "×" on a
+  // terminal batch box never touches in-flight work). Only once the
+  // cancel has made the batch genuinely terminal does dismiss_box succeed
+  // server-side (see the PATCH route's own "must be terminal" gate) —
+  // this is what makes the alert's disappearance a real, final state
+  // (no longer claimable/resumable) rather than merely hiding a batch
+  // that could otherwise still finish, or block a fresh attempt at the
+  // same listings, unseen.
+  const [stuckDismissTarget, setStuckDismissTarget] = useState<RecoverableBatchInfo | null>(null);
+  const [stuckDismissConfirmOpen, setStuckDismissConfirmOpen] = useState(false);
+  const [stuckDismissing, setStuckDismissing] = useState(false);
+  const [stuckDismissError, setStuckDismissError] = useState("");
+  function openStuckDismissConfirm(batch: RecoverableBatchInfo) { setStuckDismissTarget(batch); setStuckDismissConfirmOpen(true); setStuckDismissError(""); }
+  async function confirmStuckDismiss() {
+    if (!stuckDismissTarget || stuckDismissing) return;
+    setStuckDismissing(true);
+    setStuckDismissError("");
+    try {
+      await fetch(`/api/listing-studio/extension-batches/${stuckDismissTarget.batchId}`, { method: "DELETE" });
+      await fetch(`/api/listing-studio/extension-batches/${stuckDismissTarget.batchId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_box" }),
+      });
+      setRecoverableBatches(current => current.filter(b => b.batchId !== stuckDismissTarget.batchId));
+      setActivityDismissedBatchIds(current => new Set(current).add(stuckDismissTarget.batchId));
+      setActivityFilter(current => (current === stuckDismissTarget.batchId ? "all" : current));
+      setStuckDismissConfirmOpen(false);
+      setStuckDismissTarget(null);
+      await refreshRecoverableBatches();
+    } catch {
+      setStuckDismissError("Could not dismiss this batch — please try again.");
+    } finally {
+      setStuckDismissing(false);
+    }
+  }
 
   // Multi-batch support — "Dismiss Batch N activity". Hides only this
   // batch's own rows from Live Activity (both "All" and its own filter
@@ -1954,9 +2057,25 @@ export default function ListingsReviewWorkspace() {
         <span className="lr-hidden-batch-label">
           Batch #{batch.displayNumber} — {batch.status}{batch.isHidden ? ", hidden" : ""}{batch.isStale ? ", stale" : ""} — {batch.listingCount} listing{batch.listingCount === 1 ? "" : "s"}
         </span>
-        <button type="button" className="lr-hidden-batch-recover-button" onClick={() => openRecoverDialog(batch)}>Recover stuck batch</button>
+        <span className="lr-hidden-batch-actions">
+          <button type="button" className="lr-hidden-batch-recover-button" onClick={() => openRecoverDialog(batch)}>Recover stuck batch</button>
+          <button
+            type="button" className="lr-hidden-batch-dismiss" title={`Dismiss Batch #${batch.displayNumber}`}
+            aria-label={`Dismiss Batch #${batch.displayNumber}`} onClick={() => openStuckDismissConfirm(batch)}
+          >×</button>
+        </span>
       </div>)}
     </section>}
+    {stuckDismissConfirmOpen && stuckDismissTarget && <ConfirmDialog
+      title={`Dismiss stuck Batch #${stuckDismissTarget.displayNumber}?`}
+      message="This cancels the batch's remaining queued work (anything already sent to Vinted stays exactly as it is), releases its listings so Send to extension can be tried again, and removes the alert. The batch and its history are kept for reference, never deleted."
+      confirmLabel="Cancel & dismiss batch"
+      confirming={stuckDismissing}
+      confirmingLabel="Dismissing…"
+      error={stuckDismissError}
+      onConfirm={confirmStuckDismiss}
+      onCancel={() => { setStuckDismissConfirmOpen(false); setStuckDismissTarget(null); }}
+    />}
 
     {/* Multi-batch support — replaces the old single pairing strip with a
         grid of independent batch boxes (one per batch this session is
@@ -2002,8 +2121,10 @@ export default function ListingsReviewWorkspace() {
 
     {ebayStuckConfirmOpen && ebayDismissTarget && <ConfirmDialog
       title={`Dismiss stuck eBay batch #${ebayDismissTarget.displayNumber}?`}
-      message="This removes the batch from the recovery list. It will not delete any listings or completed eBay drafts — anything already created remains exactly as it is."
-      confirmLabel="Dismiss batch"
+      message="This cancels the batch's remaining queued work (anything already created stays exactly as it is — no eBay draft or offer is ever undone), releases its listings so they can be tried again, and removes the alert. The batch and its history are kept for reference, never deleted."
+      confirmLabel="Cancel & dismiss batch"
+      confirming={ebayStuckDismissing}
+      confirmingLabel="Dismissing…"
       onConfirm={confirmEbayStuckDismiss}
       onCancel={() => { setEbayStuckConfirmOpen(false); setEbayDismissTarget(null); }}
     />}
@@ -2087,6 +2208,18 @@ export default function ListingsReviewWorkspace() {
             </>}
             {marketplaceToggleOptions.includes("EBAY_UK") && !ebayBatchingAvailable && (
               <p className="lr-bulk-ebay-unavailable-note" role="status">Batch eBay drafting is not enabled on this database yet — per-item eBay editing above is unaffected.</p>
+            )}
+            {/* CORRECTIVE PASS — never an unexplained "Create 0 eBay
+                drafts": every distinct reason blocking every selected,
+                eBay-workflow, ineligible listing, so the user can see
+                exactly what to fix instead of guessing. */}
+            {marketplaceToggleOptions.includes("EBAY_UK") && ebayBatchingAvailable && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && eligibleEbayCount === 0 && ebayIneligibleBlockingReasons.length > 0 && (
+              <div className="lr-bulk-ebay-unavailable-note" role="status">
+                <strong>{bulkCount === 1 ? "This listing isn't ready for an eBay draft yet:" : "None of the selected listings are ready for an eBay draft yet:"}</strong>
+                <ul className="lr-bulk-ebay-blockers">
+                  {ebayIneligibleBlockingReasons.map(reason => <li key={reason}>{reason}</li>)}
+                </ul>
+              </div>
             )}
           </div>
         </div>}

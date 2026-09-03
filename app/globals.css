@@ -2478,6 +2478,16 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-hidden-batch-label { color: var(--text); font-size: 11.5px; }
 .lr-hidden-batch-recover-button { padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line)); border-radius: 7px; color: var(--danger); background: var(--surface); font-size: 11px; font-weight: 700; cursor: pointer; }
 .lr-hidden-batch-recover-button:hover { background: var(--danger-soft); }
+/* Corrective pass — a visible, accessible dismiss control alongside
+   Recover on every stuck-batch row (previously there was no way to remove
+   an unwanted stale alert at all). Recovery and dismissal are kept
+   visually distinct: Recover stays the danger-red bordered pill above;
+   dismiss is a small round icon button, matching .lr-batch-box-dismiss's
+   own visual language elsewhere on this page. */
+.lr-hidden-batch-actions { display: inline-flex; align-items: center; gap: 6px; }
+.lr-hidden-batch-dismiss { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line)); border-radius: 6px; background: var(--surface); color: var(--danger); font-size: 14px; line-height: 1; cursor: pointer; }
+.lr-hidden-batch-dismiss:hover { background: var(--danger-soft); }
+.lr-hidden-batch-dismiss:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
 
 .lr-blocking-batch-actions { display: inline-flex; gap: 6px; margin-left: 8px; }
 .lr-blocking-batch-actions button { padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 10.5px; font-weight: 700; cursor: pointer; }
@@ -2725,6 +2735,17 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-marketplace-toggle-btn { padding: 2px 8px; border: 1px solid var(--lr-border); border-radius: 999px; color: var(--lr-muted); background: var(--lr-surface); font-size: 9px; font-weight: 650; text-transform: none; letter-spacing: 0; white-space: nowrap; cursor: pointer; }
 .lr-marketplace-toggle-btn:hover { color: var(--lr-text); }
 .lr-marketplace-toggle-btn.active { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-violet) 40%, var(--lr-border)); background: var(--lr-violet-soft); }
+/* Corrective pass — the Workflow column is only 148-190px wide
+   (table-layout: fixed, td/th overflow: hidden). "WORKFLOW" plus a
+   same-line two-button toggle needed ~190px+ of content width and was
+   silently clipped past the column boundary — the eBay button became
+   entirely unreachable (0 width at the clip edge), not merely visually
+   tight. Scoped to the table header ONLY (never the Live Activity toggle,
+   which has plenty of room and stays on one line): drops the toggle onto
+   its own line below "Workflow", which only ever needs the width of the
+   two pills side by side (~95px), comfortably inside the column even at
+   the narrower 1024-1439px breakpoint below. */
+.lr-table th .lr-marketplace-toggle { display: flex; margin-left: 0; margin-top: 4px; vertical-align: initial; }
 
 /* The inspector's Vinted/eBay tab strip — sits between the SKU line and
    the workflow-status pill, same visual weight as .lr-activity-filters. */
@@ -2745,8 +2766,16 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
    the bulk bar, near the bottom of the viewport) anchored to its trigger
    button, same card styling as the inspector's own bordered sections. */
 .lr-bulk-ebay-policy { position: relative; display: inline-flex; }
-.lr-bulk-ebay-policy-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; width: 260px; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--surface); box-shadow: 0 16px 40px rgba(0,0,0,.35); }
+.lr-bulk-ebay-policy-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; width: 260px; max-width: calc(100vw - 24px); flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--surface); box-shadow: 0 16px 40px rgba(0,0,0,.35); }
 .lr-bulk-ebay-policy-panel .input { width: 100%; }
+.lr-bulk-ebay-policy-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lr-bulk-ebay-policy-panel-title { color: var(--lr-text); font-size: 11.5px; font-weight: 700; }
+.lr-bulk-ebay-policy-close { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--lr-muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.lr-bulk-ebay-policy-close:hover { color: var(--lr-text); background: var(--surface-2); }
+.lr-bulk-ebay-policy-close:focus-visible { outline: 2px solid var(--lr-violet); outline-offset: 1px; }
 .lr-bulk-ebay-policy-count { margin: 0; color: var(--lr-muted); font-size: 10.5px; }
 .lr-bulk-ebay-policy-result { margin: 0; color: var(--lr-text); font-size: 10.5px; }
 .lr-bulk-ebay-unavailable-note { margin: 0; padding: 6px 10px; color: var(--lr-muted); font-size: 10.5px; }
+.lr-bulk-ebay-unavailable-note strong { display: block; margin-bottom: 4px; color: var(--lr-text); font-weight: 700; }
+.lr-bulk-ebay-blockers { margin: 0; padding-left: 16px; list-style: disc; }
+.lr-bulk-ebay-blockers li { margin: 2px 0; }

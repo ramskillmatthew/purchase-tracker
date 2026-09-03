@@ -48,9 +48,30 @@ describe("evaluateEbayDraftEligibility", () => {
     expect(evaluateEbayDraftEligibility(fullyEligibleInput({ paymentPolicyStale: true })).eligible).toBe(false);
   });
 
-  it("missing inventory location blocks eligibility with a specific reason", () => {
-    const result = evaluateEbayDraftEligibility(fullyEligibleInput({ merchantLocationKey: null }));
-    expect(result.reasons).toContain("Missing inventory location");
+  describe("CORRECTIVE PASS — merchantLocationKey (Defect 3)", () => {
+    it("REQUIREMENT 11: a missing inventory location does NOT block eligibility — traced against eBay's own Inventory API docs (createOffer succeeds without merchantLocationKey; only publishOffer, which this app never calls, requires it)", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput({ merchantLocationKey: null }));
+      expect(result.eligible).toBe(true);
+      expect(result.reasons).toEqual([]);
+    });
+
+    it("surfaces a non-blocking note instead, never mixed into the blocking reasons list", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput({ merchantLocationKey: null }));
+      expect(result.notes).toEqual(["No inventory location set — optional for a draft, but eBay will require one before you can publish this listing yourself"]);
+      expect(result.reasons.some(r => /location/i.test(r))).toBe(false);
+    });
+
+    it("a listing WITH a location has no note at all", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput());
+      expect(result.notes).toEqual([]);
+    });
+
+    it("does not silently coexist with an actually-blocking reason — a listing missing BOTH the location and a real requirement is still ineligible for the real reason, with the location surfaced only as a note", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput({ merchantLocationKey: null, hasValidPrice: false }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons).toEqual(["Missing eBay selling price"]);
+      expect(result.notes.length).toBe(1);
+    });
   });
 
   it("collects every distinct missing requirement at once, not just the first", () => {

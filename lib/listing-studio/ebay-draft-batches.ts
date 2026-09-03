@@ -176,7 +176,7 @@ export async function cancelEbayDraftBatch(ownerId: string, batchId: string): Pr
 // preparePhotos below), exactly like the product spec's own "track photo
 // state through the normal row workflow" guidance.
 
-export type EbayEligibilityByProduct = Map<string, { marketplaceDraftId: string | null; eligible: boolean; reasons: string[] }>;
+export type EbayEligibilityByProduct = Map<string, { marketplaceDraftId: string | null; eligible: boolean; reasons: string[]; notes: string[] }>;
 
 export async function resolveEbayDraftEligibilityForProducts(ownerId: string, productDraftIds: string[]): Promise<EbayEligibilityByProduct> {
   const result: EbayEligibilityByProduct = new Map();
@@ -197,7 +197,7 @@ export async function resolveEbayDraftEligibilityForProducts(ownerId: string, pr
 
   for (const productDraftId of productDraftIds) {
     const ebayDraft = (draftsByProduct.get(productDraftId) ?? []).find(d => d.marketplace === "EBAY_UK") ?? null;
-    if (!ebayDraft) { result.set(productDraftId, { marketplaceDraftId: null, eligible: false, reasons: ["No eBay preparation for this listing"] }); continue; }
+    if (!ebayDraft) { result.set(productDraftId, { marketplaceDraftId: null, eligible: false, reasons: ["No eBay preparation for this listing"], notes: [] }); continue; }
     const evaluation = evaluateEbayDraftEligibility({
       hasEbayPreparation: true,
       accountUsable: connection?.connectionStatus === "connected",
@@ -212,7 +212,7 @@ export async function resolveEbayDraftEligibilityForProducts(ownerId: string, pr
       paymentPolicyId: ebayDraft.ebayPaymentPolicyId, paymentPolicyStale: isStale("PAYMENT", ebayDraft.ebayPaymentPolicyId),
       merchantLocationKey: ebayDraft.ebayMerchantLocationKey,
     });
-    result.set(productDraftId, { marketplaceDraftId: ebayDraft.id, eligible: evaluation.eligible, reasons: evaluation.reasons });
+    result.set(productDraftId, { marketplaceDraftId: ebayDraft.id, eligible: evaluation.eligible, reasons: evaluation.reasons, notes: evaluation.notes });
   }
   return result;
 }
