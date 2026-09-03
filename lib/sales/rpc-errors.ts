@@ -34,6 +34,14 @@ export const KNOWN_SALE_RPC_CONFLICTS: Record<string, string> = {
   DUPLICATE_SALE_IDS: "duplicate_sale_ids",
   SALE_NOT_FOUND: "sale_not_found",
   SALE_NOT_COMPLETED: "sale_not_completed",
+  // Returns/losses v4 (supabase-returns-losses.sql) — rl_purge_deletable_sale:
+  // permanent deletion of an already-cancelled sale + its inactive returns.
+  empty_selection: "empty_selection",
+  too_many_sales: "too_many_sales",
+  sale_not_found: "sale_not_found",
+  sale_still_active: "sale_still_active",
+  active_return_blocks_delete: "active_return_blocks_delete",
+  active_loss_blocks_delete: "active_loss_blocks_delete",
 };
 
 /** Returns the reason code for a known conflict, or null if the error is unrecognized (and must propagate). */

@@ -1232,12 +1232,15 @@ describe("components/listing-studio/EditListingFieldsDialog.tsx — Milestone 4:
 describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4: the generated listing card", () => {
   const source = read("components/listing-studio/ProductGroupCard.tsx");
 
-  it("renders the generated title/description and an Edit fields action only once a listing has been generated for this group", () => {
-    const cardBlock = source.slice(source.indexOf("{listing &&"), source.indexOf("<div className=\"product-group-selection-row\">"));
+  it("renders the generated Vinted title/description in the expanded card body only once a Vinted listing has been generated for this group", () => {
+    const cardBlock = source.slice(source.indexOf('{listing && <div className="listing-card">'), source.indexOf("<div className=\"product-group-selection-row\">"));
     expect(cardBlock).toContain("{listing.generatedTitle}");
     expect(cardBlock).toContain("{listing.generatedDescription}");
-    expect(cardBlock).toContain('onClick={() => onEditFields(group.id)}');
-    expect(cardBlock).toContain(">Edit fields<");
+  });
+
+  it("REGRESSION (proven root cause of 'eBay-only generation makes the draft inaccessible'): 'Edit fields' is marketplace-aware — available whenever EITHER a Vinted listing or an eBay marketplace draft exists, never gated on Vinted's `listing` alone", () => {
+    expect(source).toContain('{showCardActions && canEditSharedFields && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}');
+    expect(read("lib/listing-studio/product-card-selectors.ts")).toContain("const canEditSharedFields = canPreviewVinted || canPreviewEbay;");
   });
 
   it("REGRESSION: generatedTitle/generatedDescription are a distinct prop from the group's own display name (`group.title`) — never the same field, never colliding with the rename UX", () => {
@@ -1249,8 +1252,170 @@ describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4: the ge
     expect(source).toContain("onRename(group.id, trimmed)");
   });
 
-  it("does not render the listing card at all when this group has no generated listing yet", () => {
+  it("does not render the listing card at all when this group has no generated Vinted listing yet", () => {
     expect(source).toMatch(/\{listing && <div className="listing-card">/);
+  });
+});
+
+describe("components/listing-studio/ProductGroupCard.tsx — regression: eBay-only generation must not make the product card inaccessible (wiring)", () => {
+  const source = read("components/listing-studio/ProductGroupCard.tsx");
+
+  it("PROVEN ROOT CAUSE FIX: imports the marketplace-aware selector logic from a plain (non-JSX) lib module, rather than gating on Vinted's own `listing` inline", () => {
+    expect(source).toContain('import { computeCardActionAvailability, computeDisplayTitle } from "@/lib/listing-studio/product-card-selectors";');
+  });
+
+  it("computes action availability and display title once per render from the SAME shared listing/ebay/marketplaceView/status inputs — never a second, ad-hoc derivation", () => {
+    expect(source).toContain("} = computeCardActionAvailability(listing, ebay, marketplaceView, status, ebayStatus);");
+    expect(source).toContain("const displayTitle = computeDisplayTitle(group, listing, ebay, marketplaceView);");
+  });
+
+  it("the title button renders displayTitle (not the old inline titleLine) for a real, identified group", () => {
+    expect(source).toContain("{isUnsorted ? (group.title || \"Unsorted\") : displayTitle}");
+  });
+
+  it("the compact action row's Preview/Edit fields/eBay details buttons are gated on showCardActions (and the two more specific canEdit* selectors), never on Vinted's `listing` alone", () => {
+    expect(source).toContain('{showCardActions && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}');
+    expect(source).toContain('{showCardActions && canEditSharedFields && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}');
+    expect(source).toContain('{showCardActions && canEditEbayDetails && <button type="button" className="button-secondary" onClick={() => onOpenEbayDetails(group.id)}>eBay details</button>}');
+  });
+});
+
+describe("lib/listing-studio/product-card-selectors.ts — the extracted marketplace-aware decision logic itself", () => {
+  const source = read("lib/listing-studio/product-card-selectors.ts");
+
+  it("PROVEN ROOT CAUSE FIX: explicit, independently-named, marketplace-aware selectors — never one generic boolean blending Vinted and eBay", () => {
+    expect(source).toContain("const hasVintedDraft = Boolean(listing);");
+    expect(source).toContain("const hasEbayMarketplaceDraft = ebay !== null;");
+    expect(source).toContain("const canPreviewVinted = hasVintedDraft;");
+    expect(source).toContain("const canPreviewEbay = hasEbayMarketplaceDraft;");
+    expect(source).toContain("const canEditSharedFields = canPreviewVinted || canPreviewEbay;");
+    expect(source).toContain("const canEditEbayDetails = canPreviewVinted || canPreviewEbay;");
+    expect(source).toContain('const canRetryEbayGeneration = hasEbayMarketplaceDraft && ebayStatus === "generation_failed";');
+    expect(source).toContain('const selectedMarketplaceStatus = marketplaceView === "EBAY_UK" ? ebayStatus : marketplaceView === "VINTED" ? status : null;');
+  });
+
+  it("REQUIREMENT: in eBay UK mode, card actions depend ONLY on the eBay marketplace draft — never on Vinted's own `listing`", () => {
+    expect(source).toContain('const showCardActions = marketplaceView === "EBAY_UK" ? canPreviewEbay');
+  });
+
+  it("REQUIREMENT: 'Preserve the existing Vinted card title, status and actions exactly' — Vinted mode's action gate is byte-for-byte the same condition as before this fix (Boolean(listing) via canPreviewVinted), never influenced by the eBay draft's presence or absence", () => {
+    expect(source).toContain(': marketplaceView === "VINTED" ? canPreviewVinted');
+  });
+
+  it("REQUIREMENT: in Both mode, either marketplace's draft unlocks the actions — absence of one never hides access to the other", () => {
+    expect(source).toContain(": (canPreviewVinted || canPreviewEbay);");
+  });
+
+  it("the display title prefers the generated EBAY_UK title, then shared structured facts, then a prior Vinted analysis, then 'Product N' — never stuck on 'Product N' once a real eBay title has been saved", () => {
+    expect(source).toContain("const structuredFallback = [group.brand, group.model].filter(Boolean).join(\" \") || null;");
+    expect(source).toContain("const vintedTitle = [listing?.brand ?? group.brand, listing?.model ?? group.model].filter(Boolean).join(\" \") || null;");
+    expect(source).toContain("const ebayTitle = ebay?.title || null;");
+    expect(source).toContain('if (marketplaceView === "EBAY_UK") return ebayTitle || structuredFallback || vintedTitle || group.title || "Untitled group";');
+  });
+
+  it("REQUIREMENT: Vinted mode's display title is unchanged from before this fix — Vinted's own brand/model, then group.title, then 'Untitled group'", () => {
+    expect(source).toContain('if (marketplaceView === "VINTED") return vintedTitle || group.title || "Untitled group"; // unchanged from before this fix');
+  });
+
+  it("computeCardActionAvailability and computeDisplayTitle are exported pure functions with zero JSX/DOM dependency — directly unit-testable with real inputs/outputs, not just source-text checks (see the dedicated behavioural describe block below)", () => {
+    expect(source).toContain("export function computeCardActionAvailability(");
+    expect(source).toContain("export function computeDisplayTitle(");
+    expect(source).toContain("export type CardActionAvailability = {");
+  });
+});
+
+// These two functions live in lib/listing-studio/product-card-selectors.ts
+// (plain TypeScript, no JSX) specifically so they CAN be imported and
+// exercised with real inputs/outputs here — ProductGroupCard.tsx itself
+// is a "use client" JSX file this project's Vitest config cannot
+// transform (confirmed: importing the .tsx directly fails with "Failed
+// to parse source for import analysis" — no React/JSX Vite plugin wired
+// in), which is exactly why every other *.tsx file in Listing Studio is
+// tested via source-text assertions only. Real behavioural tests directly
+// covering the product spec's REQUIRED TESTS 1-5/7/10 for this regression
+// (eBay-only draft, needs-category, generation-failed, fallback,
+// no-base-title, Both mode, and the counter/card invariant).
+describe("computeCardActionAvailability / computeDisplayTitle — real behavioural coverage", () => {
+  it("REQUIRED TEST 1: eBay-only generated draft with no Vinted draft — Preview, Edit fields, and eBay details are all available", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    const result = computeCardActionAvailability(
+      null, // no Vinted listing at all
+      { contentState: "generated", title: "Nike Pegasus 40 Mens UK 9 Black Trainers", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null },
+      "EBAY_UK", null, "needs_category",
+    );
+    expect(result.hasVintedDraft).toBe(false);
+    expect(result.showCardActions).toBe(true);
+    expect(result.canEditSharedFields).toBe(true);
+    expect(result.canEditEbayDetails).toBe(true);
+  });
+
+  it("REQUIRED TEST 2: eBay draft needing category — all completion actions remain visible (the exact reported contradiction)", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    const result = computeCardActionAvailability(
+      null, { contentState: "generated", title: "t", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null },
+      "EBAY_UK", null, "needs_category",
+    );
+    expect(result.showCardActions).toBe(true);
+    expect(result.canEditEbayDetails).toBe(true);
+  });
+
+  it("REQUIRED TESTS 3/4: eBay generation failed or fallback — Preview (and Retry) remain accessible", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    for (const contentState of ["failed", "fallback"] as const) {
+      const result = computeCardActionAvailability(
+        null, { contentState, title: "fallback title", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null },
+        "EBAY_UK", null, "generation_failed",
+      );
+      expect(result.canPreviewEbay).toBe(true);
+      expect(result.showCardActions).toBe(true);
+      expect(result.canRetryEbayGeneration).toBe(true);
+    }
+  });
+
+  it("REQUIRED TEST 6: Vinted-only behaviour is byte-for-byte unchanged — action availability depends only on the Vinted listing, regardless of eBay state", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    const withNoEbayDraft = computeCardActionAvailability({ brand: "Nike", model: "Pegasus", productType: null, colours: [], material: null, ukSize: null, sku: null, generatedTitle: "t", generatedDescription: "d" }, null, "VINTED", "ready", null);
+    const withFailedEbayDraft = computeCardActionAvailability({ brand: "Nike", model: "Pegasus", productType: null, colours: [], material: null, ukSize: null, sku: null, generatedTitle: "t", generatedDescription: "d" }, { contentState: "failed", title: "x", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null }, "VINTED", "ready", "generation_failed");
+    expect(withNoEbayDraft.showCardActions).toBe(true);
+    expect(withFailedEbayDraft.showCardActions).toBe(true); // unaffected by eBay's own failure state
+  });
+
+  it("REQUIRED TEST 7: Both drafts — action availability is true when EITHER exists; absence of one never hides access to the other", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    const onlyVinted = computeCardActionAvailability({ brand: "Nike", model: "Pegasus", productType: null, colours: [], material: null, ukSize: null, sku: null, generatedTitle: "t", generatedDescription: "d" }, null, "BOTH", "ready", null);
+    const onlyEbay = computeCardActionAvailability(null, { contentState: "generated", title: "t", description: "d", categoryId: "1", conditionValue: "New", pricePence: 100, quantity: 1, readiness: null, reviewReasonCount: 0, categoryReviewReason: null }, "BOTH", null, "draft_complete");
+    const neither = computeCardActionAvailability(null, null, "BOTH", null, null);
+    expect(onlyVinted.showCardActions).toBe(true);
+    expect(onlyEbay.showCardActions).toBe(true);
+    expect(neither.showCardActions).toBe(false);
+  });
+
+  it("REQUIRED TEST 5: eBay draft with no base generated title — uses the eBay marketplace title, never 'Untitled group'/'Product N'", async () => {
+    const { computeDisplayTitle } = await import("@/lib/listing-studio/product-card-selectors");
+    const title = computeDisplayTitle(
+      { brand: null, model: null, title: "Product 1" }, // no shared structured facts persisted (eBay-only generation on a brand-new product never writes them)
+      null,
+      { contentState: "generated", title: "On Running Cloud 5 Womens UK 4 Blue White Mesh Running Trainers", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null },
+      "EBAY_UK",
+    );
+    expect(title).toBe("On Running Cloud 5 Womens UK 4 Blue White Mesh Running Trainers");
+  });
+
+  it("no draft of either marketplace yet — falls all the way back to 'Product N' (group.title), never fabricating a name", async () => {
+    const { computeDisplayTitle } = await import("@/lib/listing-studio/product-card-selectors");
+    expect(computeDisplayTitle({ brand: null, model: null, title: "Product 1" }, null, null, "EBAY_UK")).toBe("Product 1");
+  });
+
+  it("REQUIRED TEST 10 (counter/card invariant): whenever the eBay content-generation state counts as 'generated', the resulting card action availability always exposes Preview and eBay Details", async () => {
+    const { computeCardActionAvailability } = await import("@/lib/listing-studio/product-card-selectors");
+    // Mirrors GroupingWorkspace.tsx's own ebayGeneratedCount filter: draft.ebay?.contentState === "generated".
+    const ebay = { contentState: "generated" as const, title: "t", description: "d", categoryId: null, conditionValue: null, pricePence: null, quantity: null, readiness: null, reviewReasonCount: 0, categoryReviewReason: null };
+    const countsAsGenerated = ebay.contentState === "generated";
+    const result = computeCardActionAvailability(null, ebay, "EBAY_UK", null, "needs_category");
+    if (countsAsGenerated) {
+      expect(result.showCardActions).toBe(true);
+      expect(result.canEditEbayDetails).toBe(true);
+    }
   });
 });
 
@@ -1268,8 +1433,11 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4: 'Gene
     expect(bar).toContain("disabled={generateListingsDisabled || eligibleListingGroups.length === 0}");
   });
 
-  it("REGRESSION: eligible groups exclude Unsorted, empty groups, and groups already generated — re-clicking only retries what's still missing", () => {
-    expect(source).toContain('draft.title !== "Unsorted" && !draft.generated_title && images.some(image => image.draft_id === draft.id)');
+  it("REGRESSION: eligible groups exclude Unsorted and empty groups, and are assessed independently per targeted marketplace via isEligibleForGeneration (Phase 4 fix — see tests/listing-studio-generation-eligibility.test.ts for the real behavioural coverage of the logic itself, not just this wiring)", () => {
+    expect(source).toContain('import { isEligibleForGeneration } from "@/lib/listing-studio/generation-eligibility";');
+    expect(source).toContain("const targetedMarketplaces = marketplacesForTarget(generationTarget);");
+    expect(source).toContain("const eligibleListingGroups = drafts.filter(draft => isEligibleForGeneration(");
+    expect(source).toContain("targetedMarketplaces,");
   });
 
   it("calls the single-group generate endpoint once per eligible group, sequentially, continuing past an individual failure rather than aborting the whole run", () => {
@@ -1346,9 +1514,22 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 4 UX 
   const source = read("components/listing-studio/PreviewListingDialog.tsx");
 
   it("renders the complete title and description via plain interpolation — never sliced/truncated/ellipsised", () => {
-    expect(source).toContain('<p className="preview-listing-title-text">{generatedTitle || "No title generated yet."}</p>');
-    expect(source).toContain('<p className="preview-listing-description-text">{generatedDescription || "No description generated yet."}</p>');
-    expect(source).not.toMatch(/\.slice\(|\.substring\(|…|line-clamp/);
+    // Fault 2 fix: `title`/`description` are local variables (Vinted's own
+    // generatedTitle/generatedDescription, or the eBay draft's own fields
+    // when its tab is active) — plain interpolation either way, never
+    // sliced/truncated.
+    expect(source).toContain('<p className="preview-listing-title-text">{title || "No title generated yet."}</p>');
+    expect(source).toContain('<p className="preview-listing-description-text">{description || "No description generated yet."}</p>');
+    expect(source).not.toMatch(/\.slice\(|\.substring\(|line-clamp/);
+    // Scoped to the title/description text itself, not the whole file —
+    // Phase 7's own loading-state button labels ("Generating…",
+    // "Retrying…") legitimately use an ellipsis character elsewhere in
+    // this same file, matching this app's existing "Saving…"/
+    // "Suggesting…" convention; that's not truncation.
+    const titleLine = source.slice(source.indexOf('<p className="preview-listing-title-text">'), source.indexOf('<p className="preview-listing-title-text">') + 120);
+    const descriptionLine = source.slice(source.indexOf('<p className="preview-listing-description-text">'), source.indexOf('<p className="preview-listing-description-text">') + 140);
+    expect(titleLine).not.toContain("…");
+    expect(descriptionLine).not.toContain("…");
   });
 
   it("REGRESSION: the description is rendered with white-space: pre-wrap (see globals.css) so every line break, blank line, and run of spaces is preserved exactly as stored — never collapsed or reformatted", () => {
@@ -1370,12 +1551,17 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 4 UX 
   });
 
   it("never makes an AI call or imports anything AI-related", () => {
-    expect(source).not.toMatch(/anthropic|Anthropic|fetch\(/i);
+    expect(source).not.toMatch(/anthropic|Anthropic/i);
   });
 
-  it("has a Copy title button and a Copy description button, each copying the exact corresponding text via the Clipboard API", () => {
-    expect(source).toContain('onClick={() => copy(generatedTitle, "title")}');
-    expect(source).toContain('onClick={() => copy(generatedDescription, "description")}');
+  it("REGRESSION (Fault 2): its one fetch() is a plain read of the eBay marketplace draft — same GET, same route, as EbayCategoryAndAspectsDialog's own precedent — never an AI call, never a POST", () => {
+    expect(source).toContain("fetch(`/api/listing-studio/groups/${productDraftId}/marketplace-drafts`)");
+    expect(source).not.toMatch(/method:\s*["']POST["']/);
+  });
+
+  it("has a Copy title button and a Copy description button, each copying the exact corresponding (marketplace-aware) text via the Clipboard API", () => {
+    expect(source).toContain('onClick={() => copy(title, "title")}');
+    expect(source).toContain('onClick={() => copy(description, "description")}');
     expect(source).toContain("navigator.clipboard.writeText(text)");
   });
 
@@ -1402,24 +1588,214 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 4 UX 
   });
 });
 
+// Fault 2 regression suite — "The eBay Preview appears to show the ordinary
+// listing_drafts Vinted title and description rather than the related
+// listing_marketplace_drafts eBay content." Proven root cause: this dialog
+// used to have zero marketplace awareness at all — every prop it rendered
+// was Vinted-shaped, passed in by the caller regardless of which
+// marketplace the owner actually wanted to inspect. These tests pin the
+// fix's actual mechanics (source-text assertions, matching this test
+// suite's own established convention — no @testing-library/react in this
+// project; every other *-ui.test.ts file in this repo tests the same way).
+describe("components/listing-studio/PreviewListingDialog.tsx — Fault 2 fix: marketplace-aware Preview", () => {
+  const source = read("components/listing-studio/PreviewListingDialog.tsx");
+
+  it("fetches the real listing_marketplace_drafts EBAY_UK row for this exact product, keyed by productDraftId — never a hardcoded or unrelated id", () => {
+    expect(source).toContain("fetch(`/api/listing-studio/groups/${productDraftId}/marketplace-drafts`)");
+    expect(source).toContain('.find(d => d.marketplace === "EBAY_UK")');
+  });
+
+  it("REGRESSION: an eBay draft row that exists but has no generated title/description yet is treated as unavailable — never shows an empty eBay tab", () => {
+    expect(source).toContain("const resolved = found && (found.title || found.description) ? found : null;");
+    expect(source).toContain("setEbayDraft(resolved);");
+  });
+
+  it("REQUIREMENT: the Vinted/eBay UK tab switch only renders once a real eBay draft was found — a product with no eBay draft renders exactly as before, zero behaviour change", () => {
+    expect(source).toContain('{ebayDraft && <div className="period-switch preview-marketplace-tabs" role="tablist"');
+  });
+
+  it("defaults to the tab matching defaultMarketplace, and always resets to that tab when a different product's preview opens — switching products never leaves a stale tab showing the wrong product's content", () => {
+    expect(source).toContain('useState<PreviewTab>(defaultMarketplace === "EBAY_UK" ? "ebay" : "vinted")');
+    expect(source).toContain('useEffect(() => { setActiveTab(defaultMarketplace === "EBAY_UK" ? "ebay" : "vinted"); setEbayFetchSettled(false); }, [productDraftId, defaultMarketplace]);');
+  });
+
+  it("REGRESSION (proven root cause of 'eBay-only generation makes the draft inaccessible'): both the initial state AND the reset effect key off defaultMarketplace directly (2 occurrences) — an eBay-only product never has its tab-highlight briefly wrong while loadEbayDraft's own fetch is still in flight", () => {
+    expect(source.match(/defaultMarketplace === "EBAY_UK" \? "ebay" : "vinted"/g)?.length).toBe(2);
+  });
+
+  it("Phase 7 (fixture-mode-free eBay context): opens straight on the eBay tab when Preview was opened FOR eBay UK/Both and a real draft was found — never leaves the owner on Vinted looking at the wrong marketplace", () => {
+    expect(source).toContain('if (resolved && wantsEbay) setActiveTab("ebay");');
+    expect(source).toContain('const wantsEbay = defaultMarketplace === "EBAY_UK" || defaultMarketplace === "BOTH";');
+  });
+
+  it("Phase 7: shows an explicit 'No eBay UK draft has been generated' state with a Generate action — never silently substitutes Vinted content — only once the eBay-draft check has actually settled", () => {
+    expect(source).toContain("const noEbayDraftYet = wantsEbay && ebayFetchSettled && !ebayLoadFailed && !ebayDraft;");
+    expect(source).toContain("No eBay UK draft has been generated for this product.");
+    expect(source).toContain('{generatingEbay ? "Generating…" : "Generate eBay draft"}');
+  });
+
+  it("Phase 3/11 fix: an eBay draft that exists but degraded (its own AI call failed, a safe fallback was saved) shows the failure honestly — via the SAME authoritative content-generation state the product card/counters use, never re-derived from validationMessages alone — with a Retry action, alongside the still-usable fallback content", () => {
+    expect(source).toContain('const ebayDegraded = contentGeneration ? (contentGeneration.state === "fallback" || contentGeneration.state === "failed") : false;');
+    expect(source).toContain("<strong>eBay draft generation failed</strong> — showing a basic fallback listing instead.");
+    expect(source).toContain('{generatingEbay ? "Retrying…" : "Retry"}');
+  });
+
+  it("Phase 11: the degraded banner shows the safe failure reason and attempt count, never just a bare failed message", () => {
+    expect(source).toContain("{contentGeneration?.message && <p className=\"preview-listing-ebay-readiness\">{contentGeneration.message}</p>}");
+    expect(source).toContain("Attempts so far: {contentGeneration.attemptCount}");
+  });
+
+  it("Phase 11: fallback content is labelled honestly, never as a completed eBay draft", () => {
+    expect(source).toContain('<span className="preview-listing-marketplace-badge preview-listing-marketplace-badge-degraded">Fallback content — not a completed eBay draft</span>');
+  });
+
+  it("Phase 7: Generate/Retry are no-ops when the caller (e.g. Listings Review) doesn't supply onGenerateEbayDraft — never throws", () => {
+    expect(source).toContain("async function handleGenerateEbayDraft() {\n    if (!onGenerateEbayDraft) return;");
+  });
+
+  it("REGRESSION (the exact reported fault): title/description/condition/price all derive from the eBay draft ONLY when its tab is the active one — otherwise the untouched Vinted props are shown, so eBay content can never leak into the Vinted view or vice versa", () => {
+    expect(source).toContain('const showingEbay = activeTab === "ebay" && ebayDraft;');
+    // Regression fix — generatedTitle/generatedDescription are now
+    // `string | null` (an eBay-only product has no Vinted listing at
+    // all), so the Vinted branch falls back to "" rather than passing a
+    // possibly-null value through — never a TypeScript-unsafe assumption
+    // that Vinted content always exists.
+    expect(source).toContain('const title = showingEbay ? (ebayDraft.title ?? "") : (generatedTitle ?? "");');
+    expect(source).toContain('const description = showingEbay ? (ebayDraft.description ?? "") : (generatedDescription ?? "");');
+    expect(source).toContain('const displayCondition = showingEbay ? ebayDraft.conditionValue : condition;');
+    expect(source).toContain('const displayPricePence = showingEbay ? ebayDraft.pricePence : sellingPricePence;');
+  });
+
+  it("REGRESSION (proven root cause fix): generatedTitle/generatedDescription accept null — Preview must open for a product with NO Vinted listing at all (an eBay-only generated product)", () => {
+    expect(source).toContain("generatedTitle: string | null;");
+    expect(source).toContain("generatedDescription: string | null;");
+  });
+
+  it("labels the eBay tab clearly as an eBay UK draft when genuinely generated — never a generic/ambiguous heading", () => {
+    expect(source).toContain('<span className="preview-listing-marketplace-badge">{marketplaceLabels.EBAY_UK} draft</span>');
+  });
+
+  it("shows the eBay title's live character count against eBay's own 80-character limit — a Vinted-only concept never shown on the Vinted tab", () => {
+    expect(source).toContain("import { EBAY_TITLE_MAX_LENGTH } from \"@/lib/listing-studio/ebay-title-builder\";");
+    expect(source).toContain('showingEbay ? ` (${title.length}/${EBAY_TITLE_MAX_LENGTH} characters)` : ""');
+  });
+
+  it("Phase 12 fix: shows category/condition/price/required-specifics as explicit blocking statements on the eBay tab, honestly reporting 'Not selected yet' rather than fabricating a category — never a bare completion percentage implying general health", () => {
+    expect(source).toContain('"Not selected yet — open eBay details to suggest one."');
+    expect(source).toContain("Required specifics: {ebayDraft.readiness.requiredComplete}/{ebayDraft.readiness.requiredTotal} complete");
+    expect(source).toContain('<li className={ebayDraft.categoryId ? "preview-listing-ebay-ok" : "preview-listing-ebay-blocked"}>');
+    expect(source).toContain('<li className={ebayDraft.conditionValue ? "preview-listing-ebay-ok" : "preview-listing-ebay-blocked"}>');
+  });
+
+  it("Problem 3/6 fix: distinguishes a genuinely missing condition from one flagged needing review (defect evidence) — never the same bare 'Missing' label for both", () => {
+    expect(source).toContain('Condition: {ebayDraft.conditionValue || (ebayDraft.validationMessages.some(m => m.code === "condition_needs_review") ? "Needs review — evidence suggests a defect" : "Missing")}');
+  });
+
+  it("REGRESSION: UK size and SKU (Vinted-only concepts, not stored on the eBay draft) are never shown as part of the eBay tab's own card meta", () => {
+    expect(source).toContain('{!showingEbay && <div><dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : "Not set"}</dd></div>}');
+  });
+
+  it("a failed marketplace-drafts fetch degrades honestly (shows the Vinted listing, with a plain-language notice) rather than throwing or silently pretending no eBay draft exists", () => {
+    expect(source).toContain("setEbayLoadFailed(true);");
+    expect(source).toContain("Could not check for an eBay draft — showing the Vinted listing only.");
+  });
+
+  it("Step 5: shows the parcel-size suggestion read-only, honestly distinguishing a still-unconfirmed suggestion from the owner's own confirmed choice — never implies eBay itself supplied it", () => {
+    expect(source).toContain("Package size: {formatPackageSize(ebayDraft.dynamicData[PACKAGE_SIZE_ASPECT_NAME])}");
+    expect(source).toContain('return aspect.userConfirmed ? label : `Suggested: ${label} — review in eBay details.`;');
+    expect(source).toContain('if (!aspect || typeof aspect.value !== "string") return "Not yet suggested — open eBay details to review.";');
+  });
+});
+
+// Step 5 (parcel-size suggestion) — the "Package size" section reuses the
+// exact same PATCH /ebay-aspects route (and MarketplaceAspectValue shape)
+// every real eBay item specific already uses, storing the suggestion under
+// a reserved __packageSize key. Zero schema change, "manual override
+// always wins" via the same userConfirmed flag saveAspect already sets.
+describe("components/listing-studio/EbayCategoryAndAspectsDialog.tsx — Step 5: Package size section", () => {
+  const source = read("components/listing-studio/EbayCategoryAndAspectsDialog.tsx");
+
+  it("reads the suggestion from the reserved __packageSize pseudo-aspect, never a bespoke new field", () => {
+    expect(source).toContain('const PACKAGE_SIZE_ASPECT_NAME = "__packageSize";');
+    expect(source).toContain("value={draft.dynamicData[PACKAGE_SIZE_ASPECT_NAME] as PackageSizeAspectValue | undefined}");
+  });
+
+  it("saves a manual choice through the exact same saveAspect/PATCH path as every other item specific — confirm:true, manual override wins for free", () => {
+    expect(source).toContain("<PackageSizeSection value={draft.dynamicData[PACKAGE_SIZE_ASPECT_NAME] as PackageSizeAspectValue | undefined} onSave={saveAspect} />");
+  });
+
+  it("shows the honest, plain-language empty state rather than fabricating a suggestion when none exists yet", () => {
+    expect(source).toContain("Not yet suggested — generate this product&apos;s eBay draft first, or choose one manually.");
+  });
+
+  it("shows the heuristic's own reason text only while the suggestion is unconfirmed — a confirmed manual choice no longer needs justifying", () => {
+    expect(source).toContain("{value?.reason && !value.userConfirmed && <p");
+  });
+});
+
+describe("components/listing-studio/EbayCategoryAndAspectsDialog.tsx — Problem 4: a genuine aspect/taxonomy load failure is never presented as '0 recommended'", () => {
+  const source = read("components/listing-studio/EbayCategoryAndAspectsDialog.tsx");
+
+  it("REGRESSION (proven root cause): the GET /ebay-aspects failure branch is no longer silently dropped — it sets a distinct, real error state", () => {
+    expect(source).toContain("const [aspectsLoadError, setAspectsLoadError] = useState<string | null>(null);");
+    expect(source).toContain('setAspectsLoadError(aspectsBody.error || "Could not load this category\'s item specifics.");');
+    expect(source).toContain("setAspectsLoadError(null);");
+  });
+
+  it("the top completeness summary never shows '0/0 recommended' as if it were a real answer when the load actually failed", () => {
+    expect(source).toContain('{aspectsLoadError ? "Recommended specifics could not be loaded" : `Recommended specifics: ${draft.readiness.recommendedComplete}/${draft.readiness.recommendedTotal} complete`}');
+  });
+
+  it("the Item specifics section surfaces the failure explicitly, distinct from a genuine zero-recommended-aspects category, with a retry action", () => {
+    expect(source).toContain('Item specifics for this category could not be loaded — this is not the same as &quot;no recommended fields exist&quot;');
+    expect(source).toContain('<button type="button" className="ebay-details-alternative-button" onClick={suggestAspects}>Retry</button>');
+  });
+});
+
+describe("components/listing-studio/GroupingWorkspace.tsx / ListingsReviewWorkspace.tsx — Fault 2 wiring: both Preview call sites pass productDraftId", () => {
+  it("Listing Studio's Preview call site passes productDraftId (the same group id already used for eBay details) and a real coverImageUrl, fixing the 'No photo' bug (this call site never passed coverImageUrl at all before)", () => {
+    const source = read("components/listing-studio/GroupingWorkspace.tsx");
+    expect(source).toContain("productDraftId={previewTarget.id}");
+    expect(source).toContain("const previewCoverPhoto = previewGroupId ? photosByGroupMap.get(previewGroupId)?.[0] ?? null : null;");
+    expect(source).toContain("coverImageUrl={previewCoverImageUrl}");
+  });
+
+  it("Listings Review's Preview call site passes productDraftId so its own eBay tab reads the correct product's eBay draft", () => {
+    const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
+    expect(source).toContain("productDraftId={previewListing.id}");
+  });
+
+  it("Phase 7: Listing Studio's Preview call site passes defaultMarketplace (the workspace's own currently-selected generation target) and onGenerateEbayDraft, so Preview never has to guess or silently fall back", () => {
+    const source = read("components/listing-studio/GroupingWorkspace.tsx");
+    expect(source).toContain("defaultMarketplace={generationTarget}");
+    expect(source).toContain("onGenerateEbayDraft={handleGenerateEbayDraftForProduct}");
+    expect(source).toContain('async function handleGenerateEbayDraftForProduct(productDraftId: string): Promise<boolean> {');
+    expect(source).toContain('body: JSON.stringify({ targets: ["EBAY_UK"] })');
+  });
+});
+
 describe("components/listing-studio/ProductGroupCard.tsx — Milestone 4 UX fix: 'Preview' action beside 'Edit fields'", () => {
   const source = read("components/listing-studio/ProductGroupCard.tsx");
 
   // Visual redesign follow-up — Preview/Edit fields moved from the
-  // expanded listing-card block into the compact header's own action row
-  // (compact card requirement #3: only shown once `listing` exists,
-  // exactly matching the pre-existing `{listing && ...}` condition, just
-  // relocated — an ungenerated group shows neither).
-  it("renders a compact 'Preview' action alongside 'Edit fields' in the compact action row, only once a listing exists", () => {
+  // expanded listing-card block into the compact header's own action row.
+  // Regression fix (proven root cause of "eBay-only generation makes the
+  // draft inaccessible") — these are no longer gated on Vinted's own
+  // `listing` alone; `showCardActions` is marketplace-view-aware (see the
+  // dedicated regression describe block above), so an eBay-only generated
+  // product in eBay UK view still shows every action here.
+  it("renders a compact 'Preview' action alongside 'Edit fields' in the compact action row, gated by the marketplace-aware showCardActions", () => {
     const actionsBlock = source.slice(source.indexOf('<div className="product-group-compact-actions">'), source.indexOf('<OverflowMenu label={`More actions'));
-    expect(actionsBlock).toContain('{listing && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}');
-    expect(actionsBlock).toContain('{listing && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}');
+    expect(actionsBlock).toContain('{showCardActions && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}');
+    expect(actionsBlock).toContain('{showCardActions && canEditSharedFields && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}');
+    expect(actionsBlock).toContain('{showCardActions && canEditEbayDetails && <button type="button" className="button-secondary" onClick={() => onOpenEbayDetails(group.id)}>eBay details</button>}');
   });
 
-  it("an ungenerated group (no listing) shows neither Preview nor Edit fields — only Expand/manage photos and the overflow menu remain", () => {
+  it("an ungenerated group (no listing, no eBay draft) shows neither Preview nor Edit fields — only Expand/manage photos and the overflow menu remain", () => {
     const actionsBlock = source.slice(source.indexOf('<div className="product-group-compact-actions">'), source.indexOf('{expanded && <div className="product-group-expanded-body">'));
-    // Both are gated the SAME way — never one without the other.
-    const previewGated = actionsBlock.includes("{listing && <button") && actionsBlock.includes("onPreviewListing(group.id)");
+    // Gated by showCardActions, which is false in every mode when neither
+    // hasVintedDraft nor hasEbayMarketplaceDraft is true.
+    const previewGated = actionsBlock.includes("{showCardActions && <button") && actionsBlock.includes("onPreviewListing(group.id)");
     expect(previewGated).toBe(true);
     expect(actionsBlock).toContain('onClick={() => onToggleExpand(group.id)}');
   });
@@ -1444,18 +1820,19 @@ describe("components/listing-studio/GroupingWorkspace.tsx — Milestone 4 UX fix
     expect(source).toContain("onPreviewListing={setPreviewGroupId}");
   });
 
-  it("renders PreviewListingDialog only when both the target group and its generated listing exist, seeded from the same listingsByDraftId lookup Edit fields and the card itself already use", () => {
+  it("REGRESSION (proven root cause of 'eBay-only generation makes the draft inaccessible'): renders PreviewListingDialog when EITHER a Vinted listing OR an eBay marketplace draft exists — never requires Vinted content alone", () => {
     expect(source).toContain("const previewTarget = drafts.find(draft => draft.id === previewGroupId) ?? null;");
     expect(source).toContain("const previewListing = previewGroupId ? listingsByDraftId.get(previewGroupId) ?? null : null;");
-    expect(source).toContain("{previewTarget && previewListing && <PreviewListingDialog");
+    expect(source).toContain("const previewHasAnyContent = Boolean(previewListing || previewTarget?.ebay);");
+    expect(source).toContain("{previewTarget && previewHasAnyContent && <PreviewListingDialog");
   });
 
-  it("passes the exact stored generatedTitle/generatedDescription/ukSize/sku through untouched — no new formatting/AI call in the wiring itself", () => {
-    const dialogBlock = source.slice(source.indexOf("{previewTarget && previewListing && <PreviewListingDialog"), source.indexOf("{previewTarget && previewListing && <PreviewListingDialog") + 400);
-    expect(dialogBlock).toContain("generatedTitle={previewListing.generatedTitle}");
-    expect(dialogBlock).toContain("generatedDescription={previewListing.generatedDescription}");
-    expect(dialogBlock).toContain("ukSize={previewListing.ukSize}");
-    expect(dialogBlock).toContain("sku={previewListing.sku}");
+  it("passes the exact stored generatedTitle/generatedDescription/ukSize/sku through untouched (null-safe for an eBay-only product with no Vinted listing) — no new formatting/AI call in the wiring itself", () => {
+    const dialogBlock = source.slice(source.indexOf("{previewTarget && previewHasAnyContent && <PreviewListingDialog"), source.indexOf("{previewTarget && previewHasAnyContent && <PreviewListingDialog") + 500);
+    expect(dialogBlock).toContain("generatedTitle={previewListing?.generatedTitle ?? null}");
+    expect(dialogBlock).toContain("generatedDescription={previewListing?.generatedDescription ?? null}");
+    expect(dialogBlock).toContain("ukSize={previewListing?.ukSize ?? previewTarget.uk_size}");
+    expect(dialogBlock).toContain("sku={previewListing?.sku ?? previewTarget.sku}");
   });
 
   it("closing the preview resets previewGroupId back to null", () => {
@@ -1656,7 +2033,11 @@ describe("app/globals.css — responsive rules for the redesigned Listing Studio
     const block = listingStudioSection.slice(start, listingStudioSection.lastIndexOf("@media (max-width: 620px)"));
     expect(start).toBeGreaterThan(listingStudioSection.indexOf(".listing-dropzone-compact {"));
     expect(block).toContain(".listing-sticky-bar { inset: auto 14px 78px; }");
-    expect(block).toContain(".listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 40px 160px; }");
+    // Bug fix (Fault 5 — readiness badge/Preview button overlap): the status
+    // column was widened from 40px to 96px so "Not generated"/"Needs
+    // review" badges no longer overflow into the Actions column next door.
+    expect(block).toContain(".listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 96px 160px; }");
+    expect(block).toContain(".product-group-col-status { flex-wrap: wrap; }");
   });
 
   it("mobile (max-width: 620px): rows collapse to a single stacked column, the list header hides, the thumbnail strip stays usable, and tap targets are at least ~44px — in a dedicated block positioned AFTER the base rules", () => {

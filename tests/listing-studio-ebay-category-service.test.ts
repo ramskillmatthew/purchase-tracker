@@ -62,9 +62,10 @@ describe("suggestEbayCategory — honest failure passthrough", () => {
     expect(outcome.status).toBe("no_results");
   });
 
-  it("describeEbayCategorySuggestionFailure never exposes a raw provider error", () => {
-    expect(describeEbayCategorySuggestionFailure({ status: "not_configured" })).toBe("eBay category access has not been configured yet.");
-    expect(describeEbayCategorySuggestionFailure({ status: "upstream_unavailable", reason: "rate_limited" })).toMatch(/rate-limiting/);
+  it("describeEbayCategorySuggestionFailure never exposes a raw provider error (Phase 8: precise, actionable wording)", () => {
+    expect(describeEbayCategorySuggestionFailure({ status: "not_configured" })).toBe("eBay category access is not configured on localhost.");
+    expect(describeEbayCategorySuggestionFailure({ status: "upstream_unavailable", reason: "rate_limited" })).toMatch(/rate limited/i);
+    expect(describeEbayCategorySuggestionFailure({ status: "upstream_unavailable", reason: "auth_failed" })).toBe("eBay rejected the local developer credentials.");
   });
 });
 

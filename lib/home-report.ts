@@ -1,5 +1,6 @@
-import type { Expense, Purchase } from "@/lib/types";
+import type { Expense, Purchase, SalesOrderListItem } from "@/lib/types";
 import { comparePurchasesForDisplay } from "@/lib/purchase-order";
+import { poundsToPence } from "@/lib/sales/money";
 
 /**
  * Home dashboard period comparison + aggregation — extracted from
@@ -112,4 +113,89 @@ export function computeHomeReport(period: Period, purchases: Purchase[], expense
   // inserted.
   const recent = [...periodPurchases].sort(comparePurchasesForDisplay).slice(0, 10);
   return { periodPurchases, stockSpend, expenseSpend, sources, recent };
+}
+
+// ============================================================================
+// Monthly net profit — the Home dashboard's headline "Net profit" figure.
+//
+//   Monthly net profit
+//     = Σ canonical profit of every VALID sale whose sale_date is in the period
+//     − Σ operating expenses whose expense date is in the period
+//
+// "Valid sale" is decided ONLY by the financial status column
+// (sales_orders.status === "completed") — exactly as lib/sales/history.ts's
+// computeHistoryKpis decides it. The operational process_status
+// (awaiting_dispatch / sent / delivered_awaiting_payout / return_in_process /
+// completed) never decides whether a sale contributes: a legitimate sale that
+// simply has not finished shipping or paying out still belongs to the month it
+// was sold in. Cancelled and refunded sales (status !== "completed") never
+// contribute. The relevant date is always the sale's own sale_date, never a
+// completion / dispatch / payout / created_at date.
+//
+// Per-sale profit is taken from the already-computed canonical `profitPence`
+// (summed from each sale_item's saved profit — see app/api/sales/route.ts's
+// hydrateOrders), so this module never re-derives it and the dashboard can
+// never disagree with the sale detail page or the sales report. There is no
+// partial-refund concept in the schema, so no adjusted-profit value exists to
+// prefer; a return that is merely in progress keeps its full canonical profit
+// until the sale is actually cancelled (status flips to "cancelled").
+//
+// Operating expenses are every row in the `expenses` table — a table entirely
+// separate from `purchases`, with no category/status columns. Inventory/stock
+// cost is already inside each sale's profit (via purchase_cost_snapshot), and
+// nothing copies a stock purchase into `expenses`, so subtracting every
+// expense row here cannot double-count cost of goods.
+//
+// Period boundaries reuse rangeFor + inRange: a half-open interval
+// [firstOfMonth, firstOfNextMonth), compared as plain YYYY-MM-DD strings with
+// no UTC/local conversion, so a record dated on the first or last day of a
+// month — or either side of a year boundary — lands in exactly one month.
+// "All Time" (rangeFor === null) applies no date filter at all.
+// ============================================================================
+
+export type MonthlyNetProfit = {
+  salesProfitPence: number;
+  operatingExpensePence: number;
+  netProfitPence: number;
+};
+
+/** The only sale fields the net-profit calculation reads. */
+export type NetProfitSale = Pick<SalesOrderListItem, "sale_date" | "status" | "profitPence">;
+
+/** The final subtraction, in integer pence. Exposed so app/page.tsx and the tests apply the identical one line. */
+export function netProfitPence(salesProfitPence: number, operatingExpensePence: number): number {
+  return salesProfitPence - operatingExpensePence;
+}
+
+/** Σ operating-expense cost (integer pence) across the expense rows whose expense date (`purchase_date`) falls in `period`. */
+export function periodOperatingExpensePence(period: Period, expenses: readonly Expense[]): number {
+  const range = rangeFor(period);
+  const inPeriod = range ? expenses.filter(row => inRange(row.purchase_date, range.start, range.end)) : expenses;
+  // Summed in integer pence, never floating-point pounds, so e.g. 0.10 + 0.20
+  // can never surface a 0.30000000000000004 artefact in the total.
+  return inPeriod.reduce((total, row) => total + poundsToPence(Number(row.cost || 0)), 0);
+}
+
+/** Σ canonical profit (integer pence) of every valid sale (financial status "completed", ANY process_status) whose sale_date falls in `period`. */
+export function periodValidSalesProfitPence(period: Period, sales: readonly NetProfitSale[]): number {
+  const range = rangeFor(period);
+  const inPeriod = range ? sales.filter(row => inRange(row.sale_date, range.start, range.end)) : sales;
+  return inPeriod
+    .filter(row => row.status === "completed")
+    .reduce((total, row) => total + row.profitPence, 0);
+}
+
+/**
+ * The authoritative monthly-net-profit calculation, as one pure function over
+ * fully-loaded records — this is what the regression tests drive. app/page.tsx
+ * takes the valid-sales-profit total from the sales API's server-side `kpis`
+ * instead (it applies the identical `status === "completed"` rule over the
+ * complete, un-paginated result set) and calls `netProfitPence` with it plus
+ * `periodOperatingExpensePence`; both paths produce the same number by
+ * construction.
+ */
+export function computeMonthlyNetProfit(period: Period, sales: readonly NetProfitSale[], expenses: readonly Expense[]): MonthlyNetProfit {
+  const salesProfitPence = periodValidSalesProfitPence(period, sales);
+  const operatingExpensePence = periodOperatingExpensePence(period, expenses);
+  return { salesProfitPence, operatingExpensePence, netProfitPence: netProfitPence(salesProfitPence, operatingExpensePence) };
 }

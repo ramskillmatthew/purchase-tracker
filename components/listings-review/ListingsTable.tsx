@@ -6,9 +6,15 @@ import {
   WORKFLOW_STATUS_LABELS, WORKFLOW_STATUS_TONE, READINESS_TONE_READY, READINESS_TONE_NEEDS_REVIEW,
   computeWorkflowSecondaryLine, type ExtensionWorkflowStatus,
 } from "@/lib/listing-studio/extension-workflow-status";
+import {
+  EBAY_WORKFLOW_STATUS_LABELS, EBAY_WORKFLOW_STATUS_TONE, computeEbayWorkflowSecondaryLine, isEbayWorkflowInProgress,
+  type EbayWorkflowStatus,
+} from "@/lib/listing-studio/ebay-workflow-status";
 import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu, { type OverflowMenuItem } from "@/components/listing-studio/OverflowMenu";
+
+export type ListingMarketplaceView = "VINTED" | "EBAY_UK";
 
 export type ListingTableRow = {
   id: string;
@@ -26,6 +32,25 @@ export type ListingTableRow = {
   sellingPricePence: number | null;
   profitPence: number | null;
   coverPhotoId: string | null;
+  // Corrective pass (canonical unified row model) — a row on this page no
+  // longer always has real Vinted content: an eBay-only product (never
+  // generated for Vinted — see the listings-review route's own header
+  // comment for the proven bug this closes) is now visible too, with
+  // hasVintedPreparation === false for it. Symmetric with
+  // hasEbayPreparation below: "not prepared" is a restrained,
+  // non-actionable state on EITHER channel, never treated as an error.
+  hasVintedPreparation: boolean;
+  // Stage 6 (eBay draft batches) — independent of every Vinted field
+  // above. hasEbayPreparation false means "not prepared" — a restrained,
+  // non-actionable state, never treated as an error (see the product
+  // spec's own "Visibility rules" for the workflow toggle).
+  hasEbayPreparation: boolean;
+  ebayContentReady: boolean;
+  ebayWorkflowStatus: EbayWorkflowStatus | null;
+  ebayQueuePosition: number | null;
+  ebayErrorMessage: string | null;
+  ebaySellingPricePence: number | null;
+  ebayProfitPence: number | null;
 };
 
 // Readiness reuses the same emerald/amber the workflow statuses use for
@@ -33,6 +58,44 @@ export type ListingTableRow = {
 // this page ever shows (see lib/listing-studio/extension-workflow-status.ts).
 const READINESS_LABELS: Record<ListingReviewStatus, string> = { ready: "Ready", needs_review: "Need review", edited: "Ready" };
 const READINESS_TONE: Record<ListingReviewStatus, string> = { ready: READINESS_TONE_READY, needs_review: READINESS_TONE_NEEDS_REVIEW, edited: READINESS_TONE_READY };
+const NOT_PREPARED_TONE = "#7E8798"; // same neutral grey Vinted's own "in_queue" tone uses — never a new colour
+
+/** The one place a row's displayed workflow cell (label/tone/pulse/
+ * secondary line) is computed for whichever marketplace is currently
+ * selected — used identically by the desktop table and the mobile card
+ * list below, so neither can ever show a different answer for the same
+ * row. Completing/failing one marketplace never touches the other's own
+ * independently-stored fields on this same row object. */
+function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: ListingMarketplaceView) {
+  if (activeMarketplace === "VINTED") {
+    // Corrective pass — symmetric with the eBay branch below: a row with
+    // no real Vinted content (an eBay-only product) must never show a
+    // misleading readiness-derived label like "Need review" here.
+    if (!row.hasVintedPreparation) {
+      return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.sellingPricePence, profitPence: row.profitPence };
+    }
+    return {
+      label: row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status],
+      tone: row.workflowStatus ? WORKFLOW_STATUS_TONE[row.workflowStatus] : READINESS_TONE[row.status],
+      pulse: row.workflowStatus === "in_progress",
+      secondaryLine: computeWorkflowSecondaryLine({
+        workflowStatus: row.workflowStatus, queuePosition: row.queuePosition, currentStep: row.currentStep,
+        detail: row.detail, vintedDraftId: row.vintedDraftId, errorMessage: row.errorMessage,
+      }),
+      pricePence: row.sellingPricePence, profitPence: row.profitPence,
+    };
+  }
+  if (!row.hasEbayPreparation) {
+    return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence };
+  }
+  const label = row.ebayWorkflowStatus ? EBAY_WORKFLOW_STATUS_LABELS[row.ebayWorkflowStatus] : (row.ebayContentReady ? "Ready" : "Needs review");
+  const tone = row.ebayWorkflowStatus ? EBAY_WORKFLOW_STATUS_TONE[row.ebayWorkflowStatus] : (row.ebayContentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
+  return {
+    label, tone, pulse: isEbayWorkflowInProgress(row.ebayWorkflowStatus),
+    secondaryLine: computeEbayWorkflowSecondaryLine({ workflowStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: row.ebayErrorMessage }),
+    pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
+  };
+}
 
 function rowMenuItems(row: ListingTableRow, handlers: {
   onPreview: (id: string) => void;
@@ -45,7 +108,12 @@ function rowMenuItems(row: ListingTableRow, handlers: {
   ];
   // Reuses the exact existing send-to-extension flow with a one-listing
   // selection — never a second batch-creation/retry mechanism.
-  if (handlers.onSendToExtension && row.status !== "needs_review" && (row.workflowStatus === null || row.workflowStatus === "failed")) {
+  // Corrective pass — explicit hasVintedPreparation check: an eBay-only
+  // row's Vinted readiness fields are naturally always "needs_review"
+  // (missing title/description/etc.), which already excludes it here as
+  // a side effect, but this makes "an eBay-only item is not eligible for
+  // Send to extension" a deliberate, tested rule rather than an accident.
+  if (handlers.onSendToExtension && row.hasVintedPreparation && row.status !== "needs_review" && (row.workflowStatus === null || row.workflowStatus === "failed")) {
     items.push({ label: row.workflowStatus === "failed" ? "Resend to extension" : "Send to extension", onClick: () => handlers.onSendToExtension!(row.id) });
   }
   return items;
@@ -59,8 +127,18 @@ function rowMenuItems(row: ListingTableRow, handlers: {
  * useMemo) so a keystroke in the search box re-renders exactly this table
  * once — never re-deriving status/warnings/cost/profit per row on every
  * keystroke (all computed once per listing in the parent).
+ *
+ * Stage 6 (eBay draft batches) — `activeMarketplace` and the small
+ * Vinted/eBay text toggle beside the Workflow column heading are the ONLY
+ * new things this table renders; every existing column/row/action is
+ * completely unchanged in appearance. `marketplaceToggleOptions` lists
+ * which marketplace options to offer (never a pointless two-option toggle
+ * when every visible row only has one marketplace prepared).
  */
-function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListing, onToggleBulkSelect, onToggleSelectAll, onPreview, onEditFields, onSendToExtension }: {
+function ListingsTable({
+  rows, selectedListingId, bulkSelectedIds, onSelectListing, onToggleBulkSelect, onToggleSelectAll, onPreview, onEditFields, onSendToExtension,
+  activeMarketplace, marketplaceToggleOptions, onMarketplaceChange,
+}: {
   rows: ListingTableRow[];
   selectedListingId: string | null;
   bulkSelectedIds: Set<string>;
@@ -70,6 +148,9 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
   onPreview: (id: string) => void;
   onEditFields: (id: string) => void;
   onSendToExtension: (id: string) => void;
+  activeMarketplace: ListingMarketplaceView;
+  marketplaceToggleOptions: ListingMarketplaceView[];
+  onMarketplaceChange: (marketplace: ListingMarketplaceView) => void;
 }) {
   const selectedCount = rows.filter(row => bulkSelectedIds.has(row.id)).length;
   const allSelected = rows.length > 0 && selectedCount === rows.length;
@@ -83,6 +164,20 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
   useEffect(() => {
     if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected;
   }, [someSelected]);
+
+  const workflowHeader = <>
+    Workflow
+    {marketplaceToggleOptions.length > 1 && <span className="lr-marketplace-toggle" role="group" aria-label="Workflow marketplace">
+      {marketplaceToggleOptions.map(marketplace => <button
+        key={marketplace} type="button"
+        className={marketplace === activeMarketplace ? "lr-marketplace-toggle-btn active" : "lr-marketplace-toggle-btn"}
+        onClick={event => { event.stopPropagation(); onMarketplaceChange(marketplace); }}
+        aria-pressed={marketplace === activeMarketplace}
+      >
+        {marketplace === "VINTED" ? "Vinted" : "eBay"}
+      </button>)}
+    </span>}
+  </>;
 
   if (rows.length === 0) {
     return <div className="lr-table-scroll lr-table-empty">
@@ -110,18 +205,13 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
             <th>Cost</th>
             <th>Price</th>
             <th>Profit</th>
-            <th>Workflow</th>
+            <th>{workflowHeader}</th>
             <th aria-label="Actions" />
           </tr>
         </thead>
         <tbody>
           {rows.map(row => {
-            const displayLabel = row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status];
-            const displayTone = row.workflowStatus ? WORKFLOW_STATUS_TONE[row.workflowStatus] : READINESS_TONE[row.status];
-            const secondaryLine = computeWorkflowSecondaryLine({
-              workflowStatus: row.workflowStatus, queuePosition: row.queuePosition, currentStep: row.currentStep,
-              detail: row.detail, vintedDraftId: row.vintedDraftId, errorMessage: row.errorMessage,
-            });
+            const display = resolveWorkflowDisplay(row, activeMarketplace);
             return <tr
               key={row.id}
               tabIndex={0}
@@ -144,10 +234,10 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
               </td>
               <td>{row.ukSize || "—"}</td>
               <td className="lr-money-cell">{row.costPence !== null ? formatPenceAsGBP(row.costPence) : "—"}</td>
-              <td className="lr-money-cell">{row.sellingPricePence !== null ? formatPenceAsGBP(row.sellingPricePence) : "—"}</td>
-              <td className={`lr-money-cell${row.profitPence !== null && row.profitPence > 0 ? " lr-profit-positive" : ""}`}>{row.profitPence !== null ? formatPenceAsGBP(row.profitPence) : "—"}</td>
+              <td className="lr-money-cell">{display.pricePence !== null ? formatPenceAsGBP(display.pricePence) : "—"}</td>
+              <td className={`lr-money-cell${display.profitPence !== null && display.profitPence > 0 ? " lr-profit-positive" : ""}`}>{display.profitPence !== null ? formatPenceAsGBP(display.profitPence) : "—"}</td>
               <td>
-                <WorkflowStatus label={displayLabel} tone={displayTone} pulse={row.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
+                <WorkflowStatus label={display.label} tone={display.tone} pulse={display.pulse} secondaryLine={display.secondaryLine} />
               </td>
               <td className="lr-row-actions" onClick={event => event.stopPropagation()}>
                 <OverflowMenu label={`More actions for ${row.generatedTitle || "this listing"}`} items={rowMenuItems(row, { onPreview, onEditFields, onSendToExtension })} />
@@ -163,12 +253,7 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
         selection affordances stay immediately visible, never buried. */}
     <ul className="lr-card-list">
       {rows.map(row => {
-        const displayLabel = row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status];
-        const displayTone = row.workflowStatus ? WORKFLOW_STATUS_TONE[row.workflowStatus] : READINESS_TONE[row.status];
-        const secondaryLine = computeWorkflowSecondaryLine({
-          workflowStatus: row.workflowStatus, queuePosition: row.queuePosition, currentStep: row.currentStep,
-          detail: row.detail, vintedDraftId: row.vintedDraftId, errorMessage: row.errorMessage,
-        });
+        const display = resolveWorkflowDisplay(row, activeMarketplace);
         return <li
           key={row.id}
           className={row.id === selectedListingId ? "lr-card lr-card-active" : "lr-card"}
@@ -186,10 +271,10 @@ function ListingsTable({ rows, selectedListingId, bulkSelectedIds, onSelectListi
             <span className="lr-title-sku">{row.sku || "No SKU"} {row.ukSize && `· UK ${row.ukSize}`}</span>
             <div className="lr-card-money">
               <span>{row.costPence !== null ? formatPenceAsGBP(row.costPence) : "—"}</span>
-              <span>{row.sellingPricePence !== null ? formatPenceAsGBP(row.sellingPricePence) : "—"}</span>
-              <span className={row.profitPence !== null && row.profitPence > 0 ? "lr-profit-positive" : undefined}>{row.profitPence !== null ? formatPenceAsGBP(row.profitPence) : "—"}</span>
+              <span>{display.pricePence !== null ? formatPenceAsGBP(display.pricePence) : "—"}</span>
+              <span className={display.profitPence !== null && display.profitPence > 0 ? "lr-profit-positive" : undefined}>{display.profitPence !== null ? formatPenceAsGBP(display.profitPence) : "—"}</span>
             </div>
-            <WorkflowStatus label={displayLabel} tone={displayTone} pulse={row.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
+            <WorkflowStatus label={display.label} tone={display.tone} pulse={display.pulse} secondaryLine={display.secondaryLine} />
           </div>
           <div className="lr-card-actions" onClick={event => event.stopPropagation()}>
             <OverflowMenu label={`More actions for ${row.generatedTitle || "this listing"}`} items={rowMenuItems(row, { onPreview, onEditFields, onSendToExtension })} />

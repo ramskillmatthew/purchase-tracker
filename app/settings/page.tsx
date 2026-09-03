@@ -3,6 +3,27 @@ import { useEffect, useState } from "react";
 
 type YahooStatus = { configured: boolean; maskedAddress: string | null; connected?: boolean; testedAt?: string; lastSuccessful?: string | null };
 type GmailStatus = { configured: boolean; accounts: Array<{ id:string; emailAddress:string; status:string; connectedAt:string }> };
+// eBay UK account connection (Stage 1: connect, identity, business-policy
+// sync — see lib/ebay-account/client.ts's own EbayConnection type, which
+// this mirrors exactly; never includes a token field, since the API route
+// never selects one into its response).
+type EbayConnectionStatus = "connected" | "needs_reconnect" | "disconnected";
+type EbayConnection = {
+  id: string; environment: string; ebayUserId: string; email: string | null; accountType: string | null;
+  registrationMarketplace: string | null; accountStatus: string | null; connectionStatus: EbayConnectionStatus;
+  hasRefreshToken: boolean; grantedScopes: string | null;
+  lastIdentitySyncAt: string | null; lastPolicySyncAt: string | null;
+  lastSyncErrorCode: string | null; lastSyncErrorMessage: string | null;
+  draftOnly: boolean;
+  defaultFulfillmentPolicyId: string | null; defaultReturnPolicyId: string | null; defaultPaymentPolicyId: string | null;
+  defaultInventoryLocationKey: string | null;
+  createdAt: string; updatedAt: string;
+};
+type EbayPolicy = { id: string; policyType: "FULFILLMENT" | "RETURN" | "PAYMENT"; ebayPolicyId: string; name: string; marketplaceId: string; available: boolean; lastSyncedAt: string };
+// Stage 6 (eBay draft batches) — mirrors lib/ebay-account/client.ts's own
+// EbayInventoryLocationRecord exactly.
+type EbayInventoryLocation = { id: string; merchantLocationKey: string; name: string | null; status: string | null; addressSummary: string | null; available: boolean };
+type EbayState = { connection: EbayConnection | null; policies: EbayPolicy[]; locations: EbayInventoryLocation[] };
 type IndexStatus = {
   count: number; lastSyncedAt: string | null;
   currentlyIndexing: { rangeStart: string; rangeEnd: string; startedAt: string } | null;
@@ -41,9 +62,83 @@ export default function SettingsPage() {
   const [vintedImportBusy, setVintedImportBusy] = useState(false);
   const [vintedImportError, setVintedImportError] = useState("");
   const [vintedImportResult, setVintedImportResult] = useState<{ ok: boolean; message: string } | null>(null);
+  // eBay UK — `ebayNotice` reflects the one-time `?ebay=connected|error`
+  // query param the OAuth callback redirects back with (see
+  // app/api/ebay/callback/route.ts); cleared from the URL immediately so
+  // a later page refresh never re-shows a stale banner.
+  const [ebay, setEbay] = useState<EbayState | null>(null);
+  const [ebaySyncing, setEbaySyncing] = useState(false);
+  const [ebayDisconnecting, setEbayDisconnecting] = useState(false);
+  const [ebaySavingDefaults, setEbaySavingDefaults] = useState(false);
+  const [ebayDefaultsDraft, setEbayDefaultsDraft] = useState<{ fulfillment: string; returns: string; payment: string; location: string }>({ fulfillment: "", returns: "", payment: "", location: "" });
+  const [ebaySyncMessage, setEbaySyncMessage] = useState("");
+  const [ebayDefaultsMessage, setEbayDefaultsMessage] = useState("");
+  const [ebayNotice, setEbayNotice] = useState<{ ok: boolean; reason: string | null } | null>(null);
   async function loadIndex() { const response = await fetch("/api/yahoo/index"); if (response.ok) setIndex(await response.json()); }
   async function loadVintedStatus() { const response = await fetch("/api/listing-studio/vinted-categories/status"); if (response.ok) setVintedStatus(await response.json()); }
-  useEffect(() => { setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light"); fetch("/api/yahoo/connection").then(async response => response.ok && setYahoo(await response.json())); fetch("/api/gmail/accounts").then(async response=>response.ok&&setGmail(await response.json())); loadIndex(); loadVintedStatus(); }, []);
+  async function loadEbay() {
+    const response = await fetch("/api/ebay/connection");
+    if (!response.ok) return;
+    const body = await response.json() as EbayState;
+    setEbay(body);
+    setEbayDefaultsDraft({
+      fulfillment: body.connection?.defaultFulfillmentPolicyId || "", returns: body.connection?.defaultReturnPolicyId || "",
+      payment: body.connection?.defaultPaymentPolicyId || "", location: body.connection?.defaultInventoryLocationKey || "",
+    });
+  }
+  useEffect(() => {
+    setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light");
+    fetch("/api/yahoo/connection").then(async response => response.ok && setYahoo(await response.json()));
+    fetch("/api/gmail/accounts").then(async response=>response.ok&&setGmail(await response.json()));
+    loadIndex(); loadVintedStatus(); loadEbay();
+    const params = new URLSearchParams(window.location.search);
+    const ebayParam = params.get("ebay");
+    if (ebayParam) {
+      setEbayNotice({ ok: ebayParam === "connected", reason: params.get("reason") });
+      window.history.replaceState(null, "", "/settings");
+    }
+  }, []);
+  async function syncEbay() {
+    if (ebaySyncing) return;
+    setEbaySyncing(true); setEbaySyncMessage("");
+    try {
+      const response = await fetch("/api/ebay/sync", { method: "POST" });
+      const body = await response.json();
+      if (!response.ok) { setEbaySyncMessage(body.error || "eBay could not be synced right now. Your account remains connected."); return; }
+      const addedOrUpdated = (body.policies as Array<{ type: string; status: string; count: number }>).map(p => `${p.count} ${p.type.toLowerCase()}${p.status === "failed" ? " (failed)" : ""}`).join(" · ");
+      setEbaySyncMessage(`Synced: ${addedOrUpdated}.`);
+      await loadEbay();
+    } catch { setEbaySyncMessage("Network error — eBay could not be synced."); }
+    finally { setEbaySyncing(false); }
+  }
+  async function disconnectEbay() {
+    if (ebayDisconnecting || !window.confirm("Disconnect this eBay account? Existing Listing Studio drafts are kept — you can reconnect at any time.")) return;
+    setEbayDisconnecting(true);
+    try { const response = await fetch("/api/ebay/disconnect", { method: "POST" }); if (response.ok) await loadEbay(); }
+    finally { setEbayDisconnecting(false); }
+  }
+  function changeEbayAccount() {
+    if (!window.confirm("Connecting a different eBay account will replace the active connection for future draft creation. Existing local drafts are kept. Continue?")) return;
+    window.location.href = "/api/ebay/connect?intent=change_account";
+  }
+  async function saveEbayDefaults() {
+    if (ebaySavingDefaults) return;
+    setEbaySavingDefaults(true); setEbayDefaultsMessage("");
+    try {
+      const response = await fetch("/api/ebay/defaults", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fulfillmentPolicyId: ebayDefaultsDraft.fulfillment || null, returnPolicyId: ebayDefaultsDraft.returns || null,
+          paymentPolicyId: ebayDefaultsDraft.payment || null, inventoryLocationKey: ebayDefaultsDraft.location || null,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) { setEbayDefaultsMessage(body.error || "Defaults could not be saved."); return; }
+      setEbayDefaultsMessage("Defaults saved.");
+      await loadEbay();
+    } catch { setEbayDefaultsMessage("Network error — defaults could not be saved."); }
+    finally { setEbaySavingDefaults(false); }
+  }
   async function refreshVintedCategories() {
     if (vintedRefreshing) return;
     setVintedRefreshing(true); setVintedResult(null);
@@ -122,6 +217,138 @@ export default function SettingsPage() {
     <div className="settings-section"><div className="settings-copy"><h2>Appearance</h2><p>Choose how Purchase Tracker looks on this device.</p></div><div className="theme-options"><button type="button" className={theme === "light" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("light")}><span className="theme-preview theme-preview-light"><i /><i /></span><strong>Light</strong></button><button type="button" className={theme === "dark" ? "theme-option theme-option-active" : "theme-option"} onClick={() => chooseTheme("dark")}><span className="theme-preview theme-preview-dark"><i /><i /></span><strong>Dark</strong></button></div></div>
     <div className="settings-row"><div><h2>Workspace</h2><p>Personal workspace · Supabase database</p></div><span className="status-badge"><i />Protected</span></div>
     <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Yahoo Mail</h2><p>Read-only IMAP access is configured only through server environment variables.</p><ol><li>Enable Yahoo two-step verification.</li><li>Create a Yahoo app password.</li><li>Set YAHOO_EMAIL and YAHOO_APP_PASSWORD locally and in Vercel.</li></ol></div><div className="yahoo-status"><span className={yahoo?.configured ? "status-badge" : "status-badge status-off"}><i />{yahoo?.configured ? "Configured" : "Not configured"}</span><strong>{yahoo?.maskedAddress || "No address configured"}</strong>{yahoo?.connected && <small>Connected · tested {yahoo.testedAt ? new Date(yahoo.testedAt).toLocaleString() : "just now"}</small>}{!yahoo?.connected && yahoo?.lastSuccessful && <small>Last successful connection or sync: {new Date(yahoo.lastSuccessful).toLocaleString()}</small>}{connectionError && <small className="purchase-form-error">{connectionError}</small>}<button className="button-secondary" disabled={testing || !yahoo?.configured} onClick={testConnection}>{testing ? "Testing…" : "Test connection"}</button></div></div>
+    <div className="settings-section yahoo-settings">
+      <div className="settings-copy">
+        <h2>eBay UK</h2>
+        <p>Connect your eBay selling account to create and manage drafts from Listing Studio.</p>
+        <p>Secure OAuth connection through eBay.</p>
+        <p>Drafts only during testing — nothing will be published automatically.</p>
+        {ebayNotice && !ebayNotice.ok && (
+          <p className="purchase-form-error">
+            {{
+              access_denied: "eBay access was not granted.", state_invalid: "This eBay connection link is invalid, expired, or was already used. Try connecting again.",
+              missing_code: "eBay did not return an authorization code.", token_exchange_failed: "eBay rejected the connection request. Check the configured eBay credentials and try again.",
+              connection_failed: "eBay is temporarily unavailable. Try connecting again shortly.", auth_required: "Sign in and try connecting again.",
+            }[ebayNotice.reason || ""] || "The eBay connection could not be completed."}
+          </p>
+        )}
+        {ebayNotice?.ok && <p className="ebay-account-connected-notice">eBay account connected.</p>}
+      </div>
+
+      {(!ebay?.connection || ebay.connection.connectionStatus === "disconnected") && <div className="yahoo-status">
+        <span className="status-badge status-off"><i />Not connected</span>
+        <a className="button-secondary" href="/api/ebay/connect">Connect eBay account</a>
+        <div className="ebay-account-capability-summary">
+          <span>Seller account — Connect to enable</span>
+          <span>Business policies — Connect to enable</span>
+          <span>Photo upload — Connect to enable</span>
+          <span>Draft creation — Connect to enable</span>
+        </div>
+      </div>}
+
+      {ebay?.connection && ebay.connection.connectionStatus !== "disconnected" && (() => {
+        const connection = ebay.connection;
+        const needsReconnect = connection.connectionStatus === "needs_reconnect";
+        const policiesByType = (type: EbayPolicy["policyType"]) => ebay.policies.filter(p => p.policyType === type);
+        const availablePolicies = (type: EbayPolicy["policyType"]) => policiesByType(type).filter(p => p.available);
+        const defaultNeedsAttention = (type: EbayPolicy["policyType"], selected: string) => Boolean(selected) && !availablePolicies(type).some(p => p.ebayPolicyId === selected);
+        const fulfillmentCount = policiesByType("FULFILLMENT").filter(p => p.available).length;
+        const returnCount = policiesByType("RETURN").filter(p => p.available).length;
+        const paymentCount = policiesByType("PAYMENT").filter(p => p.available).length;
+        // Stage 6 — evidence-based readiness (never a hardcoded "Needs
+        // attention"). Photo upload never performs a real product upload
+        // just to render Settings — "Ready" here means the server-side
+        // integration and permissions genuinely exist: a usable, connected
+        // account with a real refresh token (proving sell.inventory was
+        // actually granted at connect time). Draft creation additionally
+        // needs business policies synced AND a usable inventory location
+        // (a default chosen here, or at least one synced location an
+        // owner can choose per-listing in Listings Review) — missing email
+        // never affects either.
+        const availableLocations = ebay.locations.filter(l => l.available);
+        const hasUsableLocation = Boolean(ebayDefaultsDraft.location) || availableLocations.length > 0;
+        const photoUploadReady = !needsReconnect && connection.hasRefreshToken;
+        const draftCreationReady = !needsReconnect && connection.hasRefreshToken && Boolean(connection.lastPolicySyncAt) && hasUsableLocation;
+        return <>
+          <div className="yahoo-status">
+            <span className={needsReconnect ? "status-badge status-off" : "status-badge"}><i />{needsReconnect ? "Needs reconnect" : "Connected"}</span>
+            <strong>{connection.email || "Email not supplied by eBay"}</strong>
+            {/* Stage 6 correction — the exact required copy, with no
+                suggestion to reconnect for an unavailable identity
+                permission (commerce.identity.email.readonly isn't
+                available on this keyset at all — see
+                lib/ebay-account/oauth.ts's own scope comment — so
+                reconnecting can never fix this). */}
+            {!connection.email && <small>eBay did not supply an email address for this account. This does not affect listing drafts.</small>}
+            <small>{connection.accountType === "BUSINESS" ? "Business seller" : connection.accountType === "INDIVIDUAL" ? "Individual seller" : "Account type not supplied"} · {connection.registrationMarketplace === "EBAY_GB" ? "United Kingdom" : connection.registrationMarketplace || "Marketplace not supplied"}</small>
+            <small>{connection.lastIdentitySyncAt ? `Last account sync: ${new Date(connection.lastIdentitySyncAt).toLocaleString()}` : "Not yet synced"}</small>
+            <small>{connection.lastPolicySyncAt ? `Last policy sync: ${new Date(connection.lastPolicySyncAt).toLocaleString()}` : "Policies not yet synced"}</small>
+            {connection.lastSyncErrorMessage && <small className="purchase-form-error">{connection.lastSyncErrorMessage}</small>}
+            {needsReconnect && <small className="purchase-form-error">Your eBay permission has expired. Reconnect the account to continue.</small>}
+            {ebaySyncMessage && <small>{ebaySyncMessage}</small>}
+            <div className="settings-section-actions">
+              <button type="button" className="button-secondary" disabled={ebaySyncing} onClick={syncEbay}>{ebaySyncing ? "Syncing…" : "Sync account"}</button>
+              <button type="button" className="button-secondary" onClick={changeEbayAccount}>Change account</button>
+              <button type="button" className="button-danger" disabled={ebayDisconnecting} onClick={disconnectEbay}>{ebayDisconnecting ? "Disconnecting…" : "Disconnect"}</button>
+            </div>
+            <div className="ebay-account-capability-summary">
+              <span>Seller account — {needsReconnect ? "Not authorised" : "Ready"}</span>
+              <span>Business policies — {needsReconnect ? "Not authorised" : connection.lastPolicySyncAt ? "Ready" : connection.lastSyncErrorMessage ? "Needs attention" : "Not yet synced"}</span>
+              <span>Photo upload — {photoUploadReady ? "Ready" : "Needs attention"}</span>
+              <span>Draft creation — {draftCreationReady ? "Ready" : "Needs attention"}</span>
+            </div>
+          </div>
+
+          <div className="ebay-account-defaults">
+            <h3>eBay listing defaults</h3>
+            <div className="ebay-account-policy-fields">
+              <label className="field">
+                <span>Default postage policy</span>
+                <select className="input" value={ebayDefaultsDraft.fulfillment} onChange={event => setEbayDefaultsDraft(current => ({ ...current, fulfillment: event.target.value }))}>
+                  <option value="">Not set</option>
+                  {availablePolicies("FULFILLMENT").map(p => <option key={p.ebayPolicyId} value={p.ebayPolicyId}>{p.name}</option>)}
+                </select>
+                {defaultNeedsAttention("FULFILLMENT", ebayDefaultsDraft.fulfillment) && <small className="purchase-form-error">Default policy needs attention — it is no longer available. Choose another.</small>}
+              </label>
+              <label className="field">
+                <span>Default return policy</span>
+                <select className="input" value={ebayDefaultsDraft.returns} onChange={event => setEbayDefaultsDraft(current => ({ ...current, returns: event.target.value }))}>
+                  <option value="">Not set</option>
+                  {availablePolicies("RETURN").map(p => <option key={p.ebayPolicyId} value={p.ebayPolicyId}>{p.name}</option>)}
+                </select>
+                {defaultNeedsAttention("RETURN", ebayDefaultsDraft.returns) && <small className="purchase-form-error">Default policy needs attention — it is no longer available. Choose another.</small>}
+              </label>
+              <label className="field">
+                <span>Default payment policy</span>
+                <select className="input" value={ebayDefaultsDraft.payment} onChange={event => setEbayDefaultsDraft(current => ({ ...current, payment: event.target.value }))}>
+                  <option value="">Not set</option>
+                  {availablePolicies("PAYMENT").map(p => <option key={p.ebayPolicyId} value={p.ebayPolicyId}>{p.name}</option>)}
+                </select>
+                {defaultNeedsAttention("PAYMENT", ebayDefaultsDraft.payment) && <small className="purchase-form-error">Default policy needs attention — it is no longer available. Choose another.</small>}
+              </label>
+              <label className="field">
+                <span>Default inventory location</span>
+                <select className="input" value={ebayDefaultsDraft.location} onChange={event => setEbayDefaultsDraft(current => ({ ...current, location: event.target.value }))}>
+                  <option value="">No default — choose in Listings Review</option>
+                  {availableLocations.map(l => <option key={l.merchantLocationKey} value={l.merchantLocationKey}>{l.name || l.merchantLocationKey}{l.addressSummary ? ` — ${l.addressSummary}` : ""}</option>)}
+                </select>
+                {availableLocations.length === 0 && <small>No inventory locations found on this account yet — sync again after adding one on eBay, or choose one per-listing later.</small>}
+              </label>
+            </div>
+            <p className="ebay-account-policy-summary">{fulfillmentCount} postage polic{fulfillmentCount === 1 ? "y" : "ies"} · {returnCount} return polic{returnCount === 1 ? "y" : "ies"} · {paymentCount} payment polic{paymentCount === 1 ? "y" : "ies"} · {availableLocations.length} inventory location{availableLocations.length === 1 ? "" : "s"} · Synced from eBay</p>
+            <div className="ebay-account-draft-only">
+              <label className="ebay-account-draft-only-toggle">
+                <input type="checkbox" checked disabled aria-describedby="ebay-account-draft-only-note" />
+                <span>Create drafts only — never publish automatically</span>
+              </label>
+              <small id="ebay-account-draft-only-note">Listings are saved as drafts until you choose to publish. This safety setting is enabled and cannot be turned off yet.</small>
+            </div>
+            {ebayDefaultsMessage && <small className={ebayDefaultsMessage === "Defaults saved." ? undefined : "purchase-form-error"}>{ebayDefaultsMessage}</small>}
+            <button type="button" className="button" disabled={ebaySavingDefaults} onClick={saveEbayDefaults}>{ebaySavingDefaults ? "Saving…" : "Save defaults"}</button>
+          </div>
+        </>;
+      })()}
+    </div>
     <div className="settings-section yahoo-settings"><div className="settings-copy"><h2>Private email index</h2><p>Stores only sender, subject, date, email type and extracted order fields in your protected Supabase workspace. Bodies, HTML, attachments and Yahoo credentials stay out of the index.</p><p>An automatic sync runs once a day and keeps the index up to date on its own. Use &quot;Sync now&quot; for an immediate update or to backfill an older date range.</p><p>{index?.count || 0} metadata records indexed{index?.lastSyncedAt ? ` · last successful sync ${new Date(index.lastSyncedAt).toLocaleString()}` : ""}.</p>{index?.currentlyIndexing && <p className="status-badge"><i />Currently indexing {index.currentlyIndexing.rangeStart} to {index.currentlyIndexing.rangeEnd} (started {new Date(index.currentlyIndexing.startedAt).toLocaleString()})</p>}{index?.inProgress && <p className="status-badge"><i />In progress: {index.inProgress.rangeStart} to {index.inProgress.rangeEnd} — {index.inProgress.indexedSoFar} indexed so far, last pass {new Date(index.inProgress.lastPassAt).toLocaleString()}. Continues automatically.</p>}{index?.lastFailure && <p className="purchase-form-error">Last failed sync: {index.lastFailure.rangeStart} to {index.lastFailure.rangeEnd} at {new Date(index.lastFailure.occurredAt).toLocaleString()} — {index.lastFailure.reason || "Unknown reason."}</p>}</div><div className="index-controls"><label>From<input type="date" value={startDate} max={endDate} onChange={event => setStartDate(event.target.value)} /></label><label>To<input type="date" value={endDate} min={startDate} max={today} onChange={event => setEndDate(event.target.value)} /></label>{indexMessage && <small>{indexMessage}</small>}<button className="button-secondary" disabled={syncing || !yahoo?.configured} onClick={syncIndex}>{syncing ? "Syncing…" : "Sync now"}</button><button className="button-danger" disabled={syncing || !index?.count} onClick={clearIndex}>Clear index</button></div></div>
     <div className="settings-section yahoo-settings">
       <div className="settings-copy">

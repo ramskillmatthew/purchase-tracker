@@ -61,13 +61,22 @@ const COLLAPSED_VISIBLE_COUNT = 6;
  * activity — never the batch's processing, never its box, never any other
  * batch's events.
  */
-function DraftActivityPanel({ events, isLive, filters, selectedFilter, onSelectFilter, onDismissActivity }: {
+function DraftActivityPanel({
+  events, isLive, filters, selectedFilter, onSelectFilter, onDismissActivity,
+  channel, onChannelChange, showChannelToggle,
+}: {
   events: ActivityEvent[];
   isLive: boolean;
   filters: ActivityBatchFilter[];
   selectedFilter: string;
   onSelectFilter: (filter: string) => void;
   onDismissActivity: (batchId: string) => void;
+  // Stage 6 (eBay draft batches) — a small, understated Vinted/eBay toggle
+  // beside the heading, remembered by the parent. Never renders a second
+  // activity card/location — see this component's own doc comment above.
+  channel: "VINTED" | "EBAY_UK";
+  onChannelChange: (channel: "VINTED" | "EBAY_UK") => void;
+  showChannelToggle: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
   const visibleEvents = showAll ? events : events.slice(0, COLLAPSED_VISIBLE_COUNT);
@@ -76,6 +85,10 @@ function DraftActivityPanel({ events, isLive, filters, selectedFilter, onSelectF
   return <section className="lr-activity-panel" aria-label="Live activity">
     <div className="lr-activity-header">
       <h2>{isLive && <i aria-hidden="true" className="lr-activity-live-dot" />}Live activity</h2>
+      {showChannelToggle && <span className="lr-marketplace-toggle" role="group" aria-label="Activity marketplace">
+        <button type="button" className={channel === "VINTED" ? "lr-marketplace-toggle-btn active" : "lr-marketplace-toggle-btn"} aria-pressed={channel === "VINTED"} onClick={() => onChannelChange("VINTED")}>Vinted</button>
+        <button type="button" className={channel === "EBAY_UK" ? "lr-marketplace-toggle-btn active" : "lr-marketplace-toggle-btn"} aria-pressed={channel === "EBAY_UK"} onClick={() => onChannelChange("EBAY_UK")}>eBay</button>
+      </span>}
       {events.length > COLLAPSED_VISIBLE_COUNT && <button type="button" className="lr-activity-view-all" onClick={() => setShowAll(current => !current)}>
         {showAll ? "Show less" : "View all"}
       </button>}

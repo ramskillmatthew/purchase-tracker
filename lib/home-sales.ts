@@ -1,7 +1,7 @@
 import type { Period } from "@/lib/home-report";
 import type { SalesOrderListItem } from "@/lib/types";
 import type { DateRangePreset } from "@/lib/sales/report-date-range";
-import { effectiveSalesProcessStatus } from "@/lib/sales/process-status";
+import { PENDING_PROCESS_STATUSES, effectiveSalesProcessStatus, isPendingProcessStatus } from "@/lib/sales/process-status";
 
 export const HOME_PERIOD_TO_SALES_PRESET: Record<Period, Exclude<DateRangePreset, "today" | "custom">> = {
   month: "this-month",
@@ -12,12 +12,30 @@ export const HOME_PERIOD_TO_SALES_PRESET: Record<Period, Exclude<DateRangePreset
   "all-time": "all-time",
 };
 
-export const HOME_PENDING_STATUSES = ["awaiting_dispatch", "sent", "delivered_awaiting_payout", "return_in_process"] as const;
+/** @deprecated Use PENDING_PROCESS_STATUSES from lib/sales/process-status — kept as a re-export so existing importers don't break. */
+export const HOME_PENDING_STATUSES = PENDING_PROCESS_STATUSES;
 
+/**
+ * The four most-recent still-pending orders for the Home "Pending Orders"
+ * preview, using the same canonical pending definition as the Sales page
+ * (isPendingProcessStatus). OPERATIONAL only: the caller must fetch these
+ * across ALL dates (preset=all-time), never the dashboard's financial
+ * Compare-period, and must take the header COUNT from the API response's own
+ * pre-pagination `total` — never from this array's length, which is capped at
+ * four.
+ */
 export function pendingHomeSales(rows: SalesOrderListItem[]): SalesOrderListItem[] {
-  return rows.filter(row => HOME_PENDING_STATUSES.includes(effectiveSalesProcessStatus(row) as typeof HOME_PENDING_STATUSES[number])).slice(0, 4);
+  return rows.filter(row => isPendingProcessStatus(effectiveSalesProcessStatus(row))).slice(0, 4);
 }
 
+/**
+ * The latest five sales for the Home "Recent Sales" widget, newest first by
+ * canonical sale_date with a deterministic created_at-then-id tie-break.
+ * OPERATIONAL only — the caller fetches across all dates and never applies the
+ * Compare-period. Sale-status inclusion is left exactly as the caller supplies
+ * it (currently every non-invalid sale, `status=all`); this helper does not
+ * add or remove a cancelled/refunded filter.
+ */
 export function recentHomeSales(rows: SalesOrderListItem[]): SalesOrderListItem[] {
   return [...rows].sort((a, b) => b.sale_date.localeCompare(a.sale_date) || b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)).slice(0, 5);
 }

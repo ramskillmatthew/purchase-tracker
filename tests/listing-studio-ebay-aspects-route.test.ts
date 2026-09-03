@@ -2,24 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const { requireOwner, supabaseRequestAll, supabaseRequest, resolveEbayAspects, getEbayAspectDefinitions, getMarketplaceSettingsDefaults } = vi.hoisted(() => ({
+const { requireOwner, supabaseRequestAll, supabaseRequest, getEbayAspectDefinitions, autoResolveAndPersistEbayAspects } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   supabaseRequestAll: vi.fn(async (_path: string) => [] as unknown[]),
   supabaseRequest: vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 204 })),
-  resolveEbayAspects: vi.fn(),
   getEbayAspectDefinitions: vi.fn(),
-  getMarketplaceSettingsDefaults: vi.fn(async () => ({} as Record<string, unknown>)),
+  autoResolveAndPersistEbayAspects: vi.fn(),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
   return { ...actual, requireOwner };
 });
 vi.mock("@/lib/supabase", () => ({ supabaseRequestAll, supabaseRequest }));
-vi.mock("@/lib/listing-studio/ebay-aspect-service", () => ({ resolveEbayAspects, getEbayAspectDefinitions }));
-vi.mock("@/lib/listing-studio/marketplace-drafts", async importOriginal => {
-  const actual = await importOriginal<typeof import("@/lib/listing-studio/marketplace-drafts")>();
-  return { ...actual, getMarketplaceSettingsDefaults };
-});
+vi.mock("@/lib/listing-studio/ebay-aspect-service", () => ({ getEbayAspectDefinitions }));
+vi.mock("@/lib/listing-studio/ebay-aspect-persistence", () => ({ autoResolveAndPersistEbayAspects }));
 
 import { GET as getRoute, POST as suggestRoute, PATCH as patchRoute } from "@/app/api/listing-studio/groups/[draftId]/ebay-aspects/route";
 
@@ -40,15 +36,10 @@ function ebayDraftRow(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
-function productRow(overrides: Record<string, unknown> = {}) {
-  return { brand: "Pokémon TCG", model: null, product_type: "Elite Trainer Box", colours: [], material: null, shared_facts_json: {}, ai_result_json: null, ...overrides };
-}
-
 beforeEach(() => {
   requireOwner.mockClear(); supabaseRequestAll.mockReset(); supabaseRequest.mockReset();
-  resolveEbayAspects.mockReset(); getEbayAspectDefinitions.mockReset(); getMarketplaceSettingsDefaults.mockReset();
+  getEbayAspectDefinitions.mockReset(); autoResolveAndPersistEbayAspects.mockReset();
   supabaseRequest.mockResolvedValue(new Response(null, { status: 204 }));
-  getMarketplaceSettingsDefaults.mockResolvedValue({});
 });
 
 describe("GET /api/listing-studio/groups/[draftId]/ebay-aspects — read-only, never triggers AI", () => {
@@ -75,7 +66,7 @@ describe("GET /api/listing-studio/groups/[draftId]/ebay-aspects — read-only, n
     expect(response.status).toBe(200);
     expect(body.required[0].name).toBe("Game");
     expect(body.dynamicData.Game.value).toBe("Pokémon TCG");
-    expect(resolveEbayAspects).not.toHaveBeenCalled();
+    expect(autoResolveAndPersistEbayAspects).not.toHaveBeenCalled();
   });
 
   it("an honest configuration error, never a fabricated result", async () => {
@@ -97,48 +88,23 @@ describe("POST /api/listing-studio/groups/[draftId]/ebay-aspects", () => {
     supabaseRequestAll.mockResolvedValue([ebayDraftRow({ category_id: null })]);
     const response = await suggestRoute(new Request("http://test"), params());
     expect(response.status).toBe(400);
-    expect(resolveEbayAspects).not.toHaveBeenCalled();
+    expect(autoResolveAndPersistEbayAspects).not.toHaveBeenCalled();
   });
 
-  it("REQUIREMENT: a required aspect left unresolved blocks readiness with a blocking message, a recommended one only suggests", async () => {
-    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow()] : path.startsWith("listing_drafts?") ? [productRow()] : []);
-    resolveEbayAspects.mockResolvedValue({
-      status: "success", stale: false,
-      grouped: { required: [{ name: "Game", usage: "REQUIRED", mode: "SELECTION_ONLY", cardinality: "SINGLE", maxLength: null, allowedValues: ["Pokémon TCG"] }], recommended: [{ name: "EAN", usage: "RECOMMENDED", mode: "FREE_TEXT", cardinality: "SINGLE", maxLength: null, allowedValues: [] }], optional: [] },
-      dynamicData: {
-        Game: { value: null, confidence: "unknown", source: "none", appliedAutomatically: false, needsReview: true, userConfirmed: false, updatedAt: "x" },
-        EAN: { value: null, confidence: "unknown", source: "none", appliedAutomatically: false, needsReview: false, userConfirmed: false, updatedAt: "x" },
-      },
-      aiCost: null,
-    });
+  it("REQUIREMENT: reports the readiness the shared automation function computed", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow()]);
+    const readiness = { ready: false, completionPercent: 40, requiredComplete: 1, requiredTotal: 2, recommendedComplete: 0, recommendedTotal: 1 };
+    autoResolveAndPersistEbayAspects.mockResolvedValue({ status: "applied", readiness });
+    getEbayAspectDefinitions.mockResolvedValue({ status: "success", stale: false, grouped: { required: [], recommended: [], optional: [] } });
     const response = await suggestRoute(new Request("http://test"), params());
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.readiness.ready).toBe(false);
-    const patchCall = supabaseRequest.mock.calls.find(c => String(c[0]).includes("listing_marketplace_drafts?id=eq."));
-    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
-    const gameMessage = patchBody.validation_messages_json.find((m: { field: string }) => m.field === "Game");
-    const eanMessage = patchBody.validation_messages_json.find((m: { field: string }) => m.field === "EAN");
-    expect(gameMessage.severity).toBe("blocking");
-    expect(eanMessage.severity).toBe("suggestion");
-  });
-
-  it("REQUIREMENT: becomes ready once every required aspect is filled with high/medium confidence", async () => {
-    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow()] : path.startsWith("listing_drafts?") ? [productRow()] : []);
-    resolveEbayAspects.mockResolvedValue({
-      status: "success", stale: false,
-      grouped: { required: [{ name: "Game", usage: "REQUIRED", mode: "SELECTION_ONLY", cardinality: "SINGLE", maxLength: null, allowedValues: ["Pokémon TCG"] }], recommended: [], optional: [] },
-      dynamicData: { Game: { value: "Pokémon TCG", confidence: "high", source: "shared_facts", appliedAutomatically: true, needsReview: false, userConfirmed: false, updatedAt: "x" } },
-      aiCost: null,
-    });
-    const response = await suggestRoute(new Request("http://test"), params());
-    const body = await response.json();
-    expect(body.readiness.ready).toBe(true);
+    expect(body.readiness).toEqual(readiness);
   });
 
   it("an honest configuration error, never a fabricated result", async () => {
-    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow()] : path.startsWith("listing_drafts?") ? [productRow()] : []);
-    resolveEbayAspects.mockResolvedValue({ status: "not_configured" });
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow()]);
+    autoResolveAndPersistEbayAspects.mockResolvedValue({ status: "failed", reason: "not_configured" });
     const response = await suggestRoute(new Request("http://test"), params());
     expect(response.status).toBe(503);
   });

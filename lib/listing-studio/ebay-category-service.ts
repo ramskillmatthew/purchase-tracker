@@ -4,6 +4,7 @@ import { getCategorySuggestions, type EbayApiFailure, type EbayCategorySuggestio
 import { buildEbayCategorySearchTerms, type EbayCategorySearchInput } from "@/lib/listing-studio/ebay-category-search-terms";
 import { runEbayCategoryRanking } from "@/lib/listing-studio/ebay-category-ranking-ai";
 import { fixtureCategorySuggestions, FIXTURE_CATEGORY_TREE_ID, FIXTURE_CATEGORY_TREE_VERSION } from "@/lib/listing-studio/ebay-taxonomy-fixtures";
+import { describeEbayApiFailure, type EbayErrorCode } from "@/lib/listing-studio/ebay-error-codes";
 import type { EbayCategoryAlternative } from "@/lib/listing-studio/marketplace-types";
 
 /** The one eBay UK marketplace id this app ever requests a category tree
@@ -22,8 +23,16 @@ const MEDIUM_GAP_RATIO = 0.1;
 const MIN_SEARCH_TERMS_FOR_HIGH_CONFIDENCE = 2;
 
 export type EbayCategorySuggestionOutcome =
-  | { status: "success"; searchTerms: string; selected: EbayCategoryAlternative; alternatives: EbayCategoryAlternative[]; stale: boolean }
-  | { status: "no_results"; searchTerms: string }
+  // Phase 8 fix — "the live localhost UI must state when it is using
+  // fixture mode... do not fabricate production-like results using a
+  // hidden fixture." `usedFixture` is the one signal that makes that
+  // possible: true only when NO real eBay credentials are configured and
+  // this isn't a production deployment (see useFixture's own gate below)
+  // — never true once real credentials exist, even if they turn out to
+  // be invalid (an auth failure is reported honestly instead, never
+  // masked by a fixture).
+  | { status: "success"; searchTerms: string; selected: EbayCategoryAlternative; alternatives: EbayCategoryAlternative[]; stale: boolean; usedFixture: boolean }
+  | { status: "no_results"; searchTerms: string; usedFixture?: boolean }
   | { status: "not_configured" }
   | { status: "upstream_unavailable"; reason: EbayApiFailure["error"] };
 
@@ -76,7 +85,7 @@ export async function suggestEbayCategory(facts: EbayCategorySearchInput): Promi
     suggestions = suggestionsResult.data;
   }
 
-  if (suggestions.length === 0) return { status: "no_results", searchTerms };
+  if (suggestions.length === 0) return { status: "no_results", searchTerms, usedFixture: useFixture };
 
   const termCount = searchTerms.split(/\s+/).filter(Boolean).length;
   const ranked = [...suggestions].sort((a, b) => parseRelevancy(b.relevancy) - parseRelevancy(a.relevancy));
@@ -84,7 +93,7 @@ export async function suggestEbayCategory(facts: EbayCategorySearchInput): Promi
   if (ranked.length === 1) {
     const confidence = termCount >= MIN_SEARCH_TERMS_FOR_HIGH_CONFIDENCE ? "high" : "medium";
     const selected = toAlternative(ranked[0], 1, confidence, "Only matching eBay category for these search terms.");
-    return { status: "success", searchTerms, selected, alternatives: [], stale };
+    return { status: "success", searchTerms, selected, alternatives: [], stale, usedFixture: useFixture };
   }
 
   const top = parseRelevancy(ranked[0].relevancy);
@@ -94,12 +103,12 @@ export async function suggestEbayCategory(facts: EbayCategorySearchInput): Promi
   if (gapRatio >= HIGH_GAP_RATIO) {
     const selected = toAlternative(ranked[0], 1, "high", "Clearly the strongest match for these search terms.");
     const alternatives = ranked.slice(1, 4).map((s, index) => toAlternative(s, index + 2, "low", "Other possible match."));
-    return { status: "success", searchTerms, selected, alternatives, stale };
+    return { status: "success", searchTerms, selected, alternatives, stale, usedFixture: useFixture };
   }
   if (gapRatio >= MEDIUM_GAP_RATIO) {
     const selected = toAlternative(ranked[0], 1, "medium", "Best match for these search terms, worth a quick check.");
     const alternatives = ranked.slice(1, 4).map((s, index) => toAlternative(s, index + 2, "low", "Other possible match."));
-    return { status: "success", searchTerms, selected, alternatives, stale };
+    return { status: "success", searchTerms, selected, alternatives, stale, usedFixture: useFixture };
   }
 
   // Genuinely close race by relevancy alone — ask the bounded AI ranking
@@ -113,7 +122,7 @@ export async function suggestEbayCategory(facts: EbayCategorySearchInput): Promi
     const chosen = ranked.find(s => s.category.categoryId === aiOutcome.categoryId);
     if (chosen) {
       const selected = toAlternative(chosen, 1, "medium", aiOutcome.reason || "Selected as the best match among close candidates.");
-      return { status: "success", searchTerms, selected, alternatives: alternatives.filter(a => a.categoryId !== chosen.category.categoryId), stale };
+      return { status: "success", searchTerms, selected, alternatives: alternatives.filter(a => a.categoryId !== chosen.category.categoryId), stale, usedFixture: useFixture };
     }
   }
 
@@ -122,18 +131,22 @@ export async function suggestEbayCategory(facts: EbayCategorySearchInput): Promi
   // confidence so Strict/Balanced automation requires the owner to confirm
   // it rather than silently trusting a genuinely ambiguous pick.
   const selected = toAlternative(ranked[0], 1, "low", "Closest match, but several similar categories were found — please confirm.");
-  return { status: "success", searchTerms, selected, alternatives: alternatives.filter(a => a.categoryId !== selected.categoryId), stale };
+  return { status: "success", searchTerms, selected, alternatives: alternatives.filter(a => a.categoryId !== selected.categoryId), stale, usedFixture: useFixture };
 }
 
+// Phase 8 fix — precise, actionable messages (and a safe error CODE the
+// client can key UI off of) instead of one generic bucket. See
+// ebay-error-codes.ts's own comment for the proven 401 auth-failure
+// diagnosis that motivated this.
+export function describeEbayCategorySuggestionFailureDetailed(outcome: Extract<EbayCategorySuggestionOutcome, { status: "not_configured" | "upstream_unavailable" | "no_results" }>): { code: EbayErrorCode; message: string } {
+  if (outcome.status === "not_configured") return { code: "EBAY_NOT_CONFIGURED", message: "eBay category access is not configured on localhost." };
+  if (outcome.status === "no_results") return { code: "EBAY_NO_CATEGORY", message: "No suitable eBay UK category was returned for this product yet." };
+  return describeEbayApiFailure(outcome.reason);
+}
+
+/** @deprecated Prefer describeEbayCategorySuggestionFailureDetailed, which also carries a safe error code. Kept only for existing callers that only need the message text. */
 export function describeEbayCategorySuggestionFailure(outcome: Extract<EbayCategorySuggestionOutcome, { status: "not_configured" | "upstream_unavailable" | "no_results" }>): string {
-  switch (outcome.status) {
-    case "not_configured": return "eBay category access has not been configured yet.";
-    case "no_results": return "No eBay category could be found for this product yet.";
-    case "upstream_unavailable":
-      return outcome.reason === "rate_limited" ? "eBay is temporarily rate-limiting category lookups. Try again shortly."
-        : outcome.reason === "timeout" ? "eBay did not respond in time. Try again shortly."
-        : "We could not retrieve eBay categories. Try again shortly.";
-  }
+  return describeEbayCategorySuggestionFailureDetailed(outcome).message;
 }
 
 export { FIXTURE_CATEGORY_TREE_ID, FIXTURE_CATEGORY_TREE_VERSION };

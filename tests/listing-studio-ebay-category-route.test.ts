@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const { requireOwner, supabaseRequestAll, supabaseRequest, suggestEbayCategory, getCachedCategoryTreeId, getCategorySuggestions } = vi.hoisted(() => ({
+const { requireOwner, supabaseRequestAll, supabaseRequest, suggestEbayCategory, getCachedCategoryTreeId, getCategorySuggestions, autoResolveAndPersistEbayAspects } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   supabaseRequestAll: vi.fn(async (_path: string) => [] as unknown[]),
   supabaseRequest: vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 204 })),
   suggestEbayCategory: vi.fn(),
   getCachedCategoryTreeId: vi.fn(),
   getCategorySuggestions: vi.fn(),
+  autoResolveAndPersistEbayAspects: vi.fn(async () => ({ status: "failed" as const, reason: "not_configured" as const, code: "EBAY_NOT_CONFIGURED" as const, message: "x" })),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
@@ -24,6 +25,7 @@ vi.mock("@/lib/listing-studio/ebay-taxonomy-client", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/listing-studio/ebay-taxonomy-client")>();
   return { ...actual, getCategorySuggestions };
 });
+vi.mock("@/lib/listing-studio/ebay-aspect-persistence", () => ({ autoResolveAndPersistEbayAspects }));
 
 import { POST as suggestRoute, PATCH as patchRoute } from "@/app/api/listing-studio/groups/[draftId]/ebay-category/route";
 import { POST as searchRoute } from "@/app/api/listing-studio/groups/[draftId]/ebay-category/search/route";
@@ -52,6 +54,8 @@ function ebayDraftRow(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   requireOwner.mockClear(); supabaseRequestAll.mockReset(); supabaseRequest.mockReset();
   suggestEbayCategory.mockReset(); getCachedCategoryTreeId.mockReset(); getCategorySuggestions.mockReset();
+  autoResolveAndPersistEbayAspects.mockReset();
+  autoResolveAndPersistEbayAspects.mockResolvedValue({ status: "failed", reason: "not_configured", code: "EBAY_NOT_CONFIGURED", message: "x" });
   supabaseRequest.mockResolvedValue(new Response(null, { status: 204 }));
 });
 
@@ -86,7 +90,28 @@ describe("POST /api/listing-studio/groups/[draftId]/ebay-category", () => {
     expect(body.validation_messages_json.some((m: { code: string }) => m.code === "category_not_set")).toBe(false);
   });
 
-  it("a low-confidence result adds a review warning, never a blocker, and is still persisted", async () => {
+  it("REGRESSION: automatically triggers item-specific mapping once a category is genuinely applied (Phase 7)", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_drafts?") ? [productRow()] : path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow({ condition_value: "New" })] : []);
+    suggestEbayCategory.mockResolvedValue({
+      status: "success", searchTerms: "x", stale: false,
+      selected: { categoryId: "183454", categoryName: "CCG Sealed Boxes", categoryPath: "x", rank: 1, confidence: "high", reason: "x" }, alternatives: [],
+    });
+    await suggestRoute(new Request("http://test"), params());
+    expect(autoResolveAndPersistEbayAspects).toHaveBeenCalledWith("owner-1", DRAFT_ID);
+  });
+
+  it("REGRESSION: a genuine failure/exception while mapping item specifics never fails the category change itself, which already succeeded", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_drafts?") ? [productRow()] : path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow({ condition_value: "New" })] : []);
+    suggestEbayCategory.mockResolvedValue({
+      status: "success", searchTerms: "x", stale: false,
+      selected: { categoryId: "183454", categoryName: "CCG Sealed Boxes", categoryPath: "x", rank: 1, confidence: "high", reason: "x" }, alternatives: [],
+    });
+    autoResolveAndPersistEbayAspects.mockRejectedValue(new Error("aspect schema temporarily unavailable"));
+    const response = await suggestRoute(new Request("http://test"), params());
+    expect(response.status).toBe(200); // the category was already persisted successfully above
+  });
+
+  it("REQUIREMENT: a low-confidence result is left unresolved (never auto-selected) — top choices are still shown as alternatives", async () => {
     supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_drafts?") ? [productRow()] : path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow({ condition_value: "New" })] : []);
     suggestEbayCategory.mockResolvedValue({
       status: "success", searchTerms: "terms", stale: false,
@@ -96,19 +121,36 @@ describe("POST /api/listing-studio/groups/[draftId]/ebay-category", () => {
     const response = await suggestRoute(new Request("http://test"), params());
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.selected.confidence).toBe("low");
+    expect(body.selected).toBeNull();
+    expect(body.leftUnresolved).toBe(true);
+    // The mocked supabaseRequestAll doesn't simulate real persistence
+    // across the route's own patch-then-refetch, so the real proof that
+    // "top choices are still shown" is in the PATCH body itself — this is
+    // exactly what a real database would then return on the route's own
+    // re-fetch.
     const patchCall = supabaseRequest.mock.calls.find(c => String(c[0]).includes("listing_marketplace_drafts?id=eq."));
     const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
-    expect(patchBody.validation_messages_json.some((m: { code: string; severity: string }) => m.code === "category_needs_confirmation" && m.severity === "warning")).toBe(true);
+    expect(patchBody.category_id).toBeUndefined();
+    expect(patchBody.category_alternatives_json.length).toBeGreaterThan(0);
   });
 
-  it("REQUIREMENT: surfaces an honest 'not configured' response, never a fabricated category", async () => {
+  it("REQUIREMENT (Phase 8): surfaces an honest 'not configured' response, with a safe error code, never a fabricated category", async () => {
     supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_drafts?") ? [productRow()] : path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow()] : []);
     suggestEbayCategory.mockResolvedValue({ status: "not_configured" });
     const response = await suggestRoute(new Request("http://test"), params());
     expect(response.status).toBe(503);
     const body = await response.json();
-    expect(body.error).toMatch(/not been configured/i);
+    expect(body.error).toMatch(/not configured/i);
+    expect(body.code).toBe("EBAY_NOT_CONFIGURED");
+  });
+
+  it("REQUIREMENT (Phase 8 — proven root cause): a real eBay 401 (invalid_client) is reported as EBAY_AUTH_FAILED with a precise, actionable message — never the old generic 'try again shortly' bucket", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => path.startsWith("listing_drafts?") ? [productRow()] : path.startsWith("listing_marketplace_drafts?") ? [ebayDraftRow()] : []);
+    suggestEbayCategory.mockResolvedValue({ status: "upstream_unavailable", reason: "auth_failed" });
+    const response = await suggestRoute(new Request("http://test"), params());
+    const body = await response.json();
+    expect(body.code).toBe("EBAY_AUTH_FAILED");
+    expect(body.error).toBe("eBay rejected the local developer credentials.");
   });
 });
 
@@ -184,5 +226,35 @@ describe("PATCH /api/listing-studio/groups/[draftId]/ebay-category — manual ca
     const patchCall = supabaseRequest.mock.calls.find(c => String(c[0]).includes("listing_marketplace_drafts?id=eq."));
     const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
     expect(patchBody.category_alternatives_json.some((a: { categoryId: string }) => a.categoryId === "old-1")).toBe(true);
+  });
+
+  it("PROVEN ROOT CAUSE FIX: never wipes __packageSize/__productFacts/__contentGeneration on a manual category change — only real taxonomy aspect fields are cleared", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow({ dynamic_data_json: {
+      Game: { value: "Pokémon TCG", confidence: "high", source: "ai", appliedAutomatically: true, needsReview: false, userConfirmed: false, updatedAt: "x" },
+      __packageSize: { value: "medium_parcel", confidence: "high", source: "default", appliedAutomatically: true, needsReview: false, userConfirmed: false, updatedAt: "x" },
+      __productFacts: { brand: "On Running", updatedAt: "x" },
+    } })]);
+    getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "999", categoryName: "New Category" }, categoryTreeNodeAncestors: [], relevancy: "100.0" }] });
+    await patchRoute(jsonRequest({ categoryId: "999", searchTerms: "new category" }), params());
+    const patchCall = supabaseRequest.mock.calls.find(c => String(c[0]).includes("listing_marketplace_drafts?id=eq."));
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.dynamic_data_json.Game).toBeUndefined(); // stale real aspect from the OLD category — correctly cleared
+    expect(patchBody.dynamic_data_json.__packageSize.value).toBe("medium_parcel");
+    expect(patchBody.dynamic_data_json.__productFacts.brand).toBe("On Running");
+  });
+
+  it("REGRESSION: automatically triggers item-specific mapping once a category has been manually changed (Phase 7)", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow()]);
+    getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "999", categoryName: "New Category" }, categoryTreeNodeAncestors: [], relevancy: "100.0" }] });
+    await patchRoute(jsonRequest({ categoryId: "999", searchTerms: "new category" }), params());
+    expect(autoResolveAndPersistEbayAspects).toHaveBeenCalledWith("owner-1", DRAFT_ID);
+  });
+
+  it("REGRESSION: a genuine failure/exception while mapping item specifics never fails the manual category change itself, which already succeeded", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow()]);
+    getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "999", categoryName: "New Category" }, categoryTreeNodeAncestors: [], relevancy: "100.0" }] });
+    autoResolveAndPersistEbayAspects.mockRejectedValue(new Error("aspect schema temporarily unavailable"));
+    const response = await patchRoute(jsonRequest({ categoryId: "999", searchTerms: "new category" }), params());
+    expect(response.status).toBe(200); // the category change was already persisted successfully above
   });
 });

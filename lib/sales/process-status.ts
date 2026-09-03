@@ -20,6 +20,20 @@ export const SALES_PROCESS_STATUS_OPTIONS: ReadonlyArray<{
 
 const OPTION_BY_VALUE = new Map(SALES_PROCESS_STATUS_OPTIONS.map(option => [option.value, option]));
 
+/**
+ * The non-terminal operational states a sale sits in while it still needs work
+ * — the exact set the Sales page "Pending" tab and the Home "Pending Orders"
+ * widget both select on, regardless of sale date. Terminal states (completed /
+ * cancelled / returned_cancelled) are deliberately excluded. Single source of
+ * truth for "is this order pending" — never re-list these values inline.
+ */
+export const PENDING_PROCESS_STATUSES = ["awaiting_dispatch", "sent", "delivered_awaiting_payout", "return_in_process"] as const;
+export type PendingProcessStatus = typeof PENDING_PROCESS_STATUSES[number];
+
+export function isPendingProcessStatus(value: SalesProcessStatus | null | undefined): value is PendingProcessStatus {
+  return value != null && (PENDING_PROCESS_STATUSES as readonly string[]).includes(value);
+}
+
 export function isSalesProcessStatus(value: unknown): value is SalesProcessStatus {
   return typeof value === "string" && (salesProcessStatuses as readonly string[]).includes(value);
 }

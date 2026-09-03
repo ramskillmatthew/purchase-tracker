@@ -25,11 +25,23 @@ import { FALLBACK_MARKETPLACE_DRAFT_SETTINGS } from "@/lib/listing-studio/market
  * setup is account-wide, not something a local label can usefully stand in
  * for) — the database column exists so this can be added later without a
  * schema change.
+ *
+ * Fault 4 fix — collapsed by default. This panel used to render its full
+ * multi-field editor permanently, every time eBay UK/Both was selected,
+ * pushing everything below it down the page whether or not the owner
+ * actually wanted to change anything (most of the time, the account
+ * defaults just sit there unchanged). It now opens collapsed, showing a
+ * one-line summary of the current settings and an explicit "Edit
+ * settings" action; the full editor (unchanged, same fields, same save
+ * behaviour) only renders once expanded, with a "Done" action to collapse
+ * it again. A real <button aria-expanded> drives it, so it's keyboard-
+ * operable (Enter/Space to toggle) with no new focus trap.
  */
 export function EbayDraftSettingsPanel() {
   const [settings, setSettings] = useState<MarketplaceDraftSettings>(FALLBACK_MARKETPLACE_DRAFT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,9 +71,26 @@ export function EbayDraftSettingsPanel() {
 
   if (loading) return null;
 
+  if (!expanded) {
+    return (
+      <div className="ebay-settings-panel ebay-settings-panel-collapsed data-panel">
+        <div className="ebay-settings-summary-row">
+          <div>
+            <h3 className="ebay-settings-title">eBay UK draft settings</h3>
+            <p className="ebay-settings-summary-line">{summariseSettings(settings)}</p>
+          </div>
+          <button type="button" className="button-secondary" aria-expanded={false} onClick={() => setExpanded(true)}>Edit settings</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="ebay-settings-panel data-panel">
-      <h3 className="ebay-settings-title">eBay UK draft settings</h3>
+      <div className="ebay-settings-summary-row">
+        <h3 className="ebay-settings-title">eBay UK draft settings</h3>
+        <button type="button" className="button-secondary" aria-expanded={true} onClick={() => setExpanded(false)}>Done</button>
+      </div>
       <p className="ebay-settings-caption">Applies to eBay drafts you generate next. A specific draft&apos;s own edits always take priority over these defaults.</p>
 
       <div className="field">
@@ -143,4 +172,15 @@ export function EbayDraftSettingsPanel() {
       </div>
     </div>
   );
+}
+
+function summariseSettings(settings: MarketplaceDraftSettings): string {
+  const parts = [
+    contentModeLabels[settings.contentMode],
+    "Buy It Now",
+    `Qty ${settings.quantity}`,
+    settings.packageSize ? packageSizeLabels[settings.packageSize] : "Package size not set",
+    `${automationModeLabels[settings.automationMode]} automation`,
+  ];
+  return parts.join(" · ");
 }

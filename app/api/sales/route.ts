@@ -8,7 +8,7 @@ import { groupItemDescriptions } from "@/lib/sales/order-summary";
 import { poundsToPence } from "@/lib/sales/money";
 import { computeHistoryKpis, compareHistoryOrders, HISTORY_PAGE_SIZES, itemGroupsText, type HistoryDirection, type HistorySort, type SalesHistoryResponse } from "@/lib/sales/history";
 import { londonToday, parseDateRangePreset, resolveDateFilter } from "@/lib/sales/report-date-range";
-import { effectiveSalesProcessStatus } from "@/lib/sales/process-status";
+import { effectiveSalesProcessStatus, isPendingProcessStatus } from "@/lib/sales/process-status";
 import type { SaleItem, SalesOrder, SalesOrderListItem } from "@/lib/types";
 
 /** How many of the most recent sales the list view shows — a bounded "recent sales" list, not a full paginated sales history browser (that belongs to a later reporting stage). */
@@ -153,7 +153,7 @@ export async function GET(request: Request) {
     let filtered = await hydrateOrders(baseOrders) as (SalesOrderListItem & { categorySnapshots: string[] })[];
     filtered = filtered.filter(order => {
       const processStatus = effectiveSalesProcessStatus(order);
-      if (status === "pending" && !["awaiting_dispatch", "sent", "delivered_awaiting_payout", "return_in_process"].includes(processStatus ?? "")) return false;
+      if (status === "pending" && !isPendingProcessStatus(processStatus)) return false;
       if (status === "completed" && processStatus !== "completed") return false;
       const label = order.platform === "other" && order.custom_platform_name ? order.custom_platform_name : order.platform;
       if (platform && label.toLowerCase() !== platform && order.platform !== platform) return false;

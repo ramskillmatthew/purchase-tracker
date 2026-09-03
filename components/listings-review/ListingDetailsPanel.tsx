@@ -10,9 +10,15 @@ import {
   WORKFLOW_STATUS_LABELS, WORKFLOW_STATUS_TONE, READINESS_TONE_READY, READINESS_TONE_NEEDS_REVIEW,
   computeWorkflowSecondaryLine, type ExtensionWorkflowStatus,
 } from "@/lib/listing-studio/extension-workflow-status";
+import {
+  EBAY_WORKFLOW_STATUS_LABELS, EBAY_WORKFLOW_STATUS_TONE, computeEbayWorkflowSecondaryLine, isEbayWorkflowInProgress,
+  type EbayWorkflowStatus,
+} from "@/lib/listing-studio/ebay-workflow-status";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
 import SellingPriceField from "./SellingPriceField";
+import EbaySellingPriceField from "./EbaySellingPriceField";
+import EbayPolicySelectors, { type EbayPolicyOption, type EbayLocationOption, type EbayPolicySelection } from "./EbayPolicySelectors";
 
 // Same readiness labels/tones ListingsTable.tsx uses for its own fallback —
 // kept in sync deliberately (not imported, since it's a small literal
@@ -20,6 +26,21 @@ import SellingPriceField from "./SellingPriceField";
 // the row's own, never a second status language.
 const READINESS_LABELS: Record<ListingReviewStatus, string> = { ready: "Ready", needs_review: "Need review", edited: "Ready" };
 const READINESS_TONE: Record<ListingReviewStatus, string> = { ready: READINESS_TONE_READY, needs_review: READINESS_TONE_NEEDS_REVIEW, edited: READINESS_TONE_READY };
+
+/** Stage 6 (eBay draft batches) — the eBay tab's own workflow-status line,
+ * reusing the exact same WorkflowStatus dot component ListingsTable.tsx's
+ * own resolveWorkflowDisplay uses for its eBay column, so the inspector
+ * can never show a different status language than the row it's showing
+ * details for. "Content ready"/"Needs review" (content readiness, before
+ * any draft attempt) reuses the same green/amber readiness tones. */
+function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
+  const label = ebay.workflowStatus ? EBAY_WORKFLOW_STATUS_LABELS[ebay.workflowStatus] : (ebay.contentReady ? "Content ready" : "Needs review");
+  const tone = ebay.workflowStatus ? EBAY_WORKFLOW_STATUS_TONE[ebay.workflowStatus] : (ebay.contentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
+  const secondaryLine = ebay.workflowStatus
+    ? computeEbayWorkflowSecondaryLine({ workflowStatus: ebay.workflowStatus, queuePosition: ebay.queuePosition, errorMessage: ebay.errorMessage })
+    : (ebay.contentReady ? "All required information is complete." : null);
+  return <WorkflowStatus label={label} tone={tone} pulse={isEbayWorkflowInProgress(ebay.workflowStatus)} secondaryLine={secondaryLine} />;
+}
 
 export type ListingDetails = {
   id: string;
@@ -66,6 +87,28 @@ export type ListingDetails = {
   detail: string | null;
   vintedDraftId: string | null;
   errorMessage: string | null;
+  // Corrective pass (canonical unified row model) — false for an eBay-only
+  // product (never generated for Vinted at all). The Vinted tab is only
+  // ever rendered when this is true — symmetric with `ebay` below.
+  hasVintedPreparation: boolean;
+  // Stage 6 (eBay draft batches) — null when no eBay preparation exists
+  // for this listing (see the product spec's own "Never fabricate an eBay
+  // tab from a Vinted preparation" rule); the eBay tab is only ever
+  // rendered when this is non-null.
+  ebay: EbayTabData | null;
+};
+
+export type EbayTabData = {
+  marketplaceDraftId: string;
+  contentReady: boolean;
+  sellingPricePence: number | null;
+  costPence: number | null;
+  profitPence: number | null;
+  selection: EbayPolicySelection;
+  offerId: string | null;
+  workflowStatus: EbayWorkflowStatus | null;
+  queuePosition: number | null;
+  errorMessage: string | null;
 };
 
 /**
@@ -86,6 +129,7 @@ function ListingDetailsPanel({
   listing, position, markingReady, assigningCategory, reassessingAudience,
   onOpenCarousel, onPreview, onEditFields, onAssignCategory, onReassessAudience, onMarkReady, onSellingPriceSaved,
   onClose, onPrevious, onNext, onSendToExtension,
+  ebayPolicies, ebayLocations, onEbaySettingsSaved, activeWorkflowChannel,
 }: {
   listing: ListingDetails | null;
   // null when nothing is selected, OR when the selected listing has been
@@ -106,12 +150,53 @@ function ListingDetailsPanel({
   onPrevious: () => void;
   onNext: () => void;
   onSendToExtension: (listingId: string) => void;
+  // Stage 6 (eBay draft batches) — the connected account's own currently-
+  // synced policies/locations, fetched once by the parent workspace (never
+  // refetched per listing).
+  ebayPolicies: EbayPolicyOption[];
+  ebayLocations: EbayLocationOption[];
+  onEbaySettingsSaved: (listingId: string, patch: { sellingPricePence?: number } & Partial<EbayPolicySelection>) => void;
+  // Corrective pass — the table's own Workflow-column active channel
+  // (Vinted/eBay toggle). Used ONLY to pick which tab to prefer the FIRST
+  // time a listing is selected while it has both channels available —
+  // switching this later never forces the inspector's own tab to jump
+  // out from under the user (see the effect below's own comment).
+  activeWorkflowChannel: "VINTED" | "EBAY_UK";
 }) {
   // The thumbnail strip's own "which photo is the main image right now"
   // state — reset whenever the selected listing itself changes, never
   // carried over from a previously-viewed listing's photo selection.
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null);
   useEffect(() => { setActivePhotoId(null); }, [listing?.id]);
+
+  // Corrective pass — which marketplace tab is showing. A row can now
+  // genuinely have ONLY Vinted, ONLY eBay, or both (see the listings-
+  // review route's own unified-row-model header comment) — this is no
+  // longer "always default to Vinted". On every listing change:
+  //  1. If the CURRENTLY selected tab is still valid for the new listing
+  //     (moving between two rows that both have, say, an eBay
+  //     preparation), keep it — "preserve the selected tab where
+  //     sensible when moving between compatible rows".
+  //  2. Otherwise prefer whichever channel the table's own active
+  //     Workflow toggle is currently showing, IF this listing has that
+  //     channel — "prefer the currently selected workflow channel when
+  //     initially selecting the details tab if that channel exists".
+  //  3. Otherwise fall back to whichever single channel this listing
+  //     actually has.
+  const [activeTab, setActiveTab] = useState<"VINTED" | "EBAY_UK">("VINTED");
+  useEffect(() => {
+    if (!listing) return;
+    setActiveTab(current => {
+      if (current === "VINTED" && listing.hasVintedPreparation) return "VINTED";
+      if (current === "EBAY_UK" && listing.ebay) return "EBAY_UK";
+      if (activeWorkflowChannel === "EBAY_UK" && listing.ebay) return "EBAY_UK";
+      if (activeWorkflowChannel === "VINTED" && listing.hasVintedPreparation) return "VINTED";
+      if (listing.hasVintedPreparation) return "VINTED";
+      if (listing.ebay) return "EBAY_UK";
+      return "VINTED"; // defensive — a row with neither channel should not normally reach here
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately keyed on listing.id only: activeWorkflowChannel is read but must NOT itself retrigger this effect (that would yank the tab out from under the user just because they toggled the table's own Workflow view while still looking at the same listing — see this effect's own doc comment, point 1).
+  }, [listing?.id]);
 
   if (!listing) {
     return <aside className="lr-inspector lr-inspector-empty" aria-label="Selected listing">
@@ -128,7 +213,13 @@ function ListingDetailsPanel({
   // manual audience choice protects this listing from AI changes.
   const needsAudienceReview = deriveDraftAudience(listing.vintedAudience) === "unknown";
   const canReassessWithPhotos = listing.vintedCategoryStatus === "audience_missing" && listing.vintedAudienceSource !== "manual";
-  const canSend = listing.status !== "needs_review" && (listing.workflowStatus === null || listing.workflowStatus === "failed");
+  // Corrective pass — an eBay-only listing (hasVintedPreparation false)
+  // must never offer Send to extension: its Vinted readiness fields are
+  // naturally always "needs_review" anyway (no title/description/etc.
+  // ever generated), but this makes the rule explicit and tested rather
+  // than an accidental side effect — same reasoning as
+  // ListingsTable.tsx's own rowMenuItems fix.
+  const canSend = listing.hasVintedPreparation && listing.status !== "needs_review" && (listing.workflowStatus === null || listing.workflowStatus === "failed");
   const displayLabel = listing.workflowStatus ? WORKFLOW_STATUS_LABELS[listing.workflowStatus] : READINESS_LABELS[listing.status];
   const displayTone = listing.workflowStatus ? WORKFLOW_STATUS_TONE[listing.workflowStatus] : READINESS_TONE[listing.status];
   const secondaryLine = computeWorkflowSecondaryLine({
@@ -139,6 +230,22 @@ function ListingDetailsPanel({
   const hasNext = position !== null && position.index < position.total - 1;
   const mainPhotoId = activePhotoId ?? listing.coverPhotoId;
   const thumbnailIds = listing.photoIds.slice(0, 5);
+
+  // Corrective pass — a render-time safety net for the tab-selection
+  // effect above: React effects run AFTER the render they were triggered
+  // by, so the very first render of a freshly selected listing could
+  // still be showing a STALE `activeTab` value that isn't actually valid
+  // for this listing (e.g. "EBAY_UK" left over from the previous
+  // selection, on a listing that has no eBay preparation at all) for one
+  // frame before the effect corrects it. Resolving it here too means the
+  // rendered content is ALWAYS valid for the current listing, never just
+  // eventually valid.
+  const showVintedTab = listing.hasVintedPreparation;
+  const showEbayTab = listing.ebay !== null;
+  const resolvedTab: "VINTED" | "EBAY_UK" =
+    (activeTab === "VINTED" && showVintedTab) || (activeTab === "EBAY_UK" && showEbayTab)
+      ? activeTab
+      : showVintedTab ? "VINTED" : showEbayTab ? "EBAY_UK" : "VINTED";
 
   return <aside className="lr-inspector" aria-label="Selected listing">
     <div className="lr-inspector-header">
@@ -184,14 +291,32 @@ function ListingDetailsPanel({
 
     <h3 className="lr-inspector-title">{listing.generatedTitle || "Untitled listing"}</h3>
     <p className="lr-inspector-sku">{listing.sku || "No SKU"} {listing.ukSize && `· UK ${listing.ukSize}`}</p>
-    <WorkflowStatus label={displayLabel} tone={displayTone} pulse={listing.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
+
+    {/* Corrective pass — the marketplace tab strip is only ever rendered
+        when there is genuinely something to switch between: BOTH a real
+        Vinted preparation AND a real eBay preparation. A Vinted-only
+        listing shows no strip at all (just its Vinted content directly —
+        never a fake single-option tab), and likewise for an eBay-only
+        listing. Switching tabs never touches the other marketplace's own
+        stored data — each tab reads only its own fields. */}
+    {showVintedTab && showEbayTab && <div className="lr-inspector-tabs" role="tablist" aria-label="Marketplace">
+      <button type="button" role="tab" aria-selected={resolvedTab === "VINTED"} className={resolvedTab === "VINTED" ? "lr-inspector-tab active" : "lr-inspector-tab"} onClick={() => setActiveTab("VINTED")}>Vinted</button>
+      <button type="button" role="tab" aria-selected={resolvedTab === "EBAY_UK"} className={resolvedTab === "EBAY_UK" ? "lr-inspector-tab active" : "lr-inspector-tab"} onClick={() => setActiveTab("EBAY_UK")}>eBay</button>
+    </div>}
+
+    {resolvedTab === "VINTED"
+      ? <WorkflowStatus label={displayLabel} tone={displayTone} pulse={listing.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
+      : listing.ebay && <EbayWorkflowStatusBlock ebay={listing.ebay} />}
 
     <div className="lr-inspector-money">
-      <span><span className="lr-inspector-money-label">Cost</span>{listing.costPence !== null ? formatPenceAsGBP(listing.costPence) : "—"}</span>
-      <span><span className="lr-inspector-money-label">Price</span>{listing.sellingPricePence !== null ? formatPenceAsGBP(listing.sellingPricePence) : "—"}</span>
-      <span className={listing.profitPence !== null && listing.profitPence > 0 ? "lr-profit-positive" : undefined}>
-        <span className="lr-inspector-money-label">Profit</span>{listing.profitPence !== null ? formatPenceAsGBP(listing.profitPence) : "—"}
-      </span>
+      <span><span className="lr-inspector-money-label">Cost</span>{(resolvedTab === "VINTED" ? listing.costPence : listing.ebay?.costPence ?? null) !== null ? formatPenceAsGBP((resolvedTab === "VINTED" ? listing.costPence : listing.ebay!.costPence)!) : "—"}</span>
+      <span><span className="lr-inspector-money-label">Price</span>{(resolvedTab === "VINTED" ? listing.sellingPricePence : listing.ebay?.sellingPricePence ?? null) !== null ? formatPenceAsGBP((resolvedTab === "VINTED" ? listing.sellingPricePence : listing.ebay!.sellingPricePence)!) : "—"}</span>
+      {(() => {
+        const profitPence = resolvedTab === "VINTED" ? listing.profitPence : listing.ebay?.profitPence ?? null;
+        return <span className={profitPence !== null && profitPence > 0 ? "lr-profit-positive" : undefined}>
+          <span className="lr-inspector-money-label">Profit</span>{profitPence !== null ? formatPenceAsGBP(profitPence) : "—"}
+        </span>;
+      })()}
     </div>
 
     <dl className="lr-inspector-fields">
@@ -207,24 +332,28 @@ function ListingDetailsPanel({
         that column wider than its fair share (CSS grid items default to
         min-width: auto, not 0), pushing the whole card into horizontal
         overflow. Full width + explicit containment fixes this properly
-        rather than truncating real category information away. */}
+        rather than truncating real category information away. Brand/
+        Condition/Colour/Category are shared review data (sourced from the
+        product's own structured fields, common ground for both
+        marketplaces) — shown identically regardless of the active tab. */}
     <dl className="lr-inspector-category">
       <dt>Category</dt>
       <dd>{listing.vintedCategoryPath || listing.productType || "Not set"}</dd>
     </dl>
 
-    {needsAudienceReview && listing.vintedAudienceEvidence && listing.vintedAudienceEvidence.length > 0 && <div className="lr-inspector-audience-evidence">
+    {resolvedTab === "VINTED" && needsAudienceReview && listing.vintedAudienceEvidence && listing.vintedAudienceEvidence.length > 0 && <div className="lr-inspector-audience-evidence">
       <p className="lr-inspector-audience-evidence-label">Audience evidence considered so far</p>
       <ul role="list">
         {listing.vintedAudienceEvidence.map(item => <li key={item}>{item}</li>)}
       </ul>
     </div>}
 
-    {/* Purchase-price lookup + manual Vinted selling price — kept close to
-        SKU/selling price per that milestone's own placement requirement.
-        The purchase price is read-only and never copied into the selling-
-        price field below. */}
-    <div className="lr-inspector-purchase">
+    {/* Purchase-price lookup + manual selling price, per active tab — kept
+        close to SKU/selling price per Milestone 6's own placement
+        requirement. The purchase price is read-only and never copied into
+        either selling-price field. Saving one marketplace's price/policies
+        never overwrites the other's — each tab posts to its own route. */}
+    {resolvedTab === "VINTED" ? <div className="lr-inspector-purchase">
       <p className="lr-inspector-purchase-line">{describePurchaseMatch(listing.purchaseMatch)}</p>
       {listing.purchaseMatch.status === "duplicate" && <ul className="lr-inspector-purchase-duplicates" role="list">
         {listing.purchaseMatch.matches.map((match, index) => <li key={index}>
@@ -237,7 +366,22 @@ function ListingDetailsPanel({
         sellingPricePence={listing.sellingPricePence}
         onSaved={pence => onSellingPriceSaved(listing.id, pence)}
       />
-    </div>
+    </div> : listing.ebay && <div className="lr-inspector-purchase">
+      <p className="lr-inspector-purchase-line">{describePurchaseMatch(listing.purchaseMatch)}</p>
+      <EbaySellingPriceField
+        key={listing.id}
+        listingId={listing.id}
+        sellingPricePence={listing.ebay.sellingPricePence}
+        onSaved={pence => onEbaySettingsSaved(listing.id, { sellingPricePence: pence })}
+      />
+      <EbayPolicySelectors
+        listingId={listing.id}
+        policies={ebayPolicies}
+        locations={ebayLocations}
+        selection={listing.ebay.selection}
+        onSaved={patch => onEbaySettingsSaved(listing.id, patch)}
+      />
+    </div>}
 
     <div className="lr-inspector-actions">
       <button type="button" className="button-secondary" onClick={() => onEditFields(listing.id)}>Edit</button>
@@ -245,11 +389,16 @@ function ListingDetailsPanel({
       {/* Assign category/Reassess audience/Mark ready/Send-Resend all
           remain fully working — relocated here (rather than the primary
           row) to match the reference's exact "Edit, Preview" action row
-          without removing any existing functionality. */}
+          without removing any existing functionality. Corrective pass —
+          Assign category/Reassess audience/Mark ready are all fundamentally
+          VINTED concepts (they read/write vinted_category_id/
+          vinted_audience/review_marked_ready_at) and are now gated behind
+          hasVintedPreparation, exactly like Send to extension already was
+          — an eBay-only listing offers none of them. */}
       <OverflowMenu label="More actions for this listing" items={[
-        { label: assigningCategory ? "Assigning…" : "Assign category", onClick: () => onAssignCategory(listing.id), disabled: assigningCategory },
-        ...(canReassessWithPhotos ? [{ label: reassessingAudience ? "Reassessing…" : "Reassess audience", onClick: () => onReassessAudience(listing.id), disabled: reassessingAudience }] : []),
-        { label: markingReady ? "Marking ready…" : "Mark ready", onClick: () => onMarkReady(listing.id), disabled: markingReady || listing.status !== "edited" },
+        ...(listing.hasVintedPreparation ? [{ label: assigningCategory ? "Assigning…" : "Assign category", onClick: () => onAssignCategory(listing.id), disabled: assigningCategory }] : []),
+        ...(listing.hasVintedPreparation && canReassessWithPhotos ? [{ label: reassessingAudience ? "Reassessing…" : "Reassess audience", onClick: () => onReassessAudience(listing.id), disabled: reassessingAudience }] : []),
+        ...(listing.hasVintedPreparation ? [{ label: markingReady ? "Marking ready…" : "Mark ready", onClick: () => onMarkReady(listing.id), disabled: markingReady || listing.status !== "edited" }] : []),
         ...(canSend ? [{ label: listing.workflowStatus === "failed" ? "Resend to extension" : "Send to extension", onClick: () => onSendToExtension(listing.id) }] : []),
       ]} />
     </div>

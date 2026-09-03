@@ -35,10 +35,17 @@ function patchRequest(body: Record<string, unknown>) {
 // Matches fieldsBody()'s own default vintedAudience ("womens") so
 // audienceChanged is false unless a test deliberately overrides one or the
 // other — keeps the manual-category-pick tests focused on just that.
+// Every pre-existing test in this file implicitly assumes a Vinted draft
+// already exists (this dialog/route long predates marketplace isolation)
+// — generated_title/generated_description default to non-null here so
+// that established behaviour keeps being exercised unchanged; the
+// dedicated "no Vinted draft yet" describe block below overrides these to
+// null to exercise the actual marketplace-isolation fix.
 function draftRow(overrides: Record<string, unknown> = {}) {
   return {
     id: DRAFT_ID, vinted_audience: "womens", vinted_audience_source: "ai",
-    vinted_category_id: null, vinted_category_path: null, vinted_category_source: null,
+    vinted_category_id: null, vinted_category_path: null, vinted_category_source: null, vinted_category_status: null,
+    generated_title: "Existing Title", generated_description: "Existing description.",
     ...overrides,
   };
 }
@@ -313,5 +320,53 @@ describe("PATCH /api/listing-studio/groups/[draftId]/fields — business-rule fo
     const response = await fieldsRoute(patchRequest(fieldsBody({ model: "Clifton 9", productType: "Trainers", vintedAudience: "womens" })), params());
     const body = await response.json();
     expect(body.model).toBe("Clifton 9");
+  });
+});
+
+describe("PATCH /api/listing-studio/groups/[draftId]/fields — marketplace-isolation fix: a shared-fields edit must never silently CREATE a Vinted draft", () => {
+  it("PROVEN ROOT CAUSE FIX: a product with NO Vinted draft yet (e.g. an eBay-only generated product) saves the shared fields, but generated_title/generated_description stay null — never fabricated as a side effect of an unrelated edit", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ generated_title: null, generated_description: null })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ brand: "New Balance", sku: "1699" })), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.brand).toBe("New Balance"); // the shared fact IS saved
+    expect(body.sku).toBe("1699");
+    expect(body.generatedTitle).toBeNull();
+    expect(body.generatedDescription).toBeNull();
+    const patchCall = supabaseRequest.mock.calls.find(c => (c[1] as RequestInit)?.method === "PATCH");
+    const patchBody = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(patchBody.generated_title).toBeNull();
+    expect(patchBody.generated_description).toBeNull();
+  });
+
+  it("PROVEN ROOT CAUSE FIX: the same product's Vinted category is never resolved/written either — no manual-pick validation, no AI recompute, no listing_analysis_runs audit row", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ generated_title: null, generated_description: null, vinted_category_id: null })]);
+    // Attempts a manual category pick AND an audience change in the same
+    // save — both would normally trigger category resolution.
+    const response = await fieldsRoute(patchRequest(fieldsBody({ vintedAudience: "mens", vintedCategoryId: 1906 })), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.vintedCategoryId).toBeNull();
+    expect(body.vintedCategorySource).toBeNull();
+    // Only the draft-ownership lookup ran — no getVintedCategoryById lookup at all.
+    expect(supabaseRequestAll).toHaveBeenCalledTimes(1);
+    const analysisRunCalls = supabaseRequest.mock.calls.filter(c => typeof c[0] === "string" && c[0].startsWith("listing_analysis_runs"));
+    expect(analysisRunCalls).toHaveLength(0);
+  });
+
+  it("REQUIREMENT: the shared vinted_audience field is still saved even with no Vinted draft yet — audience is reused by eBay's own title/description gender selection, not Vinted-exclusive", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow({ generated_title: null, generated_description: null, vinted_audience: "unknown" })]);
+    const response = await fieldsRoute(patchRequest(fieldsBody({ vintedAudience: "mens", vintedCategoryId: null })), params());
+    const body = await response.json();
+    expect(body.vintedAudience).toBe("mens");
+    expect(body.vintedAudienceSource).toBe("manual");
+  });
+
+  it("REQUIREMENT: once a Vinted draft genuinely exists (generated_title/generated_description already set), the exact same edit DOES regenerate the derived title/description — the fix is scoped to the missing-draft case only", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([draftRow()]); // default draftRow() already has generated_title/generated_description set
+    const response = await fieldsRoute(patchRequest(fieldsBody({ brand: "New Balance", model: "2002R", productType: "Trainers" })), params());
+    const body = await response.json();
+    expect(body.generatedTitle).toContain("New Balance 2002R");
+    expect(body.generatedTitle).not.toBeNull();
   });
 });

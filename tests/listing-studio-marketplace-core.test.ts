@@ -2,11 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import { computeMarketplaceReadiness } from "@/lib/listing-studio/marketplace-readiness";
 import { resolveMarketplaceSettings, defaultContentModeForSourceType, FALLBACK_MARKETPLACE_DRAFT_SETTINGS } from "@/lib/listing-studio/marketplace-settings";
-import { generateEbayTitle, generateEbayDescription, EBAY_TITLE_MAX_LENGTH } from "@/lib/listing-studio/ebay-listing-template";
-import { buildEbayDraftFromGeneratedFields } from "@/lib/listing-studio/ebay-draft-generation";
 import { marketplacesForTarget } from "@/lib/listing-studio/marketplace-types";
 import { marketplaceDraftSettingsSchema, sharedFactsSchema } from "@/lib/validation/listing-studio-marketplace";
-import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 
 describe("marketplacesForTarget", () => {
   it("BOTH expands to both real marketplaces, never stored as its own value", () => {
@@ -49,6 +46,14 @@ describe("computeMarketplaceReadiness", () => {
     const readiness = computeMarketplaceReadiness({
       hasCategory: false, hasCondition: false, hasTitle: false, hasDescriptionOrGenerationPath: false,
       hasPhoto: false, hasPrice: false, hasQuantity: false, hasSufficientSellingSettings: false,
+      // Phase 4/5 fix — explicit here, matching this test's own "nothing
+      // at all to check" premise: hasGeneratedContent defaults to true
+      // when a caller omits it entirely (existing-caller backward
+      // compatibility — every REAL caller now passes it explicitly, see
+      // ebay-draft-generation.ts and friends), but that default would
+      // otherwise contradict this specific test's own "all false -> 0%"
+      // scenario.
+      hasGeneratedContent: false,
       requiredAspectsFilled: [], recommendedAspectsFilled: [],
     });
     expect(readiness.completionPercent).toBe(0);
@@ -93,74 +98,17 @@ describe("defaultContentModeForSourceType", () => {
   });
 });
 
-describe("generateEbayTitle / generateEbayDescription — professional tone, never inventing facts", () => {
-  const fullFields = { brand: "Nike", model: "Pegasus 40", productType: "Running Trainers", colours: ["Black", "White"], material: "Mesh", ukSize: "9", conditionLabel: "Used" };
+// The old deterministic-only generateEbayTitle/generateEbayDescription
+// (lib/listing-studio/ebay-listing-template.ts) is superseded and deleted
+// — see lib/listing-studio/ebay-title-builder.ts (composition/validation)
+// and tests/listing-studio-ebay-title-builder.test.ts for its replacement,
+// which fixes the exact reported "On Running ... Running Trainers"
+// duplication this old module never guarded against.
 
-  it("composes brand/model/product type, colour and size in the documented order", () => {
-    expect(generateEbayTitle(fullFields)).toBe("Nike Pegasus 40 Running Trainers - Black White - Size UK 9");
-  });
-
-  it("REGRESSION: never exceeds eBay's real title length limit, truncating at a whole word", () => {
-    const longFields = { ...fullFields, model: "A".repeat(100) };
-    const title = generateEbayTitle(longFields);
-    expect(title.length).toBeLessThanOrEqual(EBAY_TITLE_MAX_LENGTH);
-    expect(title.endsWith(" ")).toBe(false);
-  });
-
-  it("omits a missing field's segment rather than producing a malformed double dash", () => {
-    const title = generateEbayTitle({ brand: "Nike", model: null, productType: null, colours: [], material: null, ukSize: null, conditionLabel: null });
-    expect(title).toBe("Nike");
-    expect(title).not.toContain("--");
-  });
-
-  it("description only states facts actually supplied — never invents a missing one", () => {
-    const description = generateEbayDescription({ brand: null, model: null, productType: null, colours: [], material: null, ukSize: null, conditionLabel: null });
-    expect(description).toBe("");
-  });
-
-  it("description includes exactly the supplied facts, no emoji, no marketing filler", () => {
-    const description = generateEbayDescription(fullFields);
-    expect(description).toContain("Nike Pegasus 40 Running Trainers.");
-    expect(description).toContain("Colour: Black, White.");
-    expect(description).toContain("Material: Mesh.");
-    expect(description).toContain("Size: UK 9.");
-    expect(description).toContain("Condition: Used.");
-    expect(description).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u);
-  });
-});
-
-describe("buildEbayDraftFromGeneratedFields", () => {
-  function fields(overrides: Record<string, unknown> = {}): ListingGenerationFields {
-    return {
-      brand: { value: "Nike", confidence: "high" }, model: { value: "Pegasus", confidence: "high" },
-      productType: { value: "Trainers", confidence: "high" }, colours: { value: ["Black"], confidence: "high" },
-      material: { value: "Mesh", confidence: "high" },
-      sourceSize: { system: "UK", value: "9", gender: null, confidence: "high" },
-      vintedAudience: { value: "womens", confidence: "high" },
-      vintedAudienceEvidence: [], sku: { value: "1648", confidence: "high" }, notes: null,
-      ...overrides,
-    } as ListingGenerationFields;
-  }
-
-  it("REQUIREMENT: never claims ready when category/condition are unresolved — always needs_information at this stage", () => {
-    const result = buildEbayDraftFromGeneratedFields({ fields: fields(), ukSize: "9", hasPhoto: true, pricePence: 2000, quantity: 1 });
-    expect(result.status).toBe("needs_information");
-    expect(result.readiness.ready).toBe(false);
-    expect(result.conditionValue).toBeNull();
-  });
-
-  it("reuses the exact same structured facts already extracted for Vinted — no second AI call needed", () => {
-    const result = buildEbayDraftFromGeneratedFields({ fields: fields(), ukSize: "9", hasPhoto: true, pricePence: 2000, quantity: 1 });
-    expect(result.title).toBe("Nike Pegasus Trainers - Black - Size UK 9");
-  });
-
-  it("flags missing price and quantity as blocking, but not when they're supplied", () => {
-    const missing = buildEbayDraftFromGeneratedFields({ fields: fields(), ukSize: "9", hasPhoto: true, pricePence: null, quantity: null });
-    expect(missing.validationMessages.map(m => m.code)).toEqual(expect.arrayContaining(["price_not_set", "quantity_not_set"]));
-    const present = buildEbayDraftFromGeneratedFields({ fields: fields(), ukSize: "9", hasPhoto: true, pricePence: 2000, quantity: 1 });
-    expect(present.validationMessages.map(m => m.code)).not.toEqual(expect.arrayContaining(["price_not_set", "quantity_not_set"]));
-  });
-});
+// buildEbayDraftFromGeneratedFields is now async and AI-driven — see
+// tests/listing-studio-ebay-draft-generation.test.ts for its own
+// dedicated, properly-mocked coverage (this file keeps only the pure,
+// synchronous marketplace-core pieces).
 
 describe("marketplaceDraftSettingsSchema", () => {
   it("accepts a partial settings object", () => {

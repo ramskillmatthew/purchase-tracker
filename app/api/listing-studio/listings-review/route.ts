@@ -6,6 +6,20 @@ import type { ListingGenerationFields } from "@/lib/listing-studio/listing-gener
 import { getVintedCategoriesByIds, isPublishableVintedCategory } from "@/lib/listing-studio/vinted-categories-data";
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { buildPurchaseMatchIndex, matchSkuToPurchase, buildPurchaseSkuLookupQueries, type PurchaseMatchRecord } from "@/lib/listing-studio/purchase-match";
+import { listMarketplaceDraftsForProducts } from "@/lib/listing-studio/marketplace-drafts";
+import type { MarketplaceDraft } from "@/lib/listing-studio/marketplace-types";
+
+// Stage 6 (eBay draft batches) — the eBay equivalent of
+// LatestExtensionStatusRow, from rpc/listing_studio_latest_ebay_draft_status
+// (supabase-ebay-draft-batches.sql). Keyed by marketplace_draft_id (never
+// product_draft_id directly — a product's eBay marketplace draft id is a
+// different, separate uuid), so the client joins it against
+// ebayDrafts[].id, not against the product draft's own id.
+export type LatestEbayDraftStatusRow = {
+  marketplace_draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
+  error_code: string | null; error_message: string | null; ebay_offer_id: string | null;
+  started_at: string | null; completed_at: string | null;
+};
 
 // Listings Review redesign — one row per draft, the most recent extension
 // batch-item status across EVERY batch the owner has ever sent (see
@@ -46,27 +60,57 @@ type DraftRow = {
 type ImageRow = { id: string; draft_id: string; sort_order: number };
 
 /**
- * Milestone 5 (Listings Review). Read-only: everything shown here is data
- * Milestone 4's generate/fields routes already persist — this route adds
- * no new writes and reuses those same underlying tables. Deliberately
- * scoped to only drafts that actually HAVE a generated listing (never
- * Unsorted, never a still-being-organised group with no listing yet) —
- * those remain Listing Studio's job; this page is purely for reviewing
- * what's already been generated. Images are fetched scoped to exactly
- * these drafts' ids (not every image the owner has, unlike the Studio
- * workspace route) since a power user's Unsorted/in-progress photos have
- * no bearing on this page at all.
+ * Milestone 5 (Listings Review), corrected by the Stage 6 corrective pass —
+ * CANONICAL UNIFIED ROW SET. This route used to scope its ENTIRE base
+ * query to `generated_title=not.is.null&generated_description=not.is.null`
+ * — a Vinted-only condition. Since app/api/listing-studio/groups/[draftId]/generate/route.ts's
+ * own `shouldWriteVintedContent = targetSet.has("VINTED")` means an
+ * eBay-only generation NEVER writes listing_drafts.generated_title/
+ * generated_description, that old filter made every eBay-only product
+ * (and its already-generated eBay marketplace draft) completely invisible
+ * on this page — unreachable, un-priceable, un-shippable. PROVEN, not
+ * assumed: confirmed by reading the generate route's own branch logic.
+ *
+ * The corrected model: the visible row set is the UNION of "has Vinted
+ * content" OR "has an eBay (EBAY_UK) marketplace draft" — never Vinted
+ * alone. Computed in two cheap steps (a lightweight candidate prefilter,
+ * then the real EBAY_UK product-id set), never a full unfiltered owner
+ * scan: step 1 fetches only `id, title, generated_title,
+ * generated_description` for every non-archived, non-Unsorted product this
+ * owner has (a cheap, narrow-column query); step 2 fetches every EBAY_UK
+ * marketplace draft's product_draft_id for this owner; the union of
+ * candidate ids matching either condition is what the REAL, full-column
+ * query below is scoped to — a genuinely in-progress Listing Studio group
+ * with no content on EITHER channel is still correctly excluded ("neither
+ * should not normally be returned").
  */
 export async function GET() {
   try {
     const user = await requireOwner();
+
+    const [candidateRows, ebayProductIdRows] = await Promise.all([
+      supabaseRequestAll<{ id: string; generated_title: string | null; generated_description: string | null }>(
+        `listing_drafts?owner_id=eq.${user.id}&status=neq.archived&title=neq.${encodeURIComponent(UNSORTED_TITLE)}`
+        + `&select=id,generated_title,generated_description`,
+      ),
+      supabaseRequestAll<{ product_draft_id: string }>(
+        `listing_marketplace_drafts?owner_id=eq.${user.id}&marketplace=eq.EBAY_UK&select=product_draft_id`,
+      ),
+    ]);
+    const ebayProductIds = new Set(ebayProductIdRows.map(r => r.product_draft_id));
+    const visibleDraftIds = candidateRows
+      .filter(row => (row.generated_title && row.generated_description) || ebayProductIds.has(row.id))
+      .map(row => row.id);
+
+    if (!visibleDraftIds.length) return NextResponse.json({ drafts: [], images: [], ebayDrafts: [] });
+
     const drafts = await supabaseRequestAll<DraftRow>(
-      `listing_drafts?owner_id=eq.${user.id}&status=neq.archived&title=neq.${encodeURIComponent(UNSORTED_TITLE)}&generated_title=not.is.null&generated_description=not.is.null`
+      `listing_drafts?id=in.(${visibleDraftIds.join(",")})&owner_id=eq.${user.id}`
       + `&select=id,created_at,updated_at,brand,model,product_type,colours,material,uk_size,uk_size_source,sku,condition,generated_title,generated_description,ai_result_json,review_marked_ready_at,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source,vinted_audience_evidence,confirmed_price_pence`
       + `&order=updated_at.desc`,
     );
 
-    if (!drafts.length) return NextResponse.json({ drafts: [], images: [] });
+    if (!drafts.length) return NextResponse.json({ drafts: [], images: [], ebayDrafts: [] });
 
     const draftIds = drafts.map(draft => draft.id);
     // Follow-up correction (restricting the purchase lookup to relevant
@@ -75,7 +119,7 @@ export async function GET() {
     // the whole purchases table. Empty when no listing has a SKU, in
     // which case zero purchase requests are made at all.
     const purchaseQueries = buildPurchaseSkuLookupQueries(drafts.map(draft => draft.sku));
-    const [images, categoriesById, purchaseRecordChunks, extensionStatusRows] = await Promise.all([
+    const [images, categoriesById, purchaseRecordChunks, extensionStatusRows, ebayDraftsByProduct, ebayStatusRows] = await Promise.all([
       supabaseRequestAll<ImageRow>(
         `listing_draft_images?draft_id=in.(${draftIds.join(",")})&owner_id=eq.${user.id}&upload_state=eq.uploaded&select=id,draft_id,sort_order&order=sort_order.asc`,
       ),
@@ -104,10 +148,36 @@ export async function GET() {
       supabaseRequest("rpc/listing_studio_latest_extension_status", {
         method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
       }).then(response => response.json() as Promise<LatestExtensionStatusRow[]>).catch(() => [] as LatestExtensionStatusRow[]),
+      // Stage 6 (eBay draft batches) — every product's eBay marketplace
+      // draft (independent of, and never overwriting, its Vinted row
+      // above). listMarketplaceDraftsForProducts already returns EVERY
+      // marketplace a product has ('VINTED' rows never exist yet — see
+      // supabase-listing-studio-marketplace.sql's own header comment — but
+      // filtering explicitly here is future-proof and self-documenting).
+      //
+      // CORRECTIVE PASS — this now selects columns
+      // (ebay_fulfillment_policy_id and friends) that only exist once
+      // supabase-ebay-draft-batches.sql has been applied. Before that,
+      // this call would 400 ("column does not exist"), and — because
+      // this whole array feeds ONE Promise.all — would take the ENTIRE
+      // Listings Review page down for every listing, Vinted-only included,
+      // not just eBay ones. Wrapped in the exact same degrade-gracefully
+      // pattern as the two RPC calls in this Promise.all: before the
+      // migration is applied, every listing simply shows no eBay data at
+      // all (exactly as if it had none), never a broken page.
+      listMarketplaceDraftsForProducts(user.id, draftIds).catch(() => new Map<string, MarketplaceDraft[]>()),
+      // Same degrade-gracefully pattern as the Vinted extension-status RPC
+      // above — a missing migration never fails this whole page.
+      supabaseRequest("rpc/listing_studio_latest_ebay_draft_status", {
+        method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
+      }).then(response => response.json() as Promise<LatestEbayDraftStatusRow[]>).catch(() => [] as LatestEbayDraftStatusRow[]),
     ]);
 
     const purchaseIndex = buildPurchaseMatchIndex(purchaseRecordChunks.flat());
     const extensionStatusByDraftId = new Map(extensionStatusRows.map(row => [row.draft_id, row]));
+    const ebayDrafts = draftIds.flatMap(id => (ebayDraftsByProduct.get(id) ?? []).filter(d => d.marketplace === "EBAY_UK"));
+    const ebayStatusByMarketplaceDraftId = new Map(ebayStatusRows.map(row => [row.marketplace_draft_id, row]));
+    const ebayDraftsWithStatus = ebayDrafts.map(d => ({ ...d, ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null }));
 
     const draftsWithCategoryValidity = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);
@@ -144,6 +214,6 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json({ drafts: draftsWithCategoryValidity, images });
+    return NextResponse.json({ drafts: draftsWithCategoryValidity, images, ebayDrafts: ebayDraftsWithStatus });
   } catch (error) { return safeApiError(error, "Could not load your listings."); }
 }

@@ -6,7 +6,9 @@ import { useRouter } from "next/navigation";
 import type { Expense, Purchase, SalesOrderListItem } from "@/lib/types";
 import type { SalesHistoryResponse } from "@/lib/sales/history";
 import TodaysTasksCard from "@/components/TodaysTasksCard";
-import { computeHomeReport, periods, type Period } from "@/lib/home-report";
+import { computeHomeReport, periodOperatingExpensePence, periods, type Period } from "@/lib/home-report";
+import { netProfitWithReturnsLossesPence } from "@/lib/returns/net-profit";
+import { RETURNS_CHANGED_EVENT } from "@/lib/returns/events";
 import { calculateInStockValue } from "@/lib/purchases";
 import { HOME_PERIOD_TO_SALES_PRESET, homeSalesChart, pendingHomeSales, recentHomeSales } from "@/lib/home-sales";
 import { salesProcessPresentation } from "@/lib/sales/process-status";
@@ -29,7 +31,13 @@ function Icon({ name }: { name: "purchases" | "spend" | "revenue" | "profit" | "
 
 function platformLabel(row: SalesOrderListItem) { return row.platform === "other" && row.custom_platform_name ? row.custom_platform_name : row.platform === "ebay" ? "eBay" : row.platform.charAt(0).toUpperCase() + row.platform.slice(1); }
 function itemLabel(row: SalesOrderListItem) { return row.itemGroups.map(group => group.quantity > 1 ? `${group.description} × ${group.quantity}` : group.description).join(", ") || "Sale"; }
-function salesUrl(period: Period, status: "completed" | "pending" | "all") { return `/api/sales?status=${status}&preset=${HOME_PERIOD_TO_SALES_PRESET[period]}&pageSize=100&sort=date&direction=desc`; }
+function salesUrl(period: Period, status: "completed" | "all") { return `/api/sales?status=${status}&preset=${HOME_PERIOD_TO_SALES_PRESET[period]}&pageSize=100&sort=date&direction=desc`; }
+// Pending Orders + Recent Sales are OPERATIONAL widgets — always all-time,
+// never scoped to the financial Compare-period selector. A small server-side
+// page is enough (the widgets only ever show 4 / 5 rows); the authoritative
+// pending count comes from the response's own pre-pagination `total`.
+function operationalSalesUrl(status: "pending" | "all") { return `/api/sales?status=${status}&preset=all-time&pageSize=10&sort=date&direction=desc`; }
+function orderCountLabel(total: number) { return `${total} ${total === 1 ? "order" : "orders"}`; }
 
 export default function HomePage() {
   const router = useRouter();
@@ -37,12 +45,39 @@ export default function HomePage() {
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [completed, setCompleted] = useState<SalesHistoryResponse | null>(null);
+  // Server-side KPIs over EVERY valid sale in the period (status "completed",
+  // any operational process_status) — the "completed" fetch above narrows to
+  // process_status === "completed", which must not gate monthly net profit.
+  const [allSalesKpis, setAllSalesKpis] = useState<SalesHistoryResponse["kpis"] | null>(null);
+  // Operational widgets (Pending Orders, Recent Sales) — all-time, loaded once
+  // on entry and NEVER re-scoped by `period`. `pendingTotal` is the API's exact
+  // pre-limit count (the Sales page's authoritative Pending total); `pending`
+  // is only ever the 4-row preview.
   const [pending, setPending] = useState<SalesOrderListItem[]>([]);
+  const [pendingTotal, setPendingTotal] = useState(0);
   const [recentSales, setRecentSales] = useState<SalesOrderListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [salesLoading, setSalesLoading] = useState(true);
+  const [opsLoading, setOpsLoading] = useState(true);
+  // SIGNED return/loss net-profit adjustment for the selected period, from
+  // /api/returns-losses/net-profit-adjustment — ADDED as-is to the Net profit
+  // card (never clamped). Active + completed returns reverse their sale's
+  // signed profit (negative for a profitable sale, positive for a loss-making
+  // one), plus return postage/fees and inventory losses (always negative).
+  // Never affects any other card. 0 while not loaded / feature not migrated.
+  const [returnLossAdjustmentPence, setReturnLossAdjustmentPence] = useState(0);
   const [error, setError] = useState("");
   const [salesError, setSalesError] = useState("");
+  const [opsError, setOpsError] = useState("");
+  // Bumped when a returns/losses mutation elsewhere changes figures the
+  // financial + operational scopes below depend on (active-return net-profit
+  // impact, Sales Overview status).
+  const [returnsRefreshKey, setReturnsRefreshKey] = useState(0);
+  useEffect(() => {
+    const onChange = () => setReturnsRefreshKey(k => k + 1);
+    window.addEventListener(RETURNS_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(RETURNS_CHANGED_EVENT, onChange);
+  }, []);
 
   useEffect(() => {
     Promise.all([fetch("/api/purchases"), fetch("/api/expenses")]).then(async ([purchaseResponse, expenseResponse]) => {
@@ -52,19 +87,45 @@ export default function HomePage() {
     }).catch((reason: Error) => setError(reason.message)).finally(() => setLoading(false));
   }, []);
 
+  // FINANCIAL scope — re-fetched whenever the Compare-period changes. Supplies
+  // Revenue, Net profit, Margin, Sales Overview and the chart only.
   useEffect(() => {
     const controller = new AbortController();
     setSalesLoading(true); setSalesError("");
-    Promise.all([fetch(salesUrl(period, "completed"), { signal: controller.signal }), fetch(salesUrl(period, "pending"), { signal: controller.signal }), fetch(salesUrl(period, "all"), { signal: controller.signal })]).then(async responses => {
+    Promise.all([fetch(salesUrl(period, "completed"), { signal: controller.signal }), fetch(salesUrl(period, "all"), { signal: controller.signal })]).then(async responses => {
       if (responses.some(response => !response.ok)) throw new Error("Could not load sales information.");
-      const [completedBody, pendingBody, allBody] = await Promise.all(responses.map(response => response.json())) as SalesHistoryResponse[];
-      setCompleted(completedBody); setPending(pendingHomeSales(pendingBody.rows)); setRecentSales(recentHomeSales(allBody.rows));
+      const [completedBody, allBody] = await Promise.all(responses.map(response => response.json())) as SalesHistoryResponse[];
+      setCompleted(completedBody); setAllSalesKpis(allBody.kpis);
     }).catch(reason => { if (reason.name !== "AbortError") setSalesError(reason.message); }).finally(() => { if (!controller.signal.aborted) setSalesLoading(false); });
+    // Returns/losses adjustment for the same period — a best-effort extra: a
+    // failure (e.g. the returns-losses migration not applied yet) leaves the
+    // adjustment at 0 rather than breaking the Net profit card.
+    fetch(`/api/returns-losses/net-profit-adjustment?preset=${HOME_PERIOD_TO_SALES_PRESET[period]}`, { signal: controller.signal })
+      .then(response => response.ok ? response.json() : { adjustmentPence: 0 })
+      .then(body => setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0))
+      .catch(() => { if (!controller.signal.aborted) setReturnLossAdjustmentPence(0); });
     return () => controller.abort();
-  }, [period]);
+  }, [period, returnsRefreshKey]);
+
+  // OPERATIONAL scope — loaded once on entry, all-time, independent of `period`.
+  // Changing the Compare-period must never blank these or move their totals; a
+  // returns/losses mutation (which can flip a sale's Overview status) does.
+  useEffect(() => {
+    const controller = new AbortController();
+    setOpsLoading(true); setOpsError("");
+    Promise.all([fetch(operationalSalesUrl("pending"), { signal: controller.signal }), fetch(operationalSalesUrl("all"), { signal: controller.signal })]).then(async responses => {
+      if (responses.some(response => !response.ok)) throw new Error("Could not load orders.");
+      const [pendingBody, recentBody] = await Promise.all(responses.map(response => response.json())) as SalesHistoryResponse[];
+      setPendingTotal(pendingBody.total); setPending(pendingHomeSales(pendingBody.rows)); setRecentSales(recentHomeSales(recentBody.rows));
+    }).catch(reason => { if (reason.name !== "AbortError") setOpsError(reason.message); }).finally(() => { if (!controller.signal.aborted) setOpsLoading(false); });
+    return () => controller.abort();
+  }, [returnsRefreshKey]);
 
   const report = useMemo(() => computeHomeReport(period, purchases, expenses), [period, purchases, expenses]);
   const stockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);
+  // Operating expenses dated in the selected period, in integer pence — the
+  // second half of monthly net profit (valid-sales profit minus this).
+  const operatingExpensePence = useMemo(() => periodOperatingExpensePence(period, expenses), [period, expenses]);
   const chart = useMemo(() => homeSalesChart(completed?.rows ?? []), [completed]);
   const chartMax = Math.max(1, ...chart.flatMap(point => [point.revenuePence, Math.max(0, point.profitPence)]));
   const selectedPeriod = periods.find(option => option.value === period)?.label ?? "This Month";
@@ -73,7 +134,7 @@ export default function HomePage() {
     { name: "purchases" as const, label: "Purchases", value: loading ? "—" : report.periodPurchases.length.toLocaleString("en-GB"), caption: selectedPeriod },
     { name: "spend" as const, label: "Stock spend", value: loading ? "—" : money.format(report.stockSpend), caption: "Purchases in period" },
     { name: "revenue" as const, label: "Revenue", value: salesLoading ? "—" : money.format((kpis?.revenuePence ?? 0) / 100), caption: "Sales in period" },
-    { name: "profit" as const, label: "Net profit", value: salesLoading ? "—" : money.format((kpis?.profitPence ?? 0) / 100), caption: "Profit in period", profit: true },
+    { name: "profit" as const, label: "Net profit", value: salesLoading || loading ? "—" : money.format(netProfitWithReturnsLossesPence(allSalesKpis?.profitPence ?? 0, operatingExpensePence, returnLossAdjustmentPence) / 100), caption: "Sales profit, less expenses, returns & losses", profit: true },
     { name: "margin" as const, label: "Margin", value: salesLoading ? "—" : `${(kpis?.margin ?? 0).toFixed(2)}%`, caption: "Profit margin" },
     { name: "stock" as const, label: "Stock value", value: loading ? "—" : money.format(stockValue), caption: `${purchases.filter(row => row.stock_status === "in_stock").length} items in stock` },
   ];
@@ -89,8 +150,8 @@ export default function HomePage() {
       <div className={styles.stat}><span className={`${styles.statIcon} ${styles.profitIcon}`}>£</span><strong className={styles.profit}>{salesLoading ? "—" : money.format((kpis?.profitPence ?? 0) / 100)}</strong><small>Total profit</small></div><Link className={styles.viewSales} href="/sales">View sales →</Link>
     </div><div className={styles.chart} role="img" aria-label={`Revenue and profit chart for ${selectedPeriod}. Revenue ${money.format((kpis?.revenuePence ?? 0) / 100)}, profit ${money.format((kpis?.profitPence ?? 0) / 100)}.`}><div className={styles.legend}><span><i/>Revenue</span><span><i/>Profit</span></div>{chart.length ? <div className={styles.bars}>{chart.map(point => <span className={styles.barGroup} key={point.key} title={`${point.label}: revenue ${money.format(point.revenuePence / 100)}, profit ${money.format(point.profitPence / 100)}`}><i className={styles.bar} style={{height:`${Math.max(2,point.revenuePence/chartMax*115)}px`}}/><i className={`${styles.bar} ${styles.barProfit}`} style={{height:`${Math.max(2,Math.max(0,point.profitPence)/chartMax*115)}px`}}/><small>{point.label}</small></span>)}</div> : <div className={styles.empty}>{salesLoading ? "Loading sales…" : "No completed sales in this period."}</div>}</div></div></section></div>
 
-    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Pending Orders</h2><span>{salesLoading ? "" : `${pending.length} orders`}</span></div><div className={styles.orderRows}>{pending.length ? pending.map(row => { const status = salesProcessPresentation(row); return <Link href={`/sales/${row.id}`} className={styles.orderRow} key={row.id}><span className={`${styles.status} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span><span className={styles.item}>{itemLabel(row)}</span><span className={styles.platform}>{platformLabel(row)}</span><span className={styles.amount}>{money.format(Number(row.total_revenue))}</span><span aria-hidden="true">›</span></Link>; }) : <div className={styles.empty}>{salesLoading ? "Loading orders…" : "No pending orders."}</div>}</div></section>
-      <section className={styles.panel}><div className={styles.heading}><h2>Recent Sales</h2><span>Latest 5</span></div><div className={styles.tableWrap}><table className={`${styles.table} ${styles.recentSales}`}><thead><tr><th>Date</th><th>Item</th><th>Platform</th><th>Revenue</th><th>Profit</th><th>Status</th></tr></thead><tbody>{recentSales.length ? recentSales.map(row => { const status = salesProcessPresentation(row); return <tr key={row.id} tabIndex={0} onClick={() => router.push(`/sales/${row.id}`)} onKeyDown={event => { if(event.key === "Enter") router.push(`/sales/${row.id}`); }}><td>{new Date(`${row.sale_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td title={itemLabel(row)}>{itemLabel(row)}</td><td>{platformLabel(row)}</td><td>{money.format(Number(row.total_revenue))}</td><td className={`${styles.profitCell} ${row.profitPence < 0 ? styles.negative : ""}`}>{money.format(row.profitPence/100)}</td><td><span className={`${styles.statusCell} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span></td></tr>; }) : <tr><td colSpan={6}>{salesLoading ? "Loading sales…" : "No recent sales."}</td></tr>}</tbody></table></div></section></div>
+    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Pending Orders</h2><span>{opsLoading || opsError ? "" : orderCountLabel(pendingTotal)}</span></div><div className={styles.orderRows}>{pending.length ? pending.map(row => { const status = salesProcessPresentation(row); return <Link href={`/sales/${row.id}`} className={styles.orderRow} key={row.id}><span className={`${styles.status} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span><span className={styles.item}>{itemLabel(row)}</span><span className={styles.platform}>{platformLabel(row)}</span><span className={styles.amount}>{money.format(Number(row.total_revenue))}</span><span aria-hidden="true">›</span></Link>; }) : <div className={styles.empty}>{opsLoading ? "Loading orders…" : opsError ? "Pending orders could not be loaded." : "No pending orders."}</div>}</div></section>
+      <section className={styles.panel}><div className={styles.heading}><h2>Recent Sales</h2><span>Latest 5</span></div><div className={styles.tableWrap}><table className={`${styles.table} ${styles.recentSales}`}><thead><tr><th>Date</th><th>Item</th><th>Platform</th><th>Revenue</th><th>Profit</th><th>Status</th></tr></thead><tbody>{recentSales.length ? recentSales.map(row => { const status = salesProcessPresentation(row); return <tr key={row.id} tabIndex={0} onClick={() => router.push(`/sales/${row.id}`)} onKeyDown={event => { if(event.key === "Enter") router.push(`/sales/${row.id}`); }}><td>{new Date(`${row.sale_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td title={itemLabel(row)}>{itemLabel(row)}</td><td>{platformLabel(row)}</td><td>{money.format(Number(row.total_revenue))}</td><td className={`${styles.profitCell} ${row.profitPence < 0 ? styles.negative : ""}`}>{money.format(row.profitPence/100)}</td><td><span className={`${styles.statusCell} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span></td></tr>; }) : <tr><td colSpan={6}>{opsLoading ? "Loading sales…" : opsError ? "Recent sales could not be loaded." : "No recent sales."}</td></tr>}</tbody></table></div></section></div>
 
     <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Where My Money Went</h2><span>{report.sources.length} sources</span></div><div className={styles.spendBody}>{report.sources.length ? report.sources.slice(0,5).map(source => <div className={styles.source} key={source.source}><div className={styles.sourceMeta}><strong>{source.source}</strong><span>{shortMoney.format(source.spend)} <i>{source.percentage.toFixed(0)}%</i></span></div><div className={styles.track}><span style={{width:`${source.percentage}%`}}/></div></div>) : <div className={styles.empty}>No purchase spending in this period.</div>}</div></section>
       <section className={styles.panel}><div className={styles.heading}><h2>Recent Purchases</h2><span>Latest 6</span></div><div className={styles.tableWrap}><table className={`${styles.table} ${styles.recentPurchases}`}><thead><tr><th>Date</th><th>Description</th><th>Size</th><th>Price</th><th>SKU</th></tr></thead><tbody>{report.recent.slice(0,6).map(row => <tr key={row.id} tabIndex={0} onClick={() => router.push(`/purchases/${row.id}`)} onKeyDown={event => { if(event.key === "Enter") router.push(`/purchases/${row.id}`); }}><td>{new Date(`${row.order_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td>{row.item_description}</td><td>{row.item_size}</td><td>{money.format(Number(row.price_purchased))}</td><td><span className={styles.sku}>{row.sku}</span></td></tr>)}{!report.recent.length && <tr><td colSpan={5}>{loading ? "Loading purchases…" : "No purchases in this period."}</td></tr>}</tbody></table></div></section></div>

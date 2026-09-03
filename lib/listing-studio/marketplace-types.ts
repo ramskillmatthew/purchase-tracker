@@ -165,6 +165,20 @@ export type MarketplaceDraft = {
   sourceEbayItemId: string | null;
   dynamicData: MarketplaceDynamicData;
   settings: PartialMarketplaceDraftSettings;
+  // Stage 6 (eBay draft batches) — per-listing eBay policy/location
+  // selections and draft-creation outcome. Selected/overridden in Listings
+  // Review (never Listing Studio — see supabase-ebay-draft-batches.sql's
+  // own header comment); null until chosen. ebayOfferId is set only once
+  // eBay's own createOffer response has confirmed a real offer id — the
+  // signal "Create eBay drafts" uses to exclude an already-drafted listing.
+  ebayFulfillmentPolicyId: string | null;
+  ebayReturnPolicyId: string | null;
+  ebayPaymentPolicyId: string | null;
+  ebayMerchantLocationKey: string | null;
+  ebayOfferId: string | null;
+  ebayInventorySyncedAt: string | null;
+  ebayLastDraftError: string | null;
+  ebayPhotoState: Record<string, { status: "pending" | "uploading" | "uploaded" | "failed"; url?: string; checkedAt: string; error?: string }>;
   createdAt: string;
   updatedAt: string;
 };

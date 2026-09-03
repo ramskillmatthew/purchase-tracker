@@ -247,10 +247,10 @@ describe("GET /api/listing-studio/listings-review — Business-rule follow-up co
     expect(body.drafts[0].vinted_audience).toBe("womens");
   });
 
-  it("REGRESSION: this is a read-time-only display correction — the route calls supabaseRequest ONLY for the read-only extension-status RPC (see the dedicated 'is read-time-only' test below), never a table write, so it structurally cannot write anything back to the database", async () => {
+  it("REGRESSION: this is a read-time-only display correction — the route calls supabaseRequest ONLY for read-only status RPCs (see the dedicated 'is read-time-only' test below), never a table write, so it structurally cannot write anything back to the database", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
     const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
-    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status"]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status"]);
   });
 
   it("REGRESSION: 'boys'/'girls' on a non-footwear product type is displayed completely unchanged", async () => {
@@ -320,10 +320,10 @@ describe("GET /api/listing-studio/listings-review — business-rule follow-up co
     expect(body.drafts[0].uk_size).toBe("3");
   });
 
-  it("is read-time-only — the one supabaseRequest call it makes is a read-only RPC (rpc/listing_studio_latest_extension_status, language sql stable), never a table write", async () => {
+  it("is read-time-only — every supabaseRequest call it makes is a read-only RPC (rpc/listing_studio_latest_extension_status and, since Stage 6, rpc/listing_studio_latest_ebay_draft_status — both language sql stable), never a table write", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
     const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
-    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status"]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status"]);
   });
 
   it("degrades gracefully when the extension-status RPC isn't available yet (e.g. before its SQL migration has been run) — the page still loads, every listing just falls back to no known workflow status, rather than the whole route failing", async () => {
@@ -333,5 +333,161 @@ describe("GET /api/listing-studio/listings-review — business-rule follow-up co
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.drafts[0].extension_status).toBeNull();
+  });
+});
+
+describe("GET /api/listing-studio/listings-review — CORRECTIVE PASS: canonical unified row model", () => {
+  // Confirmed, PROVEN root cause (see app/api/listing-studio/groups/[draftId]/generate/route.ts's
+  // own shouldWriteVintedContent = targetSet.has("VINTED")): a product
+  // generated for eBay UK ONLY never gets a Vinted generated_title/
+  // generated_description at all — they stay null forever. The OLD
+  // version of this route filtered its entire base query on
+  // generated_title/generated_description being non-null, which made
+  // such a product (and its already-generated eBay marketplace draft)
+  // completely invisible here. These tests prove the fix: the visible
+  // row set is now the UNION of "has Vinted content" OR "has an EBAY_UK
+  // marketplace draft".
+  function ebayMarketplaceDraftRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "mdraft-1", product_draft_id: "draft-ebay-only", owner_id: "owner-1", marketplace: "EBAY_UK",
+      source_type: "generated", content_mode: "seo_optimised", title: "eBay Only Listing", description: "desc",
+      category_id: "183454", category_name: "Trainers", category_path: "Shoes > Trainers", category_source: "ai", category_confidence: "high",
+      category_alternatives_json: [], category_search_terms: null, condition_value: "Used", price_pence: null, quantity: 1, currency: "GBP",
+      status: "ready", readiness_json: { ready: true, completionPercent: 100, requiredComplete: 8, requiredTotal: 8, recommendedComplete: 0, recommendedTotal: 0 },
+      validation_messages_json: [], ai_generation_json: null, source_draft_id: null, source_ebay_item_id: null,
+      dynamic_data_json: {}, settings_json: {},
+      ebay_fulfillment_policy_id: null, ebay_return_policy_id: null, ebay_payment_policy_id: null, ebay_merchant_location_key: null,
+      ebay_offer_id: null, ebay_inventory_synced_at: null, ebay_last_draft_error: null, ebay_photo_state_json: {},
+      created_at: "2026-01-01", updated_at: "2026-01-01",
+      ...overrides,
+    };
+  }
+  function ebayOnlyCandidateRow(overrides: Record<string, unknown> = {}) {
+    // A product that only ever had "eBay UK" selected as its generation
+    // target — generated_title/generated_description are genuinely null,
+    // exactly as the real generate route leaves them.
+    return draftRow({ id: "draft-ebay-only", generated_title: null, generated_description: null, sku: "EBAY-ONLY-1", ...overrides });
+  }
+
+  function routeMocksFor(candidateRows: unknown[], ebayProductIdRows: Array<{ product_draft_id: string }>, ebayMarketplaceRows: unknown[]) {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_marketplace_drafts?owner_id=eq.") && path.includes("marketplace=eq.EBAY_UK") && path.includes("select=product_draft_id")) return ebayProductIdRows;
+      if (path.startsWith("listing_marketplace_drafts?product_draft_id=in.")) return ebayMarketplaceRows;
+      // Same fixture set answers BOTH listing_drafts queries (the narrow
+      // candidate prefilter and the later full-column fetch) — exactly
+      // like every existing test in this file already relies on; the
+      // prefilter step only ever reads id/generated_title/
+      // generated_description off these rows, so richer fixture objects
+      // here are harmless.
+      if (path.startsWith("listing_drafts?")) return candidateRows;
+      if (path.startsWith("listing_draft_images?")) return [];
+      if (path.startsWith("purchases?")) return [];
+      if (path.startsWith("vinted_categories?")) return [];
+      return [];
+    });
+  }
+
+  it("REQUIREMENT 1: a Vinted-only row (no eBay marketplace draft at all) is included, exactly as before", async () => {
+    routeMocksFor([draftRow()], [], []);
+    const response = await listingsReviewRoute();
+    const body = await response.json();
+    expect(body.drafts).toHaveLength(1);
+    expect(body.drafts[0].id).toBe("draft-1");
+    expect(body.ebayDrafts).toEqual([]);
+  });
+
+  it("REQUIREMENT 2 (PROVEN ROOT CAUSE FIX): an eBay-only row (generated_title/generated_description both null) IS now included, with its eBay marketplace draft attached", async () => {
+    routeMocksFor(
+      [ebayOnlyCandidateRow()],
+      [{ product_draft_id: "draft-ebay-only" }],
+      [ebayMarketplaceDraftRow()],
+    );
+    const response = await listingsReviewRoute();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.drafts).toHaveLength(1);
+    expect(body.drafts[0].id).toBe("draft-ebay-only");
+    expect(body.drafts[0].generated_title).toBeNull(); // genuinely no Vinted content — never fabricated
+    expect(body.ebayDrafts).toHaveLength(1);
+    expect(body.ebayDrafts[0].productDraftId).toBe("draft-ebay-only");
+    expect(body.ebayDrafts[0].marketplace).toBe("EBAY_UK");
+  });
+
+  it("REQUIREMENT 3: a product with BOTH a Vinted preparation and an eBay preparation appears as exactly ONE row, with the eBay draft attached alongside it", async () => {
+    const bothRow = draftRow({ id: "draft-both" });
+    routeMocksFor(
+      [bothRow],
+      [{ product_draft_id: "draft-both" }],
+      [ebayMarketplaceDraftRow({ product_draft_id: "draft-both" })],
+    );
+    const response = await listingsReviewRoute();
+    const body = await response.json();
+    expect(body.drafts).toHaveLength(1);
+    expect(body.drafts[0].id).toBe("draft-both");
+    expect(body.drafts[0].generated_title).toBe("On Cloud 5"); // real Vinted content still present
+    expect(body.ebayDrafts).toHaveLength(1);
+    expect(body.ebayDrafts[0].productDraftId).toBe("draft-both");
+  });
+
+  it("REQUIREMENT: a product with NEITHER a Vinted preparation NOR an eBay preparation (an in-progress Listing Studio group with no generated content on either channel) is correctly excluded — 'neither' is not normally returned", async () => {
+    routeMocksFor([ebayOnlyCandidateRow({ id: "draft-neither" })], [], []); // no eBay marketplace draft product id returned for it either
+    const response = await listingsReviewRoute();
+    const body = await response.json();
+    expect(body.drafts).toHaveLength(0);
+  });
+
+  it("REQUIREMENT: a mixed page (one Vinted-only, one eBay-only, one both) returns exactly the right 3 rows with the right eBay attachments — no row is silently dropped or duplicated", async () => {
+    const vintedOnly = draftRow({ id: "draft-vinted-only", sku: "V1" });
+    const ebayOnly = ebayOnlyCandidateRow({ id: "draft-ebay-only", sku: "E1" });
+    const both = draftRow({ id: "draft-both", sku: "B1" });
+    routeMocksFor(
+      [vintedOnly, ebayOnly, both],
+      [{ product_draft_id: "draft-ebay-only" }, { product_draft_id: "draft-both" }],
+      [ebayMarketplaceDraftRow({ id: "mdraft-ebay-only", product_draft_id: "draft-ebay-only" }), ebayMarketplaceDraftRow({ id: "mdraft-both", product_draft_id: "draft-both" })],
+    );
+    const response = await listingsReviewRoute();
+    const body = await response.json();
+    expect(body.drafts.map((d: { id: string }) => d.id).sort()).toEqual(["draft-both", "draft-ebay-only", "draft-vinted-only"]);
+    expect(body.ebayDrafts).toHaveLength(2);
+    expect(body.ebayDrafts.map((d: { productDraftId: string }) => d.productDraftId).sort()).toEqual(["draft-both", "draft-ebay-only"]);
+  });
+
+  it("REQUIREMENT (strong identity, never loose title matching): eBay drafts are matched to products by product_draft_id (a real foreign key), never by title/SKU text similarity", async () => {
+    const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
+    expect(routeSource).toContain("ebayDraftsByProduct.get(id)");
+    expect(routeSource).not.toMatch(/generated_title\s*===|title\.toLowerCase\(\)\.includes/);
+  });
+
+  it("REQUIREMENT (workspace isolation): every query this route makes is scoped to the authenticated owner's own id — never a global/unscoped listing_marketplace_drafts read", async () => {
+    const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
+    expect(routeSource).toContain("listing_marketplace_drafts?owner_id=eq.${user.id}&marketplace=eq.EBAY_UK");
+  });
+
+  it("REQUIREMENT (robustness — corrective pass): the WHOLE page still loads, with every Vinted listing fully intact, if the eBay migration hasn't been applied yet and listMarketplaceDraftsForProducts's own query 400s (missing ebay_* columns) — never a broken page for Vinted-only users", async () => {
+    routeMocksFor([draftRow()], [], []);
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_marketplace_drafts?product_draft_id=in.")) throw Object.assign(new Error("column listing_marketplace_drafts.ebay_fulfillment_policy_id does not exist"), { status: 400 });
+      if (path.startsWith("listing_marketplace_drafts?owner_id=eq.")) return [];
+      if (path.startsWith("listing_drafts?")) return [draftRow()];
+      return [];
+    });
+    const response = await listingsReviewRoute();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.drafts).toHaveLength(1);
+    expect(body.drafts[0].generated_title).toBe("On Cloud 5");
+    expect(body.ebayDrafts).toEqual([]);
+  });
+
+  it("REQUIREMENT (workspace isolation, behavioural): an eBay marketplace draft belonging to a DIFFERENT owner is never returned, even if its product_draft_id happens to collide", async () => {
+    // The mocked listMarketplaceDraftsForProducts query is itself already
+    // owner-scoped (see lib/listing-studio/marketplace-drafts.ts) — this
+    // test proves the CALLING route passes the real authenticated
+    // owner id through, never a client-suppliable value, by asserting the
+    // exact query shape requireOwner()'s id ends up in.
+    routeMocksFor([draftRow()], [], []);
+    await listingsReviewRoute();
+    const marketplaceIdQuery = supabaseRequestAll.mock.calls.find(c => (c[0] as string).startsWith("listing_marketplace_drafts?owner_id=eq."));
+    expect(marketplaceIdQuery?.[0]).toContain("owner_id=eq.owner-1");
   });
 });

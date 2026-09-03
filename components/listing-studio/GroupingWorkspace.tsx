@@ -25,6 +25,8 @@ import { MarketplaceSelector } from "./MarketplaceSelector";
 import { EbayDraftSettingsPanel } from "./EbayDraftSettingsPanel";
 import EbayCategoryAndAspectsDialog from "./EbayCategoryAndAspectsDialog";
 import { marketplacesForTarget, type GenerationTarget } from "@/lib/listing-studio/marketplace-types";
+import { isEligibleForGeneration } from "@/lib/listing-studio/generation-eligibility";
+import type { EbaySummary } from "@/lib/listing-studio/ebay-card-status";
 
 type WorkspaceDraft = {
   id: string; title: string | null; status: string; created_at: string; updated_at: string;
@@ -41,6 +43,19 @@ type WorkspaceDraft = {
   // Follow-up correction (2026-08-04).
   vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
   source_type: "photos" | "ebay_uk"; source_url: string | null; source_item_id: string | null;
+  // Bug fix (root cause of missing eBay drafts) — true once a real,
+  // content-bearing EBAY_UK marketplace draft exists for this product.
+  // Drives eligibleListingGroups below: "Generate listings" must treat
+  // Vinted and eBay UK completion independently, not conflate "this
+  // product already has generated_title" with "there's nothing left to
+  // generate" regardless of which marketplace is actually selected.
+  ebay_generated: boolean;
+  // Phase 6/7/13 fix — the full eBay content-generation/readiness summary
+  // for this product (null when no EBAY_UK marketplace draft exists yet)
+  // — the ONE shared source every eBay-aware UI surface on this page
+  // reads (product card status, counters), matching Phase 5's "one
+  // central function, no separately recreated readiness rules".
+  ebay: EbaySummary | null;
 };
 type WorkspaceImage = {
   id: string; draft_id: string; original_filename: string; mime_type: string; file_size: number;
@@ -59,6 +74,7 @@ const BLANK_LISTING_FIELDS = {
   vinted_category_id: null, vinted_category_path: null, vinted_category_source: null, vinted_category_status: null,
   vinted_audience: null,
   source_type: "photos", source_url: null, source_item_id: null,
+  ebay_generated: false, ebay: null,
 } as const;
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -1130,6 +1146,34 @@ export default function GroupingWorkspace() {
     setGenerateListingsProgress(null);
   }
 
+  // Phase 7 fix — Preview's own "No eBay UK draft has been generated for
+  // this product. [Generate eBay draft]" / "[Retry]" actions call this
+  // directly, scoped to EBAY_UK only, rather than requiring the owner to
+  // close Preview and use the bulk "Generate listings" bar. Reuses the
+  // exact same single-product /generate endpoint every other generation
+  // path already uses — never a bespoke request shape. Returns whether it
+  // succeeded so PreviewListingDialog can re-fetch its own eBay draft
+  // state immediately after, without a full workspace reload blocking it.
+  async function handleGenerateEbayDraftForProduct(productDraftId: string): Promise<boolean> {
+    // Phase 8/13 fix — the product card's own "Generating…" eBay badge
+    // reuses this same currentlyGeneratingGroupId tracking (already used
+    // by the bulk "Generate listings" loop below) so a Retry click from
+    // inside Preview is ALSO reflected on the card immediately, not just
+    // inside the dialog itself.
+    setCurrentlyGeneratingGroupId(productDraftId);
+    try {
+      const response = await fetch(`/api/listing-studio/groups/${productDraftId}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targets: ["EBAY_UK"] }),
+      });
+      if (response.ok) await loadWorkspace();
+      return response.ok;
+    } catch {
+      return false;
+    } finally {
+      setCurrentlyGeneratingGroupId(current => (current === productDraftId ? null : current));
+    }
+  }
+
   // Structured fields are the sole editable source of truth — saving here
   // always regenerates title/description via the server's own
   // listing-template.ts call, with no AI call. See EditListingFieldsDialog's
@@ -1233,14 +1277,46 @@ export default function GroupingWorkspace() {
     return map;
   }, [drafts]);
   // Eligible for "Generate Listings": a real product group (never
-  // Unsorted), with at least one photo, not already generated. Re-clicking
-  // only ever processes whichever groups still lack a generated_title.
-  const eligibleListingGroups = drafts.filter(draft =>
-    draft.title !== "Unsorted" && !draft.generated_title && images.some(image => image.draft_id === draft.id),
-  );
+  // Unsorted), with at least one photo, and still missing content for AT
+  // LEAST ONE of the currently-targeted marketplaces.
+  //
+  // Bug fix (Phase 4 — "A product with a generated Vinted draft but no
+  // eBay draft is not complete when eBay UK is selected"): this used to
+  // check ONLY `!draft.generated_title` — a single, Vinted-only signal —
+  // regardless of `generationTarget`. Proven root cause of "Despite eBay
+  // UK being selected, Preview still showed Vinted content": for a
+  // product that already had a Vinted draft (as "On Running Cloud 5" did,
+  // from an earlier generation run), that old check excluded it from this
+  // list entirely — the POST to /generate was never even sent, so no
+  // EBAY_UK row could ever be created, no matter how many times "Generate
+  // listings" was clicked with eBay UK selected. Marketplace completion is
+  // now assessed independently per target: eligible if VINTED is targeted
+  // and Vinted content is missing, OR EBAY_UK is targeted and no
+  // content-bearing eBay draft exists yet (draft.ebay_generated).
+  const targetedMarketplaces = marketplacesForTarget(generationTarget);
+  const eligibleListingGroups = drafts.filter(draft => isEligibleForGeneration(
+    { id: draft.id, title: draft.title, generatedTitle: draft.generated_title, ebayGenerated: draft.ebay_generated, hasPhoto: images.some(image => image.draft_id === draft.id) },
+    targetedMarketplaces,
+  ));
   const editFieldsTarget = drafts.find(draft => draft.id === editFieldsGroupId) ?? null;
   const previewTarget = drafts.find(draft => draft.id === previewGroupId) ?? null;
   const previewListing = previewGroupId ? listingsByDraftId.get(previewGroupId) ?? null : null;
+  // Regression fix (proven root cause of "eBay-only generation makes the
+  // draft inaccessible") — Preview must open for a product that has ONLY
+  // an eBay marketplace draft and no Vinted listing at all; the dialog
+  // itself already fetches and displays the eBay draft independently
+  // (PreviewListingDialog's own loadEbayDraft/showingEbay logic) — it was
+  // only ever the MOUNTING condition below that wrongly required Vinted
+  // content to exist first.
+  const previewHasAnyContent = Boolean(previewListing || previewTarget?.ebay);
+  // Bug fix (Fault 2 — "Do not display 'No photo' when the product
+  // actually has photos"): this call site never passed coverImageUrl at
+  // all, so Preview always showed the "No photo" placeholder here
+  // regardless of how many photos the product actually had. Cover is the
+  // same first-by-sort-order photo ProductGroupCard's own compact row
+  // already shows as "Cover" (see coverPhoto in ProductGroupCard.tsx).
+  const previewCoverPhoto = previewGroupId ? photosByGroupMap.get(previewGroupId)?.[0] ?? null : null;
+  const previewCoverImageUrl = previewCoverPhoto?.previewAvailable ? `/api/listing-studio/images/${previewCoverPhoto.id}/view` : null;
   const ebayDetailsTarget = drafts.find(draft => draft.id === ebayDetailsGroupId) ?? null;
 
   const movableGroups: MovableGroup[] = drafts.filter(draft => draft.id !== moveDialogGroupId).map(draft => ({ id: draft.id, title: draft.title, photoCount: images.filter(image => image.draft_id === draft.id).length }));
@@ -1268,6 +1344,14 @@ export default function GroupingWorkspace() {
   // old stat-card grid showed, now surfaced as one inline toolbar line.
   const productGroupsCount = drafts.filter(draft => draft.title !== "Unsorted").length;
   const orderedProductDrafts = drafts.filter(draft => draft.title !== "Unsorted");
+  // Phase 7 fix — marketplace-specific counters, read from the SAME
+  // `draft.ebay` summary the product card status badge uses (Phase 5: one
+  // shared source, never a separately recreated rule). A FALLBACK/FAILED
+  // row is counted as failed, never as generated — the exact reported
+  // "0 ready to generate · 1 draft generated" miscount.
+  const ebayEligibleProducts = orderedProductDrafts.filter(draft => draft.ebay?.contentState !== "generated");
+  const ebayGeneratedCount = orderedProductDrafts.filter(draft => draft.ebay?.contentState === "generated").length;
+  const ebayFailedCount = orderedProductDrafts.filter(draft => draft.ebay?.contentState === "fallback" || draft.ebay?.contentState === "failed").length;
   // Client-side only (no new fetch): narrows the already-loaded product
   // queue by name/brand/model/generated title, and by the exact same
   // status a row's own badge already shows — reuses computeStatus (the one
@@ -1320,6 +1404,9 @@ export default function GroupingWorkspace() {
       onToggleExpand={handleToggleExpand}
       isGenerating={draft.id === currentlyGeneratingGroupId}
       hasFailedGeneration={generationFailedGroupIds.has(draft.id)}
+      marketplaceView={generationTarget}
+      ebay={draft.ebay}
+      isGeneratingEbay={draft.id === currentlyGeneratingGroupId}
     />;
   }
 
@@ -1368,7 +1455,21 @@ export default function GroupingWorkspace() {
 
       <div className="listing-batch-toolbar">
         <strong className="listing-batch-toolbar-counts">
-          {images.length} photo{images.length === 1 ? "" : "s"} · {productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {eligibleListingGroups.length} ready to generate · {readyCount} draft{readyCount === 1 ? "" : "s"} generated
+          {/* Phase 7 fix — "The global summary currently says '0 ready to
+              generate · 1 draft generated' — wrong for the selected eBay
+              marketplace." Vinted-selected keeps the exact original line
+              (Phase 6: "Preserve current Vinted counters"); eBay UK and
+              Both read from the same marketplace-specific counts the
+              product card status badges use. */}
+          {generationTarget === "VINTED" && <>
+            {images.length} photo{images.length === 1 ? "" : "s"} · {productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {eligibleListingGroups.length} ready to generate · {readyCount} draft{readyCount === 1 ? "" : "s"} generated
+          </>}
+          {generationTarget === "EBAY_UK" && <>
+            {images.length} photo{images.length === 1 ? "" : "s"} · {productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · {ebayEligibleProducts.length} eBay draft{ebayEligibleProducts.length === 1 ? "" : "s"} to generate · {ebayGeneratedCount} generated{ebayFailedCount > 0 ? ` · ${ebayFailedCount} failed` : ""}
+          </>}
+          {generationTarget === "BOTH" && <>
+            {productGroupsCount} product{productGroupsCount === 1 ? "" : "s"} · Vinted: {readyCount} generated · eBay: {ebayGeneratedCount} generated{ebayFailedCount > 0 ? `, ${ebayFailedCount} failed` : ""}
+          </>}
         </strong>
         <div className="listing-batch-toolbar-controls">
           <label className="field listing-batch-search">
@@ -1579,18 +1680,38 @@ export default function GroupingWorkspace() {
       onClose={handleCloseEditFields}
       onSave={handleSaveListingFields}
     />}
-    {previewTarget && previewListing && <PreviewListingDialog
+    {previewTarget && previewHasAnyContent && <PreviewListingDialog
+      productDraftId={previewTarget.id}
       groupTitle={previewTarget.title || "this group"}
-      generatedTitle={previewListing.generatedTitle}
-      generatedDescription={previewListing.generatedDescription}
-      ukSize={previewListing.ukSize}
-      sku={previewListing.sku}
+      generatedTitle={previewListing?.generatedTitle ?? null}
+      generatedDescription={previewListing?.generatedDescription ?? null}
+      ukSize={previewListing?.ukSize ?? previewTarget.uk_size}
+      sku={previewListing?.sku ?? previewTarget.sku}
+      coverImageUrl={previewCoverImageUrl}
+      // Phase 7 fix — Preview must not silently substitute Vinted content
+      // when eBay UK (or Both) is the marketplace actually selected. This
+      // tells the dialog which marketplace to open on, and to show an
+      // explicit "No eBay UK draft"/"failed" state rather than falling
+      // back to Vinted, whenever eBay is the relevant context.
+      defaultMarketplace={generationTarget}
+      onGenerateEbayDraft={handleGenerateEbayDraftForProduct}
       onClose={() => setPreviewGroupId(null)}
     />}
     {ebayDetailsTarget && <EbayCategoryAndAspectsDialog
       draftId={ebayDetailsTarget.id}
       groupTitle={ebayDetailsTarget.title || "this group"}
       onClose={() => setEbayDetailsGroupId(null)}
+      // PROVEN ROOT CAUSE FIX — every save inside the dialog (price,
+      // category, item specifics) previously left this workspace's own
+      // `groups` state (the source of each card's EbaySummary /
+      // computeEbayCardStatus) completely untouched, so the product row
+      // kept showing whatever was true before the dialog opened, even
+      // after a successful save and even after closing the dialog. This
+      // re-fetches the same authoritative workspace data every other
+      // mutating action in this file already refreshes through, so the
+      // row is recomputed from the just-persisted price/category/aspect
+      // state, not a stale snapshot.
+      onDraftUpdated={() => { void loadWorkspace(); }}
     />}
   </div>;
 }

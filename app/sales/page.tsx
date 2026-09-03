@@ -14,6 +14,7 @@ import { SALES_PROCESS_STATUS_OPTIONS, salesProcessPresentation } from "@/lib/sa
 import CancelSalesDialog from "@/components/sales/CancelSalesDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import TaskToast from "@/components/TaskToast";
+import { RETURNS_CHANGED_EVENT, broadcastReturnsChanged } from "@/lib/returns/events";
 import styles from "./sales.module.css";
 
 const PLATFORM_LABELS: Record<SalesPlatform, string> = { vinted: "Vinted", ebay: "eBay", depop: "Depop", other: "Other" };
@@ -58,6 +59,10 @@ export default function SalesPage() {
   const historyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { const initial = readFilters(); setFilters(initial); setSearchDraft(initial.search); const pop = () => { const next = readFilters(); setFilters(next); setSearchDraft(next.search); }; addEventListener("popstate", pop); return () => removeEventListener("popstate", pop); }, []);
+  // A returns/losses mutation elsewhere can flip a sale's process status
+  // ('return_in_process' / restored) — re-load so this page never shows a
+  // stale status or blocks a now-valid cancellation/deletion.
+  useEffect(() => { const onChange = () => setReloadKey(k => k + 1); addEventListener(RETURNS_CHANGED_EVENT, onChange); return () => removeEventListener(RETURNS_CHANGED_EVENT, onChange); }, []);
   const update = useCallback((change: Partial<Filters>, replace = false) => { const next = { ...filters, ...change }; if (!("page" in change)) next.page = 1; const params = new URLSearchParams(); Object.entries(next).forEach(([key, value]) => { if (value !== "" && value !== DEFAULTS[key as keyof Filters]) params.set(key, String(value)); }); const url = `${location.pathname}${params.size ? `?${params}` : ""}`; setFilters(next); window.history[replace ? "replaceState" : "pushState"](null, "", url); }, [filters]);
   useEffect(() => { const timer = setTimeout(() => { if (searchDraft !== filters.search) update({ search: searchDraft }, true); }, 300); return () => clearTimeout(timer); }, [searchDraft, filters.search, update]);
   const load = useCallback(async (signal?: AbortSignal) => { setError(""); setLoading(true); try { const p = new URLSearchParams(Object.entries(filters).map(([k, v]) => [k, String(v)])); const response = await fetch(`/api/sales?${p}`, { signal }); const body = await response.json().catch(() => null); if (!response.ok) throw new Error(body?.error || "Could not load sales."); setData(body); if (body.page !== filters.page) update({ page: body.page }, true); } catch (err) { if ((err as Error).name !== "AbortError") setError((err as Error).message); } finally { if (!signal?.aborted) setLoading(false); } }, [filters, update]);
@@ -155,6 +160,9 @@ export default function SalesPage() {
         setSuccessMessage(salesCancelledMessage(result.ordersCancelled, result.unitsAffected, returnToStock));
       }
       if (processWarning) setStatusError(processWarning);
+      // A cancel/permanent-delete may have reversed or purged linked return
+      // records — tell the returns-losses page + Home to re-fetch too.
+      broadcastReturnsChanged();
       setCancelDialogOpen(false); setTerminalTransition(null); setDeleteAfterCancellation(false); clearSelection(); setReloadKey(key => key + 1);
     } catch (err) { setCancelError((err as Error).message); }
     finally { setSubmittingAction(null); }

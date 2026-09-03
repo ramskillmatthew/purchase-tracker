@@ -20,7 +20,12 @@ export async function middleware(request: NextRequest) {
   const owner = process.env.OWNER_EMAIL?.trim().toLowerCase();
   const isOwner = Boolean(user?.email && owner && user.email.toLowerCase() === owner);
   const login = request.nextUrl.pathname === "/login";
-  if (!isOwner && !login && !request.nextUrl.pathname.startsWith("/api/")) {
+  // /privacy must be publicly reachable with no app session — it's the
+  // privacy statement shown during the eBay OAuth consent flow, viewed by
+  // eBay itself and by anyone reviewing the connection, never someone
+  // signed into this app.
+  const publicPage = request.nextUrl.pathname === "/privacy";
+  if (!isOwner && !login && !publicPage && !request.nextUrl.pathname.startsWith("/api/")) {
     const target = request.nextUrl.clone();
     target.pathname = "/login";
     target.searchParams.set("next", request.nextUrl.pathname);

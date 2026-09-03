@@ -16,11 +16,15 @@ describe("app/api/listing-studio/listings-review/route.ts — Milestone 5: read-
     expect(source).not.toContain("export async function DELETE");
   });
 
-  it("excludes Unsorted, archived, and any group that hasn't actually been generated yet", () => {
+  it("excludes Unsorted and archived groups outright; a group with neither Vinted content NOR an eBay marketplace draft is excluded too, but ONE OF THE TWO is now enough (corrective pass — see tests/listings-review-purchase-lookup-route.test.ts's own 'canonical unified row model' describe block for the full behavioural proof)", () => {
     expect(source).toContain("status=neq.archived");
     expect(source).toContain("title=neq.${encodeURIComponent(UNSORTED_TITLE)}");
-    expect(source).toContain("generated_title=not.is.null");
-    expect(source).toContain("generated_description=not.is.null");
+    // The old version required BOTH generated_title AND generated_description
+    // non-null as the entire base filter — that made every eBay-only
+    // product invisible (see the generate route's own shouldWriteVintedContent
+    // gate). Now it's the OR-branch of a union: "has Vinted content" OR
+    // "has an eBay marketplace draft".
+    expect(source).toContain("(row.generated_title && row.generated_description) || ebayProductIds.has(row.id)");
   });
 
   it("selects every field the review UI and its derived status/warnings/edited-detection logic need, including the frozen ai_result_json snapshot and provenance", () => {

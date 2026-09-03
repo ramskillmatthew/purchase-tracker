@@ -489,6 +489,19 @@ describe("app/api/listing-studio/workspace/route.ts — GET (fetches the Create 
   it("REGRESSION: this correction is read-time-only — the GET handler never calls supabaseRequest (only supabaseRequestAll, a read), so it structurally cannot write the correction back to the database", () => {
     expect(getFn).not.toContain("supabaseRequest(");
   });
+
+  it("REGRESSION (proven root cause of 'eBay-only generation makes the draft inaccessible'): buildEbaySummary includes title/description, not just status fields — these were already fetched from listing_marketplace_drafts and silently dropped", () => {
+    // Price/status-sync fix — buildEbaySummary moved out of this route.ts
+    // file (route.ts exports are restricted to recognised handlers/config
+    // by Next.js's own convention) into lib/listing-studio/ebay-card-status.ts,
+    // so it can be exercised directly in tests. This route now imports it
+    // rather than defining it inline.
+    expect(source).toContain('import { buildEbaySummary } from "@/lib/listing-studio/ebay-card-status";');
+    const cardStatusSource = read("lib/listing-studio/ebay-card-status.ts");
+    const buildFn = cardStatusSource.slice(cardStatusSource.indexOf("function buildEbaySummary"));
+    expect(buildFn).toContain("title: row.title,");
+    expect(buildFn).toContain("description: row.description,");
+  });
 });
 
 describe("app/api/listing-studio/workspace/route.ts — DELETE ('Clear all', workspace-wide reset)", () => {
@@ -579,7 +592,10 @@ describe("app/api/listing-studio/groups/[draftId]/generate/route.ts — Mileston
   });
 
   it("never applies/persists anything on an AI failure — only an audit row is written, so a retry always safely repeats the same call", () => {
-    const failureBlock = source.slice(source.indexOf('if (outcome.status !== "success")'), source.indexOf("const fields = outcome.data;"));
+    // Phase 4/6 fix: `fields` is now a `let` (assigned either from a fresh
+    // vision-AI call or from reused stored facts — see runVintedPipeline),
+    // so the anchor is `fields = outcome.data;` without `const`.
+    const failureBlock = source.slice(source.indexOf('if (outcome.status !== "success")'), source.indexOf("fields = outcome.data;"));
     expect(failureBlock).toContain('status: "failed"');
     expect(failureBlock).not.toContain("listing_drafts?id=eq");
     expect(failureBlock).toContain('const status = outcome.status === "not_configured" ? 503 : 502;');
@@ -682,6 +698,13 @@ describe("app/api/listing-studio/groups/[draftId]/fields/route.ts — Milestone 
     const patchStart = source.indexOf("await supabaseRequest(`listing_drafts?id=eq.${draftId}");
     const patchBlock = source.slice(patchStart, source.indexOf("return NextResponse.json({", patchStart));
     expect(patchBlock).toContain('uk_size_source: structuredFields.ukSize ? "manual" : null');
+  });
+
+  it("REGRESSION (marketplace-isolation fix, proven root cause of a shared-fields edit silently creating a Vinted draft): title/description/category are only ever regenerated when a Vinted draft already exists — see tests/vinted-categories-fields-route.test.ts for the real behavioural coverage of this exact fix", () => {
+    expect(source).toContain("const shouldWriteVintedContent = Boolean(draft.generated_title && draft.generated_description);");
+    expect(source).toContain("if (shouldWriteVintedContent) {");
+    expect(source).toContain("let generatedTitle = draft.generated_title;");
+    expect(source).toContain("let generatedDescription = draft.generated_description;");
   });
 
   it("REGRESSION: never accepts a title or description field from the client — updateListingFieldsRequestSchema has no such field, and this route never reads one from the body", () => {

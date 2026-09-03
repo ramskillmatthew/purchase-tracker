@@ -51,9 +51,17 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
     it("has a 4-value top tab (readiness + workflow, never merged) plus a multi-select quick-filter Set, both feeding the same filteredRows computation", () => {
       expect(source).toContain('const [topTab, setTopTab] = useState<TopTab>("all");');
       expect(source).toContain("const [activeQuickFilters, setActiveQuickFilters] = useState<Set<ListingQuickFilter>>(new Set());");
-      expect(source).toContain('if (topTab === "ready" && row.status === "needs_review") return false;');
-      expect(source).toContain('if (topTab === "needs_review" && row.status !== "needs_review") return false;');
-      expect(source).toContain('if (topTab === "drafted" && row.workflowStatus !== "drafted") return false;');
+      // Corrective pass — Ready/Need review/Drafts are now marketplace-aware
+      // (see the product spec's own "Marketplace-aware KPI cards and
+      // filters" requirement): each branch checks the active
+      // workflowMarketplaceView and uses that channel's own criteria,
+      // rather than always reading row.status/row.workflowStatus (Vinted
+      // fields) unconditionally.
+      expect(source).toContain('if (topTab === "ready") {');
+      expect(source).toContain('if (topTab === "needs_review") {');
+      expect(source).toContain('if (topTab === "drafted") {');
+      expect(source).toContain('workflowMarketplaceView === "VINTED" ? (!row.hasVintedPreparation || row.status === "needs_review") : (!row.hasEbayPreparation || !row.ebayContentReady)');
+      expect(source).toContain('workflowMarketplaceView === "VINTED" ? row.workflowStatus !== "drafted" : row.ebayWorkflowStatus !== "completed"');
       expect(source).toContain("for (const filter of activeQuickFilters) if (!matchesQuickFilter(row, filter)) return false;");
     });
 
@@ -159,7 +167,10 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
 
   describe("Warnings", () => {
     it("warnings are recomputed as part of listingRows, which is recomputed whenever the underlying drafts/images change (e.g. after an edit) — never stale", () => {
-      expect(source).toContain("}), [drafts, photoIdsByDraftId]);");
+      // Stage 6 (eBay draft batches) extends this memo's own dependency
+      // array with ebayByProductId (never removes drafts/photoIdsByDraftId
+      // — the Vinted recompute trigger is completely unchanged).
+      expect(source).toContain("}), [drafts, photoIdsByDraftId, ebayByProductId]);");
     });
   });
 
@@ -179,7 +190,10 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
 
     it("workflow status (and its secondary-line inputs) is layered on top of the base rows in its OWN memo (depends on liveItemByDraftId, itself derived from batchStatusById), so a 4s poll tick never re-runs the full base pipeline — only this small mapping", () => {
       expect(source).toContain("const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {");
-      expect(source).toContain("}), [baseListingRows, liveItemByDraftId]);");
+      // Stage 6 extends the SAME memo's own dependency array with the
+      // independent eBay live-status map — the Vinted dependency
+      // (liveItemByDraftId) and its own recompute trigger are unchanged.
+      expect(source).toContain("}), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId]);");
       expect(source).toContain("const queuePosition = live ? live.item.queuePosition : row.extensionStatusSnapshot?.queue_position ?? null;");
     });
 
@@ -213,9 +227,16 @@ describe("components/listings-review/ListingsTable.tsx — visual-accuracy redes
   });
 
   it("has exactly the reference's required columns: Photo, Listing, Size, Cost, Price, Profit, Workflow (plus the bulk-select checkbox column and a row-actions column)", () => {
-    for (const column of ["Photo", "Listing", "Size", "Cost", "Price", "Profit", "Workflow"]) {
+    for (const column of ["Photo", "Listing", "Size", "Cost", "Price", "Profit"]) {
       expect(source).toContain(`<th>${column}</th>`);
     }
+    // Stage 6 (eBay draft batches) — Workflow's own <th> now wraps its
+    // heading text together with the small Vinted/eBay toggle (see
+    // workflowHeader below); the literal word "Workflow" is still there,
+    // just no longer alone inside a bare <th>Workflow</th>.
+    expect(source).toContain("const workflowHeader = <>");
+    expect(source).toContain("<th>{workflowHeader}</th>");
+    expect(source).toMatch(/workflowHeader = <>\s*Workflow/);
   });
 
   it("Listing is one merged cell — title as the primary row text, SKU underneath in muted text — never two separate top-level columns", () => {
@@ -227,19 +248,35 @@ describe("components/listings-review/ListingsTable.tsx — visual-accuracy redes
   it("Cost/Price/Profit render '—' for missing data rather than a misleading number, and reuse formatPenceAsGBP", () => {
     expect(source).toContain('import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";');
     expect(source).toContain('row.costPence !== null ? formatPenceAsGBP(row.costPence) : "—"');
-    expect(source).toContain('row.profitPence !== null ? formatPenceAsGBP(row.profitPence) : "—"');
+    // Stage 6 (eBay draft batches) — Price/Profit are resolved once per
+    // row by resolveWorkflowDisplay (marketplace-aware: Vinted's own
+    // row.sellingPricePence/profitPence, or eBay's), never a hardcoded
+    // Vinted-only field access in the render body itself; Cost stays a
+    // plain row.costPence read above since "You paid" never varies by
+    // marketplace.
+    expect(source).toContain('display.profitPence !== null && display.profitPence > 0 ? " lr-profit-positive" : ""');
+    expect(source).toContain("pricePence: row.sellingPricePence, profitPence: row.profitPence,");
   });
 
   it("Workflow is a bare illuminated dot + text (with an optional truthful secondary line) via the ONE shared WorkflowStatus component — workflow status wins when present, readiness otherwise — colour is never the only signal", () => {
     expect(source).toContain('import { WorkflowStatus } from "./WorkflowStatus";');
-    expect(source).toContain("const displayLabel = row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status];");
+    // Stage 6 — the label/tone decision now lives in the ONE shared
+    // resolveWorkflowDisplay function (used by both the table and the
+    // mobile card list below), rather than being recomputed inline at each
+    // render site — same "workflow status wins when present, readiness
+    // otherwise" logic, just factored out once.
+    expect(source).toContain("function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: ListingMarketplaceView) {");
+    expect(source).toContain("label: row.workflowStatus ? WORKFLOW_STATUS_LABELS[row.workflowStatus] : READINESS_LABELS[row.status],");
     expect(source).toContain("computeWorkflowSecondaryLine({");
-    expect(source).toContain('<WorkflowStatus label={displayLabel} tone={displayTone} pulse={row.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />');
+    expect(source).toContain('<WorkflowStatus label={display.label} tone={display.tone} pulse={display.pulse} secondaryLine={display.secondaryLine} />');
   });
 
   it("the pulse animation is reserved for the single item genuinely 'in_progress' right now, and shared by both the desktop table and the mobile card list via one WorkflowStatus component", () => {
-    const matches = source.match(/pulse=\{row\.workflowStatus === "in_progress"\}/g) ?? [];
-    expect(matches.length).toBe(2); // once in the table, once in the mobile card list
+    // Stage 6 — computed ONCE inside resolveWorkflowDisplay (the single
+    // source of truth both render sites read via display.pulse), rather
+    // than being duplicated inline at each of the two render sites.
+    expect(source.match(/pulse: row\.workflowStatus === "in_progress",/g)?.length).toBe(1);
+    expect(source.match(/pulse=\{display\.pulse\}/g)?.length).toBe(2); // once in the table, once in the mobile card list
   });
 
   it("the header checkbox exposes a real indeterminate state (set imperatively via a ref, since HTML has no declarative attribute for it), recomputed from the currently visible rows", () => {
@@ -475,14 +512,14 @@ describe("components/listing-studio/PreviewListingDialog.tsx — Milestone 5: ex
     expect(source).toContain("condition = null, coverImageUrl = null,");
   });
 
-  it("shows condition and size directly from props", () => {
-    expect(source).toContain("<dt>Condition</dt><dd>{condition || \"Not set\"}</dd>");
+  it("shows condition and size directly from props (marketplace-aware: displayCondition falls back to eBay's own condition when its tab is active)", () => {
+    expect(source).toContain("<dt>Condition</dt><dd>{displayCondition || \"Not set\"}</dd>");
     expect(source).toContain("<dt>Size</dt><dd>{ukSize ? `UK ${ukSize}` : \"Not set\"}</dd>");
   });
 
-  it("Milestone 6: shows the real saved selling price when set, the explicit placeholder only when it isn't", () => {
+  it("Milestone 6: shows the real saved selling price when set, the explicit placeholder only when it isn't (marketplace-aware: displayPricePence is eBay's own price when its tab is active)", () => {
     expect(source).toContain("sellingPricePence = null,");
-    expect(source).toContain('<dd className={sellingPricePence ? undefined : "preview-listing-vinted-price-placeholder"}>{sellingPricePence ? formatPenceAsGBP(sellingPricePence) : "Price not set"}</dd>');
+    expect(source).toContain('<dd className={displayPricePence ? undefined : "preview-listing-vinted-price-placeholder"}>{displayPricePence ? formatPenceAsGBP(displayPricePence) : "Price not set"}</dd>');
   });
 
   it("shows a large cover image when provided, and a distinct empty state when not", () => {
@@ -862,28 +899,34 @@ describe("Milestone 7 (Chrome extension draft queue), extended for multi-batch s
 describe("Visual-accuracy redesign — 4 real KPI cards, canonical (no duplicated inline heading stats)", () => {
   const source = read("components/listings-review/ListingsReviewWorkspace.tsx");
 
-  it("readyCount/needsReviewCount come ONLY from readiness (never from workflow status)", () => {
-    expect(source).toContain('const readyCount = useMemo(() => listingRows.filter(row => row.status !== "needs_review").length, [listingRows]);');
-    expect(source).toContain('const needsReviewCount = useMemo(() => listingRows.filter(row => row.status === "needs_review").length, [listingRows]);');
+  it("REQUIREMENT (corrective pass): readyCount/needsReviewCount are marketplace-aware — Vinted mode reads readiness, eBay mode reads ebayContentReady, both scoped to channelRows (rows that actually HAVE the active channel's preparation)", () => {
+    expect(source).toContain("const channelRows = useMemo(");
+    expect(source).toContain('row => (workflowMarketplaceView === "VINTED" ? row.hasVintedPreparation : row.hasEbayPreparation)');
+    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.status !== "needs_review" : row\.ebayContentReady/);
+    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.status === "needs_review" : !row\.ebayContentReady/);
   });
 
-  it("draftsCount/sentCount come ONLY from workflow status, via the shared WORKFLOW_STATUS_TAB_GROUPS — never re-implemented ad hoc", () => {
+  it("draftsCount/sentCount come from workflow status (Vinted: via the shared WORKFLOW_STATUS_TAB_GROUPS; eBay: via the equivalent eBay draft-batch stages) — never re-implemented ad hoc for either channel", () => {
     expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)");
     expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)");
+    expect(source).toContain('row.ebayWorkflowStatus === "completed"');
+    expect(source).toContain("EBAY_IN_PROGRESS_STATUSES as string[]).includes(row.ebayWorkflowStatus)");
   });
 
-  it("draftingCount — the 4th KPI card — comes from real, persisted extension-item state (preparing/filling/saving), never a client-only guess", () => {
-    expect(source).toContain('const draftingCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "in_progress").length, [listingRows]);');
+  it("draftingCount — the 4th KPI card — comes from real, persisted extension-item (or eBay draft-batch-item) state, never a client-only guess, and is marketplace-aware", () => {
+    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.workflowStatus === "in_progress" : isEbayWorkflowInProgress\(row\.ebayWorkflowStatus\)/);
   });
 
-  it("failedCount is computed and exposed to the Filters control — a failed listing is always visible somewhere, never hidden", () => {
-    expect(source).toContain('const failedCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "failed").length, [listingRows]);');
+  it("failedCount is computed and exposed to the Filters control — a failed listing is always visible somewhere, never hidden — and is marketplace-aware", () => {
+    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.workflowStatus === "failed" : row\.ebayWorkflowStatus === "failed"/);
     expect(source).toContain("failedCount={failedCount}");
   });
 
-  it("exactly 4 real KPI cards (Listings/Ready/Drafting/Need review) render real counts via the ONE shared KpiIcon component, and the totalCount passed to the filter bar matches the real row count", () => {
+  it("exactly 4 real KPI cards (Listings/Ready/Drafting/Need review) render real counts via the ONE shared KpiIcon component; the Listings card is channel-scoped while the filter bar's own 'All' tab count stays the true unfiltered total", () => {
     expect(source).toContain('import { KpiIcon } from "./KpiIcon";');
-    expect(source).toContain('<div><strong>{listingRows.length}</strong><span className="lr-kpi-label">Listings</span></div>');
+    expect(source).toContain('<div><strong>{channelListingsCount}</strong><span className="lr-kpi-label">Listings</span></div>');
+    expect(source).toContain("const channelListingsCount = channelRows.length;");
+    expect(source).toContain("totalCount={listingRows.length}"); // the filter bar's own "All" tab — deliberately NEVER channel-scoped
     expect(source).toContain('<div><strong>{readyCount}</strong><span className="lr-kpi-label">Ready</span></div>');
     expect(source).toContain('<div><strong>{draftingCount}</strong><span className="lr-kpi-label">Drafting</span></div>');
     expect(source).toContain('<div><strong>{needsReviewCount}</strong><span className="lr-kpi-label">Need review</span></div>');
@@ -1270,8 +1313,13 @@ describe("Correction pass — contextual send/resend (reuses the existing batch-
     expect(tableSource).toContain("onSendToExtension");
   });
 
-  it("only offered when genuinely sendable (not needs_review) and not already mid-workflow; relabels to 'Resend' after a failure — no separate retry endpoint invented", () => {
-    expect(panelSource).toContain('const canSend = listing.status !== "needs_review" && (listing.workflowStatus === null || listing.workflowStatus === "failed");');
+  it("only offered when genuinely sendable (has a real Vinted preparation, not needs_review) and not already mid-workflow; relabels to 'Resend' after a failure — no separate retry endpoint invented", () => {
+    // Corrective pass — canSend now also requires hasVintedPreparation:
+    // an eBay-only listing (no Vinted content at all) must never offer
+    // Send to extension, made an explicit, tested rule rather than an
+    // accidental side effect of its Vinted readiness fields always
+    // reading "needs_review".
+    expect(panelSource).toContain('const canSend = listing.hasVintedPreparation && listing.status !== "needs_review" && (listing.workflowStatus === null || listing.workflowStatus === "failed");');
     expect(panelSource).toMatch(/listing\.workflowStatus === "failed" \? "Resend to extension" : "Send to extension"/);
   });
 });
@@ -1397,7 +1445,9 @@ describe("Visual-accuracy redesign — mobile card list (a real alternate layout
 
   it("renders both the table and a separate <ul> card list, sharing the same rows/handlers — CSS (not JS) decides which is visible", () => {
     expect(tableSource).toContain('<ul className="lr-card-list">');
-    expect(tableSource).toContain('pulse={row.workflowStatus === "in_progress"}');
+    // Stage 6 — both render sites read the shared resolveWorkflowDisplay
+    // result (display.pulse) rather than duplicating the pulse expression.
+    expect(tableSource.match(/pulse=\{display\.pulse\}/g)?.length).toBe(2);
   });
 
   it("hidden/shown via a dedicated 620px block positioned after its own base rules — the table hides, the card list shows, matching this codebase's established phone breakpoint", () => {

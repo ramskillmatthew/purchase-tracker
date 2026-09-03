@@ -2,30 +2,32 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
-import { supabaseRequestAll } from "@/lib/supabase";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
-import { suggestEbayCategory, describeEbayCategorySuggestionFailure } from "@/lib/listing-studio/ebay-category-service";
-import { getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
+import { getMarketplaceDraft, patchMarketplaceDraft, getMarketplaceSettingsDefaults } from "@/lib/listing-studio/marketplace-drafts";
+import { resolveMarketplaceSettings } from "@/lib/listing-studio/marketplace-settings";
 import { computeMarketplaceReadiness } from "@/lib/listing-studio/marketplace-readiness";
-import type { SharedFacts, MarketplaceValidationMessage } from "@/lib/listing-studio/marketplace-types";
+import { readContentGenerationState } from "@/lib/listing-studio/ebay-content-generation-state";
+import { autoSuggestAndPersistEbayCategory } from "@/lib/listing-studio/ebay-category-automation";
+import { autoResolveAndPersistEbayAspects } from "@/lib/listing-studio/ebay-aspect-persistence";
 import { getCachedCategoryTreeId } from "@/lib/listing-studio/ebay-taxonomy-cache";
 import { getCategorySuggestions } from "@/lib/listing-studio/ebay-taxonomy-client";
+import { describeEbayApiFailure } from "@/lib/listing-studio/ebay-error-codes";
+import { clearRealAspectFields } from "@/lib/listing-studio/ebay-aspect-matching";
+import { buildSellingSettingsMessages, withoutMessageCodes, withoutMessageCodePrefix, SELLING_SETTINGS_MESSAGE_CODES } from "@/lib/listing-studio/ebay-validation-messages";
+import type { MarketplaceValidationMessage } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
 
-type ProductRow = { brand: string | null; model: string | null; product_type: string | null; shared_facts_json: SharedFacts | null };
-
-function sharedFactValue(facts: SharedFacts | null, name: string): string | null {
-  return facts?.[name]?.value ?? null;
-}
-
 /**
  * Stage 4 — runs the real eBay category suggestion pipeline for this
- * product's eBay UK draft, using structured facts already extracted for it
- * (the same brand/model/productType Vinted generation already produced,
- * plus any Stage-2 shared facts) — never a raw title paragraph. Persists
- * the result (and honestly reports when eBay access isn't configured yet,
- * or is temporarily unavailable) rather than ever fabricating a category.
+ * product's eBay UK draft (Fault 3 fix: this is now also called
+ * AUTOMATICALLY right after an eBay draft is first generated — see
+ * app/api/listing-studio/groups/[draftId]/generate/route.ts's own eBay
+ * branch — so this route is a RETRY/CHANGE action, never the mandatory
+ * first step). Shares its actual suggest+persist logic with that automatic
+ * call site via lib/listing-studio/ebay-category-automation.ts, so the two
+ * can never drift apart. Never fabricates a category — see that module's
+ * own confidence-tiered persistence rules.
  */
 export async function POST(_request: Request, { params }: { params: Promise<{ draftId: string }> }) {
   try {
@@ -33,46 +35,55 @@ export async function POST(_request: Request, { params }: { params: Promise<{ dr
     const { draftId } = await params;
     if (!uuidSchema.safeParse(draftId).success) return NextResponse.json({ error: "Invalid group id." }, { status: 400 });
 
-    const products = await supabaseRequestAll<ProductRow>(`listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=brand,model,product_type,shared_facts_json`);
-    const product = products[0];
-    if (!product) return NextResponse.json({ error: "Group not found." }, { status: 404 });
-
     const ebayDraft = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
     if (!ebayDraft) return NextResponse.json({ error: "Generate an eBay draft for this product before choosing a category." }, { status: 404 });
 
-    const facts = product.shared_facts_json ?? null;
-    const outcome = await suggestEbayCategory({
-      brand: product.brand, productType: product.product_type, model: product.model,
-      set: sharedFactValue(facts, "set"), configuration: sharedFactValue(facts, "configuration"),
-      title: ebayDraft.title, knownCategoryName: ebayDraft.categoryName, keyAttributes: [],
-    });
+    const accountDefaults = await getMarketplaceSettingsDefaults(user.id, "EBAY_UK");
+    const settings = resolveMarketplaceSettings(accountDefaults, null, ebayDraft.settings);
+    const outcome = await autoSuggestAndPersistEbayCategory(user.id, draftId, settings.automationMode, ebayDraft);
 
-    if (outcome.status !== "success") {
-      return NextResponse.json({ error: describeEbayCategorySuggestionFailure(outcome), status: outcome.status }, { status: outcome.status === "not_configured" ? 503 : 502 });
+    if (outcome.status === "failed") {
+      // Phase 8 fix — a safe error CODE (never the raw provider error,
+      // never a secret) alongside the honest, precise message, so the
+      // client can distinguish "not configured" from "auth failed" from
+      // "temporarily unavailable" instead of one generic bucket.
+      const httpStatus = outcome.reason === "not_configured" ? 503 : outcome.code === "EBAY_AUTH_FAILED" ? 502 : outcome.code === "EBAY_RATE_LIMITED" ? 429 : 502;
+      return NextResponse.json({ error: outcome.message, code: outcome.code }, { status: httpStatus });
+    }
+    // Live-diagnostic follow-up fix (Phase 7 — item specifics no longer
+    // require a manual "Suggest item specifics" click as the mandatory
+    // next step): once a category is genuinely applied, immediately run
+    // the SAME aspect-mapping pipeline generation already triggers, so the
+    // manual retry path ("Suggest category") reaches the same fully
+    // automated end state. A failure here is never fatal to the category
+    // change itself — it's surfaced only as slightly stale readiness; the
+    // owner can still retry via "Suggest item specifics".
+    let aspectReadiness = outcome.status === "applied" ? outcome.readiness : null;
+    if (outcome.status === "applied") {
+      try {
+        const aspectOutcome = await autoResolveAndPersistEbayAspects(user.id, draftId);
+        if (aspectOutcome.status === "applied") aspectReadiness = aspectOutcome.readiness;
+      } catch {
+        // Never lets an aspect-mapping failure undo or fail the category
+        // change that already succeeded and was already persisted above.
+      }
     }
 
-    const requiredAspectsFilled = Object.values(ebayDraft.dynamicData).filter(a => a.confidence !== "unknown").map(() => true);
-    const readiness = computeMarketplaceReadiness({
-      hasCategory: true, hasCondition: !!ebayDraft.conditionValue, hasTitle: !!ebayDraft.title, hasDescriptionOrGenerationPath: !!ebayDraft.description,
-      hasPhoto: true, hasPrice: ebayDraft.pricePence != null, hasQuantity: ebayDraft.quantity != null,
-      hasSufficientSellingSettings: true, requiredAspectsFilled, recommendedAspectsFilled: [],
+    // Re-fetch so the client sees exactly what was persisted (selected
+    // category, alternatives, search terms, freshly mapped item
+    // specifics) rather than reconstructing it here a second time.
+    const refreshed = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
+    return NextResponse.json({
+      selected: outcome.status === "applied" ? { categoryId: refreshed?.categoryId, categoryName: refreshed?.categoryName, categoryPath: refreshed?.categoryPath, confidence: refreshed?.categoryConfidence } : null,
+      alternatives: refreshed?.categoryAlternatives ?? [], searchTerms: refreshed?.categorySearchTerms ?? "", readiness: aspectReadiness ?? outcome.readiness,
+      dynamicData: refreshed?.dynamicData ?? {},
+      leftUnresolved: outcome.status === "left_unresolved",
+      // Phase 8 fix — "the live localhost UI must state when it is using
+      // fixture mode." True only when no real eBay credentials are
+      // configured at all (see ebay-category-service.ts's own useFixture
+      // gate) — never true once real credentials exist, even invalid ones.
+      usedFixture: outcome.usedFixture,
     });
-    const validationMessages: MarketplaceValidationMessage[] = ebayDraft.validationMessages.filter(m => m.code !== "category_not_set");
-    if (outcome.selected.confidence === "low") {
-      validationMessages.push({ code: "category_needs_confirmation", message: "The suggested eBay category is uncertain — please confirm it.", field: "category", severity: "warning" });
-    }
-    if (!ebayDraft.conditionValue) validationMessages.push({ code: "condition_not_set", message: "An eBay condition is required.", field: "condition", severity: "blocking" });
-    if (ebayDraft.pricePence == null) validationMessages.push({ code: "price_not_set", message: "A price is required.", field: "price", severity: "blocking" });
-    if (ebayDraft.quantity == null) validationMessages.push({ code: "quantity_not_set", message: "A quantity is required.", field: "quantity", severity: "blocking" });
-
-    await patchMarketplaceDraft(user.id, ebayDraft.id, {
-      category_id: outcome.selected.categoryId, category_name: outcome.selected.categoryName, category_path: outcome.selected.categoryPath,
-      category_source: "ai", category_confidence: outcome.selected.confidence,
-      category_alternatives_json: outcome.alternatives, category_search_terms: outcome.searchTerms,
-      status: readiness.ready ? "ready" : "needs_information", readiness_json: readiness, validation_messages_json: validationMessages,
-    });
-
-    return NextResponse.json({ selected: outcome.selected, alternatives: outcome.alternatives, searchTerms: outcome.searchTerms, stale: outcome.stale, readiness });
   } catch (error) { return safeApiError(error, "Could not suggest an eBay category for this product."); }
 }
 
@@ -101,9 +112,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     if (!ebayDraft) return NextResponse.json({ error: "eBay draft not found." }, { status: 404 });
 
     const treeResult = await getCachedCategoryTreeId("EBAY_GB");
-    if (!treeResult.ok) return NextResponse.json({ error: "eBay category access has not been configured yet." }, { status: 503 });
+    if (!treeResult.ok) {
+      const { code, message } = describeEbayApiFailure(treeResult.error);
+      return NextResponse.json({ error: message, code }, { status: treeResult.error === "not_configured" ? 503 : code === "EBAY_RATE_LIMITED" ? 429 : 502 });
+    }
     const suggestionsResult = await getCategorySuggestions(treeResult.data.categoryTreeId, searchTerms);
-    if (!suggestionsResult.ok) return NextResponse.json({ error: "We could not retrieve eBay categories. Try again shortly." }, { status: 502 });
+    if (!suggestionsResult.ok) {
+      const { code, message } = describeEbayApiFailure(suggestionsResult.error);
+      return NextResponse.json({ error: message, code }, { status: suggestionsResult.error === "not_configured" ? 503 : code === "EBAY_RATE_LIMITED" ? 429 : 502 });
+    }
 
     const match = suggestionsResult.data.find(s => s.category.categoryId === categoryId);
     if (!match) return NextResponse.json({ error: "The suggested value is not accepted by eBay. Choose another value." }, { status: 422 });
@@ -115,25 +132,48 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     const nextAlternatives = [previousSelected, ...ebayDraft.categoryAlternatives ?? []].filter((a): a is NonNullable<typeof a> => !!a && a.categoryId !== categoryId).slice(0, 4);
 
     const requiredAspectsFilled: boolean[] = [];
+    const hasGeneratedContent = readContentGenerationState(ebayDraft.dynamicData, {
+      sourceType: ebayDraft.sourceType, contentMode: ebayDraft.contentMode,
+      hasTitle: Boolean(ebayDraft.title), hasDescription: Boolean(ebayDraft.description),
+    }).state === "generated";
     const readiness = computeMarketplaceReadiness({
       hasCategory: true, hasCondition: !!ebayDraft.conditionValue, hasTitle: !!ebayDraft.title, hasDescriptionOrGenerationPath: !!ebayDraft.description,
       hasPhoto: true, hasPrice: ebayDraft.pricePence != null, hasQuantity: ebayDraft.quantity != null,
-      hasSufficientSellingSettings: true, requiredAspectsFilled, recommendedAspectsFilled: [],
+      hasSufficientSellingSettings: true, hasGeneratedContent, requiredAspectsFilled, recommendedAspectsFilled: [],
     });
-    const validationMessages: MarketplaceValidationMessage[] = ebayDraft.validationMessages.filter(m => m.code !== "category_not_set" && m.code !== "category_needs_confirmation");
-    if (!ebayDraft.conditionValue) validationMessages.push({ code: "condition_not_set", message: "An eBay condition is required.", field: "condition", severity: "blocking" });
-    if (ebayDraft.pricePence == null) validationMessages.push({ code: "price_not_set", message: "A price is required.", field: "price", severity: "blocking" });
-    if (ebayDraft.quantity == null) validationMessages.push({ code: "quantity_not_set", message: "A quantity is required.", field: "quantity", severity: "blocking" });
+    let validationMessages: MarketplaceValidationMessage[] = withoutMessageCodePrefix(
+      ebayDraft.validationMessages.filter(m => m.code !== "category_not_set" && m.code !== "category_needs_confirmation"),
+      "aspect_",
+    );
+    validationMessages = withoutMessageCodes(validationMessages, SELLING_SETTINGS_MESSAGE_CODES);
+    validationMessages.push(...buildSellingSettingsMessages(ebayDraft));
 
     await patchMarketplaceDraft(user.id, ebayDraft.id, {
       category_id: categoryId, category_name: categoryName, category_path: categoryPath,
       category_source: "manual", category_confidence: null,
       category_alternatives_json: nextAlternatives, category_search_terms: searchTerms,
-      // A new category invalidates any previously-fetched aspect definitions.
-      dynamic_data_json: {},
+      // Live-diagnostic follow-up fix (proven root cause of package size
+      // reverting to "Not set" on every manual category change) — a new
+      // category genuinely invalidates the OLD category's real taxonomy
+      // aspect values (cleared here), but never the reserved pseudo-
+      // aspects (__packageSize/__contentGeneration/__productFacts), which
+      // are not category-specific data at all. See clearRealAspectFields.
+      dynamic_data_json: clearRealAspectFields(ebayDraft.dynamicData),
       status: readiness.ready ? "ready" : "needs_information", readiness_json: readiness, validation_messages_json: validationMessages,
     });
 
-    return NextResponse.json({ categoryId, categoryName, categoryPath, readiness });
+    // Live-diagnostic follow-up fix (Phase 7) — a category genuinely just
+    // changed, so its item specifics are re-mapped immediately rather than
+    // waiting for a separate manual "Suggest item specifics" click. Best-
+    // effort: a failure here doesn't undo/fail the category change already
+    // persisted above — the owner can still retry via "Suggest item
+    // specifics" if this genuinely fails.
+    let finalReadiness = readiness;
+    try {
+      const aspectOutcome = await autoResolveAndPersistEbayAspects(user.id, draftId);
+      if (aspectOutcome.status === "applied") finalReadiness = aspectOutcome.readiness;
+    } catch { /* category change already succeeded and was already persisted above */ }
+
+    return NextResponse.json({ categoryId, categoryName, categoryPath, readiness: finalReadiness });
   } catch (error) { return safeApiError(error, "Could not change this product's eBay category."); }
 }

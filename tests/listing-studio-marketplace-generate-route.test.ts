@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}));
 const {
   requireOwner, supabaseRequestAll, supabaseRequest,
   prepareListingGenerationImageInputs, runListingGenerationAnalysis, runVintedCategorySelection,
-  upsertMarketplaceDraft, getMarketplaceSettingsDefaults,
+  upsertMarketplaceDraft, getMarketplaceSettingsDefaults, getMarketplaceDraft, patchMarketplaceDraft,
 } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   supabaseRequestAll: vi.fn(async (_path: string) => [] as unknown[]),
@@ -18,6 +18,14 @@ const {
     readiness: { ready: boolean }; validationMessages: { code: string }[];
   }) => "marketplace-draft-1"),
   getMarketplaceSettingsDefaults: vi.fn(async () => ({} as Record<string, unknown>)),
+  // Step 5 (parcel-size suggestion) — the generate route reads the
+  // just-upserted eBay draft back to check for a manually-confirmed
+  // package size before writing a fresh suggestion. Defaults to "no
+  // existing draft found" so every pre-existing test in this file (none of
+  // which know or care about package suggestions) keeps exercising the
+  // same silent, soft-failure no-op path it always has.
+  getMarketplaceDraft: vi.fn(async () => null as { id: string; dynamicData: Record<string, unknown> } | null),
+  patchMarketplaceDraft: vi.fn(async (_ownerId: string, _id: string, _patch: Record<string, unknown>) => {}),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
@@ -30,7 +38,7 @@ vi.mock("@/lib/listing-studio/vinted-category-selection-ai", async importOrigina
   const actual = await importOriginal<typeof import("@/lib/listing-studio/vinted-category-selection-ai")>();
   return { ...actual, runVintedCategorySelection };
 });
-vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ upsertMarketplaceDraft, getMarketplaceSettingsDefaults }));
+vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ upsertMarketplaceDraft, getMarketplaceSettingsDefaults, getMarketplaceDraft, patchMarketplaceDraft }));
 
 import { POST as generateRoute } from "@/app/api/listing-studio/groups/[draftId]/generate/route";
 
@@ -68,6 +76,8 @@ beforeEach(() => {
   runListingGenerationAnalysis.mockReset();
   runVintedCategorySelection.mockReset();
   upsertMarketplaceDraft.mockClear();
+  getMarketplaceDraft.mockReset(); getMarketplaceDraft.mockResolvedValue(null);
+  patchMarketplaceDraft.mockReset();
   supabaseRequestAll.mockImplementation(async (path: string) => {
     if (path.startsWith("listing_drafts?")) return [draftRow()];
     if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
@@ -107,6 +117,59 @@ describe("POST /api/listing-studio/groups/[draftId]/generate — Stage 2 marketp
       productDraftId: DRAFT_ID, ownerId: "owner-1", marketplace: "EBAY_UK",
       sourceType: "generated", contentMode: "seo_optimised",
     }));
+  });
+
+  it("MARKETPLACE ISOLATION (proven root-cause fix): eBay UK selected on a BRAND-NEW product (no prior Vinted content at all) still runs the shared vision analysis to obtain facts, but never writes a Vinted draft — the previous single 'runVintedPipeline' boolean incorrectly ran the full Vinted-writing pipeline in exactly this case", async () => {
+    // draftRow() has no generated_title/generated_description overrides —
+    // this IS the brand-new-product case that exposed the bug: the old
+    // `!alreadyHasVintedContent` fallback made `runVintedPipeline` true
+    // even though only EBAY_UK was requested.
+    const response = await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // Vision analysis still runs exactly once — facts are genuinely needed
+    // for the eBay draft, and this is shared infrastructure, not itself a
+    // "Vinted generation call" (Vinted's own title/description are
+    // template-based, never AI-written).
+    expect(runListingGenerationAnalysis).toHaveBeenCalledTimes(1);
+    // But NOTHING Vinted-shaped is written: no PATCH to listing_drafts, no
+    // Vinted analysis-run audit row, no Vinted category-selection call.
+    const draftPatchCalls = supabaseRequest.mock.calls.filter(([path]) => typeof path === "string" && path.startsWith("listing_drafts?id=eq"));
+    expect(draftPatchCalls).toHaveLength(0);
+    const analysisRunCalls = supabaseRequest.mock.calls.filter(([path]) => typeof path === "string" && path.startsWith("listing_analysis_runs"));
+    expect(analysisRunCalls).toHaveLength(0);
+    expect(runVintedCategorySelection).not.toHaveBeenCalled();
+    // The response honestly reports Vinted was never touched, not merely
+    // "already ready".
+    expect(body.vintedGenerated).toBe(false);
+    // draftRow() never had a Vinted title/description in the first place —
+    // JSON.stringify drops an undefined field entirely, so it's simply
+    // absent from the response, never a fabricated placeholder value.
+    expect(body.generatedTitle).toBeUndefined();
+    expect(body.generatedDescription).toBeUndefined();
+    // The eBay draft itself was still genuinely created.
+    expect(body.ebayDraft).toBeDefined();
+    expect(upsertMarketplaceDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("MARKETPLACE ISOLATION: eBay UK selected on a product that ALREADY has a Vinted draft leaves that Vinted draft completely untouched, byte-for-byte", async () => {
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_drafts?")) {
+        return [draftRow({ generated_title: "Existing Vinted Title", generated_description: "Existing Vinted Description", ai_result_json: aiFields({ vintedAudienceEvidence: ["Evidence"] }) })];
+      }
+      if (path.startsWith("listing_draft_images?")) return [{ id: "img-1", storage_path: "p", mime_type: "image/jpeg" }];
+      return [];
+    });
+    const response = await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // No fresh vision call needed either — reuse whatever stored facts.
+    expect(runListingGenerationAnalysis).not.toHaveBeenCalled();
+    const draftPatchCalls = supabaseRequest.mock.calls.filter(([path]) => typeof path === "string" && path.startsWith("listing_drafts?id=eq"));
+    expect(draftPatchCalls).toHaveLength(0);
+    expect(body.vintedGenerated).toBe(false);
+    expect(body.generatedTitle).toBe("Existing Vinted Title");
+    expect(body.generatedDescription).toBe("Existing Vinted Description");
   });
 
   it("targets: ['VINTED','EBAY_UK'] (Both) produces the Vinted response fields AND an eBay draft from one shared analysis call", async () => {
@@ -193,6 +256,58 @@ describe("POST /api/listing-studio/groups/[draftId]/generate — Stage 2 marketp
       await generateRoute(requestWithTargets(["EBAY_UK"]), params());
       const call = upsertMarketplaceDraft.mock.calls[0][0];
       expect(call.contentMode).toBe("exact_copy");
+    });
+  });
+
+  describe("Step 5 (parcel-size suggestion) automatically applied as part of the eBay draft job", () => {
+    it("REQUIREMENT: a fresh eBay draft with no prior package size gets a suggestion persisted via dynamic_data_json.__packageSize, never overwriting other stored aspects", async () => {
+      getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: { Colour: { value: "Black", confidence: "high", source: "x", appliedAutomatically: true, needsReview: false, userConfirmed: true, updatedAt: "x" } } });
+      await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+      expect(patchMarketplaceDraft).toHaveBeenCalled();
+      const [ownerId, id, patch] = patchMarketplaceDraft.mock.calls[0];
+      expect(ownerId).toBe("owner-1");
+      expect(id).toBe("mdraft-1");
+      const dynamicData = patch.dynamic_data_json as Record<string, { value: unknown; userConfirmed: boolean }>;
+      expect(dynamicData.Colour.value).toBe("Black"); // untouched, still present
+      expect(dynamicData.__packageSize).toBeTruthy();
+      expect(dynamicData.__packageSize.userConfirmed).toBe(false);
+    });
+
+    it("Problem 8: persists structured product facts (style code, resolved condition state) via dynamic_data_json.__productFacts, ready for a future eBay API listing stage", async () => {
+      getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: {} });
+      await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+      const patch = patchMarketplaceDraft.mock.calls[0][2] as { dynamic_data_json: Record<string, unknown> };
+      const productFacts = patch.dynamic_data_json.__productFacts as { styleCode: string | null; conditionState: string; updatedAt: string };
+      expect(productFacts).toBeTruthy();
+      expect(["very_good_preowned", "new", "needs_review"]).toContain(productFacts.conditionState);
+      expect(productFacts.updatedAt).toBeTruthy();
+    });
+
+    it("REQUIREMENT (manual override always wins): a package size the owner already confirmed is never overwritten by a fresh suggestion", async () => {
+      getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: { __packageSize: { value: "large_letter", confidence: "medium", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "x" } } });
+      await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+      // Phase 3 fix — patchMarketplaceDraft is now ALSO the write path for
+      // the authoritative content-generation state (dynamicData.
+      // __contentGeneration), so it's no longer expected to be uncalled
+      // outright; the real, still-load-bearing assertion is that the
+      // owner's own confirmed __packageSize choice is never part of that
+      // write's payload.
+      expect(patchMarketplaceDraft).toHaveBeenCalled();
+      const dynamicDataPatch = (patchMarketplaceDraft.mock.calls[0][2] as { dynamic_data_json: Record<string, unknown> }).dynamic_data_json;
+      expect(dynamicDataPatch.__packageSize).toEqual({ value: "large_letter", confidence: "medium", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "x" });
+      expect(dynamicDataPatch.__contentGeneration).toBeTruthy();
+    });
+
+    it("never breaks 'Generate listings' when persisting the package suggestion fails — the eBay draft itself is still returned successfully", async () => {
+      getMarketplaceDraft.mockRejectedValue(new Error("network blip"));
+      const response = await generateRoute(requestWithTargets(["EBAY_UK"]), params());
+      expect(response.status).toBe(200);
+    });
+
+    it("does nothing when no eBay draft is being generated (VINTED-only request)", async () => {
+      await generateRoute(requestWithTargets(["VINTED"]), params());
+      expect(getMarketplaceDraft).not.toHaveBeenCalled();
+      expect(patchMarketplaceDraft).not.toHaveBeenCalled();
     });
   });
 });

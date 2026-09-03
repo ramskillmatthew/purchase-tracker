@@ -30,12 +30,75 @@ function oauthTokenUrl(): string {
   return process.env.EBAY_ENVIRONMENT === "SANDBOX" ? "https://api.sandbox.ebay.com/identity/v1/oauth2/token" : "https://api.ebay.com/identity/v1/oauth2/token";
 }
 
+// Two of eBay's own documented Taxonomy API errorId values — confirmed by
+// direct, real, read-only diagnostic calls against the Production API
+// (never guessed): requesting a bogus marketplace_id returned HTTP 400,
+// `{"errorId":62003,...,"message":"The specified marketplace ID was not
+// found."}`; requesting a bad/unrecognised category_tree_id path segment
+// returned HTTP 404, `{"errorId":62004,...,"message":"The specified
+// category tree ID was not found."}`. Used below to distinguish these two
+// genuinely different REQUEST-category failures from the generic bucket —
+// never applied to a status/domain/category combination that hasn't
+// actually been observed.
+const EBAY_ERROR_ID_INVALID_MARKETPLACE = 62003;
+const EBAY_ERROR_ID_CATEGORY_TREE_NOT_FOUND = 62004;
+
 export type EbayApiFailure =
   | { ok: false; error: "not_configured" }
   | { ok: false; error: "timeout" }
+  // A `fetch()` itself never completed (DNS failure, connection refused,
+  // offline) — distinct from "timeout" (the request was sent and simply
+  // took too long) and from every status-code-driven failure below (a
+  // real HTTP response was never received at all).
+  | { ok: false; error: "network_failure" }
   | { ok: false; error: "rate_limited" }
+  // Real, proven runtime failure (Phase 8 diagnosis) — a direct OAuth
+  // client_credentials request with this project's own configured
+  // EBAY_CLIENT_ID/EBAY_CLIENT_SECRET returned HTTP 401 "invalid_client:
+  // client authentication failed" against BOTH eBay's production and
+  // sandbox endpoints. Before this fix, a 401 fell into the generic
+  // "request_failed" bucket below, which is exactly why the UI only ever
+  // showed "We could not retrieve eBay categories. Try again shortly." —
+  // technically true, but useless for diagnosing a bad keyset. Distinct
+  // from "not_configured" (values present but simply present ≠ valid).
+  // Also the classification for a genuinely disabled/suspended keyset —
+  // eBay's OAuth token endpoint does not appear to return a signal
+  // distinguishable from "wrong secret" for that case (both come back as
+  // the same 401 invalid_client), so it is deliberately not split out
+  // into its own state rather than inventing an unverified distinction.
+  | { ok: false; error: "auth_failed" }
+  // HTTP 403 on an authenticated API call — the token itself was
+  // accepted (never a 401), but the request was rejected as forbidden,
+  // the standard REST/OAuth2 signal for a missing or rejected scope/
+  // permission on an otherwise-valid token.
+  | { ok: false; error: "scope_rejected" }
+  // Verified via EBAY_ERROR_ID_INVALID_MARKETPLACE above.
+  | { ok: false; error: "marketplace_unsupported" }
+  // Verified via EBAY_ERROR_ID_CATEGORY_TREE_NOT_FOUND above — a stale or
+  // otherwise-bad category tree id was rejected by a call that DOES take
+  // one (get_category_suggestions / get_item_aspects_for_category).
+  | { ok: false; error: "category_tree_unavailable" }
+  // A real HTTP response was received with a 5xx status — eBay's own
+  // side genuinely failed, never a request-shape problem on this app's
+  // end (which would be a 4xx).
+  | { ok: false; error: "server_error" }
   | { ok: false; error: "request_failed" }
   | { ok: false; error: "invalid_response" };
+
+/** Reads the response body ONCE (already bounded by the caller) and
+ * checks it against eBay's own documented, VERIFIED errorId values for
+ * the two specific REQUEST-category failures above — returns null for
+ * anything else (including a genuinely unparseable body), so the caller
+ * always has a safe, honest generic fallback to use instead of a guess. */
+function classifyEbayRequestError(rawBody: string): EbayApiFailure | null {
+  try {
+    const json = JSON.parse(rawBody) as { errors?: Array<{ errorId?: number }> };
+    const errorId = json?.errors?.[0]?.errorId;
+    if (errorId === EBAY_ERROR_ID_INVALID_MARKETPLACE) return { ok: false, error: "marketplace_unsupported" };
+    if (errorId === EBAY_ERROR_ID_CATEGORY_TREE_NOT_FOUND) return { ok: false, error: "category_tree_unavailable" };
+  } catch { /* not parseable JSON — fall through to the caller's own generic classification */ }
+  return null;
+}
 
 function credentials(): { clientId: string; clientSecret: string } | null {
   const clientId = process.env.EBAY_CLIENT_ID;
@@ -71,9 +134,15 @@ async function getAccessToken(): Promise<{ ok: true; token: string } | EbayApiFa
       body: new URLSearchParams({ grant_type: "client_credentials", scope: EBAY_OAUTH_SCOPE }).toString(),
     });
   } catch (error) {
-    return { ok: false, error: (error as Error)?.name === "TimeoutError" ? "timeout" : "request_failed" };
+    return { ok: false, error: (error as Error)?.name === "TimeoutError" ? "timeout" : "network_failure" };
   }
   if (response.status === 429) return { ok: false, error: "rate_limited" };
+  // eBay's OAuth token endpoint returns 401 specifically for
+  // invalid_client (a bad/revoked client id or secret) — proven via a
+  // direct real request during this fix's own diagnosis. Every other
+  // non-2xx here is a genuine upstream problem, not a credentials one.
+  if (response.status === 401) return { ok: false, error: "auth_failed" };
+  if (response.status >= 500) return { ok: false, error: "server_error" };
   if (!response.ok) return { ok: false, error: "request_failed" };
 
   const tokenSchema = z.object({ access_token: z.string().min(1), expires_in: z.number().int().positive() });
@@ -94,10 +163,22 @@ async function ebayGet<T>(path: string, schema: z.ZodType<T>): Promise<{ ok: tru
       headers: { Authorization: `Bearer ${token.token}`, "Accept-Language": "en-GB", "Content-Language": "en-GB" },
     });
   } catch (error) {
-    return { ok: false, error: (error as Error)?.name === "TimeoutError" ? "timeout" : "request_failed" };
+    return { ok: false, error: (error as Error)?.name === "TimeoutError" ? "timeout" : "network_failure" };
   }
   if (response.status === 429) return { ok: false, error: "rate_limited" };
-  if (!response.ok) return { ok: false, error: "request_failed" };
+  if (response.status === 401) return { ok: false, error: "auth_failed" };
+  if (response.status === 403) return { ok: false, error: "scope_rejected" };
+  if (!response.ok) {
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength <= MAX_RESPONSE_BYTES) {
+      const rawErrorBody = await response.text();
+      if (rawErrorBody.length <= MAX_RESPONSE_BYTES) {
+        const classified = classifyEbayRequestError(rawErrorBody);
+        if (classified) return classified;
+      }
+    }
+    return { ok: false, error: response.status >= 500 ? "server_error" : "request_failed" };
+  }
 
   const contentLength = Number(response.headers.get("content-length") || 0);
   if (contentLength > MAX_RESPONSE_BYTES) return { ok: false, error: "invalid_response" };
@@ -118,9 +199,25 @@ const categoryTreeIdSchema = z.object({
 });
 export type EbayCategoryTreeId = z.infer<typeof categoryTreeIdSchema>;
 
-/** GET /commerce/taxonomy/v1/category_tree/get_default_category_tree_id */
+// PROVEN ROOT CAUSE FIX (live diagnostic, Production keyset) — this path
+// previously read `/commerce/taxonomy/v1/category_tree/get_default_category_tree_id`,
+// an extra `/category_tree/` segment that does not exist in eBay's real
+// Taxonomy API. eBay's own gateway matched that shape against the
+// DIFFERENT `/category_tree/{category_tree_id}` route instead, literally
+// treating the string "get_default_category_tree_id" as a category tree
+// ID value — confirmed by the real error's own `parameters` field:
+// `{"name":"pathParam","value":"category_tree_id"},{"name":"category_tree_id","value":"get_default_category_tree_id"}`
+// (HTTP 404, errorId 62004, domain API_TAXONOMY). A direct call to the
+// corrected path below (no `/category_tree/` segment — this operation
+// has no category tree id yet; discovering one is the whole point of
+// calling it) returned a genuine 200 with a real category tree id for
+// EBAY_GB. This defect predates this fix and was masked the whole time
+// by the (separately diagnosed and now resolved) invalid-credentials
+// issue, which always short-circuited with a 401 before this code path
+// could ever run against a valid token.
+/** GET /commerce/taxonomy/v1/get_default_category_tree_id */
 export async function getDefaultCategoryTreeId(ebayMarketplaceId: string): Promise<{ ok: true; data: EbayCategoryTreeId } | EbayApiFailure> {
-  return ebayGet(`/commerce/taxonomy/v1/category_tree/get_default_category_tree_id?marketplace_id=${encodeURIComponent(ebayMarketplaceId)}`, categoryTreeIdSchema);
+  return ebayGet(`/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(ebayMarketplaceId)}`, categoryTreeIdSchema);
 }
 
 const categorySchema = z.object({ categoryId: z.string().min(1), categoryName: z.string().min(1) });

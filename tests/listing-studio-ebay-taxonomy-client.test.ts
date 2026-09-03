@@ -97,16 +97,94 @@ describe("getDefaultCategoryTreeId", () => {
     expect(result).toEqual({ ok: false, error: "rate_limited" });
   });
 
-  it("surfaces a network throw as request_failed, never an unhandled rejection", async () => {
+  // Phase 8 fix — proven via a real, direct OAuth request during this
+  // fix's own diagnosis: a token endpoint 401 (invalid_client) with the
+  // configured credentials, reproduced against BOTH eBay's real
+  // production and sandbox OAuth endpoints. Before this fix, this exact
+  // case fell into the generic "request_failed" bucket — indistinguishable
+  // from a network blip — which is exactly why the localhost UI only ever
+  // showed "We could not retrieve eBay categories. Try again shortly."
+  it("REGRESSION (proven real-world bug): surfaces a 401 on the OAuth token endpoint as auth_failed, never the generic request_failed bucket", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("oauth2/token")) return new Response(JSON.stringify({ error: "invalid_client", error_description: "client authentication failed" }), { status: 401 });
+      return new Response(null, { status: 200 });
+    }));
+    const result = await getDefaultCategoryTreeId("EBAY_GB");
+    expect(result).toEqual({ ok: false, error: "auth_failed" });
+  });
+
+  it("also surfaces a 401 on the actual API call itself (not just the token endpoint) as auth_failed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(null, { status: 401 })));
+    const result = await getDefaultCategoryTreeId("EBAY_GB");
+    expect(result).toEqual({ ok: false, error: "auth_failed" });
+  });
+
+  it("REQUIREMENT: surfaces a genuine network throw as network_failure (fetch never completed), distinct from timeout and from every status-code-driven failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => { if (String(url).includes("oauth2/token")) return tokenResponse(); throw new Error("network down"); }));
     const result = await getDefaultCategoryTreeId("EBAY_GB");
-    expect(result).toEqual({ ok: false, error: "request_failed" });
+    expect(result).toEqual({ ok: false, error: "network_failure" });
   });
 
   it("REGRESSION: never leaks a raw provider error message in its result", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => { if (String(url).includes("oauth2/token")) return tokenResponse(); throw new Error("secret upstream detail: sk-abc123"); }));
     const result = await getDefaultCategoryTreeId("EBAY_GB");
     expect(JSON.stringify(result)).not.toContain("sk-abc123");
+  });
+
+  it("PROVEN ROOT CAUSE FIX (live diagnostic): requests the correct path with NO '/category_tree/' segment — the previous wrong path made eBay's real gateway treat the literal string 'get_default_category_tree_id' as a category_tree_id value (confirmed via a direct Production API call, HTTP 404 errorId 62004)", async () => {
+    const fetchMock = vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({ categoryTreeId: "3", categoryTreeVersion: "125" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await getDefaultCategoryTreeId("EBAY_GB");
+    const apiCall = fetchMock.mock.calls.find(call => !String(call[0]).includes("oauth2/token"));
+    expect(String(apiCall![0])).toBe("https://api.ebay.com/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=EBAY_GB");
+    expect(String(apiCall![0])).not.toContain("/category_tree/get_default_category_tree_id");
+  });
+
+  it("REQUIREMENT: surfaces a 5xx as server_error, distinct from a 4xx request_failed — eBay's own side failed, not a bad request shape", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(null, { status: 503 })));
+    const result = await getDefaultCategoryTreeId("EBAY_GB");
+    expect(result).toEqual({ ok: false, error: "server_error" });
+  });
+
+  it("REQUIREMENT: surfaces a 403 on the API call as scope_rejected — the token was accepted (never a 401), but the specific request was forbidden", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({ errors: [{ errorId: 1100, message: "Insufficient permissions" }] }), { status: 403 })));
+    const result = await getDefaultCategoryTreeId("EBAY_GB");
+    expect(result).toEqual({ ok: false, error: "scope_rejected" });
+  });
+
+  // Verified via a real, direct, read-only diagnostic call to eBay's
+  // Production Taxonomy API with a deliberately bogus marketplace_id:
+  // HTTP 400, {"errors":[{"errorId":62003,"domain":"API_TAXONOMY",
+  // "category":"REQUEST","message":"The specified marketplace ID was not
+  // found."...}]}.
+  it("REQUIREMENT: classifies eBay's own verified errorId 62003 as marketplace_unsupported, never a generic failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({
+      errors: [{ errorId: 62003, domain: "API_TAXONOMY", category: "REQUEST", message: "The specified marketplace ID was not found." }],
+    }), { status: 400 })));
+    const result = await getDefaultCategoryTreeId("EBAY_NOT_REAL");
+    expect(result).toEqual({ ok: false, error: "marketplace_unsupported" });
+  });
+
+  // Verified via the SAME direct diagnostic — the wrong URL path from the
+  // proven root cause above produced this exact real response: HTTP 404,
+  // {"errors":[{"errorId":62004,"domain":"API_TAXONOMY","category":
+  // "REQUEST","message":"The specified category tree ID was not found."
+  // ,"parameters":[{"name":"pathParam","value":"category_tree_id"},
+  // {"name":"category_tree_id","value":"get_default_category_tree_id"}]}]}.
+  it("REQUIREMENT: classifies eBay's own verified errorId 62004 as category_tree_unavailable, never a generic failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({
+      errors: [{ errorId: 62004, domain: "API_TAXONOMY", category: "REQUEST", message: "The specified category tree ID was not found." }],
+    }), { status: 404 })));
+    const result = await getCategorySuggestions("stale-id", "test");
+    expect(result).toEqual({ ok: false, error: "category_tree_unavailable" });
+  });
+
+  it("an unrecognised errorId on a non-2xx response still falls back to the honest generic bucket, never a fabricated specific classification", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({
+      errors: [{ errorId: 99999, domain: "API_TAXONOMY", category: "REQUEST", message: "Some other request problem." }],
+    }), { status: 400 })));
+    const result = await getDefaultCategoryTreeId("EBAY_GB");
+    expect(result).toEqual({ ok: false, error: "request_failed" });
   });
 });
 

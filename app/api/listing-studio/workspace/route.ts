@@ -5,6 +5,8 @@ import { safeApiError } from "@/lib/auth/api";
 import { LISTING_STUDIO_BUCKET, parseDraftImageStoragePath } from "@/lib/listing-studio/storage-paths";
 import { deleteStorageObjects } from "@/lib/listing-studio/storage-rest";
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
+import { buildEbaySummary } from "@/lib/listing-studio/ebay-card-status";
+import type { MarketplaceDynamicData, MarketplaceReadiness } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -62,10 +64,46 @@ export async function GET() {
       const imported = await supabaseRequestAll<{ draft_id: string; source_url: string; ebay_item_id: string }>(`ebay_import_items?owner_id=eq.${user.id}&status=eq.imported&draft_id=not.is.null&select=draft_id,source_url,ebay_item_id&order=created_at.asc`);
       importedByDraftId = new Map(imported.map(row => [row.draft_id, row]));
     } catch { /* Import migration is optional until Stage One is installed. */ }
+
+    // Bug fix (root cause of "Generate listings never creates an eBay
+    // draft for an already-Vinted-generated product", Phase 4/6/7/14):
+    // the client's own eligibility filter (GroupingWorkspace.tsx's
+    // eligibleListingGroups) used to depend ONLY on generated_title being
+    // set, with no way to know, per product, whether an EBAY_UK
+    // marketplace draft with genuinely GENERATED (not fallback) content
+    // already exists. This is the one extra query that makes that
+    // decision possible, mirroring the ebay_import_items lookup
+    // immediately above (same owner-scoped-Map-then-merge pattern).
+    // `ebay_content_state` is the authoritative Phase 3 state — never
+    // inferred from title/description alone (a FALLBACK row has both
+    // too) — and drives eligibility (a fallback/failed row stays
+    // eligible for Retry, Phase 14), the product card, and the
+    // marketplace-specific counters, all from this ONE shared read.
+    // Optional/soft-failure: the marketplace migration is a later
+    // addition than listing_drafts itself, so a workspace with it not
+    // yet installed still loads (every product just reads as
+    // not_started).
+    type EbaySummaryRow = {
+      product_draft_id: string; title: string | null; description: string | null;
+      source_type: string; content_mode: string; dynamic_data_json: MarketplaceDynamicData | null;
+      category_id: string | null; category_name: string | null; category_path: string | null;
+      category_confidence: "high" | "medium" | "low" | null; category_source: "ai" | "manual" | null;
+      condition_value: string | null; price_pence: number | null; quantity: number | null;
+      readiness_json: MarketplaceReadiness | null;
+    };
+    let ebaySummaryByDraftId = new Map<string, ReturnType<typeof buildEbaySummary>>();
+    try {
+      const ebayDrafts = await supabaseRequestAll<EbaySummaryRow>(
+        `listing_marketplace_drafts?owner_id=eq.${user.id}&marketplace=eq.EBAY_UK&select=product_draft_id,title,description,source_type,content_mode,dynamic_data_json,category_id,category_name,category_path,category_confidence,category_source,condition_value,price_pence,quantity,readiness_json`,
+      );
+      ebaySummaryByDraftId = new Map(ebayDrafts.map(row => [row.product_draft_id, buildEbaySummary(row)]));
+    } catch { /* Marketplace migration is optional until installed — see above. */ }
+
     const normalisedDrafts = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);
       const normalisedAudience = normaliseFootwearVintedAudience(draft.vinted_audience, itemFamily);
       const imported = importedByDraftId.get(draft.id);
+      const ebay = ebaySummaryByDraftId.get(draft.id) ?? null;
       return {
         ...draft,
         vinted_audience: normalisedAudience,
@@ -76,6 +114,14 @@ export async function GET() {
         source_type: imported ? "ebay_uk" : "photos",
         source_url: imported?.source_url ?? null,
         source_item_id: imported?.ebay_item_id ?? null,
+        // Bug fix: this used to be `ebay_generated: title && description`,
+        // which reads a FALLBACK row (also non-empty) as "done" — the
+        // exact reason a failed eBay generation was ineligible for Retry
+        // via "Generate listings". Kept only as the eligibility signal
+        // (true iff content genuinely generated); the full `ebay` summary
+        // below is what the product card/counters actually read.
+        ebay_generated: ebay?.contentState === "generated",
+        ebay,
       };
     });
     return NextResponse.json({ drafts: normalisedDrafts, images });

@@ -1,5 +1,5 @@
 import type { GroupedAspect } from "@/lib/listing-studio/ebay-aspect-grouping";
-import type { MarketplaceAspectValue, AspectConfidenceLevel } from "@/lib/listing-studio/marketplace-types";
+import type { MarketplaceAspectValue, AspectConfidenceLevel, MarketplaceDynamicData } from "@/lib/listing-studio/marketplace-types";
 
 /**
  * Stage 5 — deterministic candidate-to-eBay-value matching, tried BEFORE
@@ -80,4 +80,40 @@ export function isAspectValueFilled(aspect: MarketplaceAspectValue): boolean {
   if (aspect.value == null) return false;
   if (aspect.confidence === "high" || aspect.confidence === "medium") return true;
   return aspect.userConfirmed;
+}
+
+/**
+ * Live-diagnostic follow-up fix (proven root cause of "0/18 recommended"
+ * misleadingly counting three aspects this business can never fill) —
+ * some recommended aspects (US/AU/EU Shoe Size — this business only ever
+ * states UK size, deliberately never guessed via a conversion table) are
+ * genuinely not applicable to how this app operates, not merely
+ * unresolved. Excluding them from the readiness ARRAY entirely (never
+ * included as either a numerator or denominator entry) is what keeps the
+ * completion score meaningful — marking them "not filled" would silently
+ * and permanently cap completion below 100% for every single footwear
+ * draft, forever, for a fact this app deliberately never collects.
+ */
+export function isAspectCountableForReadiness(aspect: MarketplaceAspectValue | undefined): boolean {
+  return aspect?.source !== "not_applicable";
+}
+
+/**
+ * Live-diagnostic follow-up fix (proven root cause of a SECOND, more
+ * aggressive unsafe whole-object `dynamic_data_json` replacement — manual
+ * "Change category" wrote `dynamic_data_json: {}` unconditionally) — a new
+ * category genuinely does invalidate every REAL taxonomy aspect value
+ * already saved (they belonged to the old category's schema), so those are
+ * correctly cleared. But the reserved pseudo-aspects (`__packageSize`,
+ * `__contentGeneration`, `__productFacts`, keyed by the `__` prefix — the
+ * one established convention every reserved key in this codebase already
+ * follows) are NOT category-specific data at all and must survive a
+ * category change untouched.
+ */
+export function clearRealAspectFields(dynamicData: MarketplaceDynamicData): MarketplaceDynamicData {
+  const preserved: MarketplaceDynamicData = {};
+  for (const [key, value] of Object.entries(dynamicData)) {
+    if (key.startsWith("__")) preserved[key] = value;
+  }
+  return preserved;
 }

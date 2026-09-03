@@ -462,11 +462,38 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .ebay-settings-checkbox input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
 .ebay-settings-save-state { font-size: 10px; color: var(--muted); min-height: 14px; }
 
+/* Fault 4 fix — collapsed-by-default settings panel. The collapsed state
+   reuses .ebay-settings-panel's own padding/gap (no separate sizing rules
+   to keep in sync), just a tighter row layout for the summary + action. */
+.ebay-settings-panel-collapsed { padding: 12px 16px; }
+.ebay-settings-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ebay-settings-summary-row .ebay-settings-title { margin-bottom: 3px; }
+.ebay-settings-summary-line { margin: 0; color: var(--muted); font-size: 10.5px; font-weight: 600; }
+
 /* eBay category/item-specifics editor (Stages 4-5) */
 .ebay-details-modal { width: min(640px, 100%); max-height: 85vh; display: flex; flex-direction: column; }
 .ebay-details-modal .task-modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .ebay-details-readiness { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 11px; color: var(--muted); }
 .ebay-details-readiness strong { font-size: 13px; color: var(--text); }
+/* Phase 12 fix — generation status leads, coloured distinctly from the
+   secondary completeness percentage beneath it (never the same visual
+   weight, never implying general health while content generation itself
+   failed). */
+.ebay-details-readiness strong.ebay-details-status-failed { color: var(--danger); }
+.ebay-details-readiness strong.ebay-details-status-ok { color: #16845d; }
+.ebay-details-completeness-label { font-weight: 650; }
+.ebay-details-optimisation-note { font-style: italic; opacity: 0.85; }
+/* PROVEN ROOT CAUSE FIX — the review summary section: a "Needs review"
+   state must always show at least one visible, actionable reason here. */
+.ebay-details-review-summary { gap: 6px; }
+.ebay-details-review-clear { color: #16845d; font-size: 12px; font-weight: 600; margin: 0; }
+.ebay-details-review-count { color: #b3801a; font-size: 12px; font-weight: 700; margin: 0; }
+.ebay-details-review-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text); display: flex; flex-direction: column; gap: 4px; }
+.ebay-details-review-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.ebay-details-review-action { flex-shrink: 0; padding: 2px 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-2); color: var(--text); font-size: 10px; font-weight: 650; cursor: pointer; }
+.ebay-details-review-action:hover { border-color: var(--primary); }
+.ebay-aspect-group-needs-review .ebay-aspect-group-title { color: #b3801a; }
+.ebay-aspect-field-review-focus { outline: 2px solid #d9a441; outline-offset: 4px; border-radius: 8px; }
 .ebay-details-section { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .ebay-details-section:first-of-type { border-top: none; padding-top: 0; }
 .ebay-details-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
@@ -474,6 +501,10 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .ebay-details-category-name { font-size: 13px; font-weight: 650; color: var(--text); margin: 0; }
 .ebay-details-category-path { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
 .ebay-details-empty { font-size: 12px; color: var(--muted); }
+/* Phase 8 fix — honest fixture-mode disclosure, never presented as a
+   routine status message (amber, not muted grey) since it's telling the
+   owner "this result did not come from real eBay data". */
+.ebay-details-fixture-notice { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, #d9a441 30%, var(--line)); border-radius: 7px; color: #8a6d1d; background: color-mix(in srgb, #d9a441 14%, transparent); font-size: 11px; font-weight: 600; }
 .ebay-details-alternatives { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .ebay-details-alternatives ul, .ebay-details-search-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .ebay-details-alternative-button { text-align: left; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text); font-size: 11px; }
@@ -482,6 +513,10 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .ebay-aspect-group { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .ebay-aspect-group-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0; }
 .ebay-aspect-field { gap: 5px; }
+/* Phase 6 fix — a genuine GBP price editor beneath Package size. */
+.ebay-price-input-row { display: flex; align-items: center; gap: 6px; }
+.ebay-price-currency { font-size: 13px; font-weight: 650; color: var(--muted); }
+.ebay-price-input-row .input { max-width: 140px; }
 .ebay-aspect-required-mark { color: var(--danger); }
 .ebay-aspect-multi-options { display: flex; flex-wrap: wrap; gap: 10px; }
 .ebay-aspect-multi-option { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
@@ -881,6 +916,27 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .index-controls input { min-height: 38px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-2); }
 .index-controls small { grid-column: 1 / -1; color: var(--muted); font-size: 8px; }
 .status-off i { background: var(--subtle) !important; }
+
+/* eBay UK account connection (Settings page, below Yahoo Mail) — reuses
+   .settings-section/.yahoo-status/.status-badge/.button/.button-secondary/
+   .button-danger/.field/.input/.purchase-form-error verbatim; only the
+   handful of genuinely new pieces below (policy selectors, capability
+   summary, draft-only lock) get their own rules. Prefixed
+   "ebay-account-" (not bare "ebay-") deliberately, so nothing here can
+   collide with Listing Studio's own unrelated "ebay-settings-*"/
+   "ebay-details-*" classes elsewhere in this file. */
+.ebay-account-connected-notice { color: #16845d; font-weight: 650; }
+.ebay-account-capability-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; margin-top: 4px; color: var(--muted); font-size: 9px; }
+.settings-section-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ebay-account-defaults { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
+.ebay-account-defaults h3 { margin: 0 0 10px; color: var(--text); font-size: 11px; font-weight: 700; }
+.ebay-account-policy-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.ebay-account-policy-fields .field span:first-child { color: var(--muted); font-size: 9px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.ebay-account-policy-summary { margin: 10px 0 0; color: var(--muted); font-size: 10px; }
+.ebay-account-draft-only { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.ebay-account-draft-only-toggle { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 11px; font-weight: 600; }
+.ebay-account-draft-only-toggle input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); }
+.ebay-account-draft-only small { color: var(--muted); font-size: 9px; }
 
 /* Milestone 7 follow-up (2026-08-03) — app/settings/page.tsx's "Import verified browser snapshot" workflow */
 .vinted-snapshot-import { width: 100%; align-items: flex-start; padding-top: 10px; border-top: 1px dashed var(--line); }
@@ -1355,7 +1411,7 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .product-group-col-main { display: flex; align-items: center; gap: 12px; }
 .product-group-col-photos { color: var(--muted); font-variant-numeric: tabular-nums; }
 .product-group-col-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.product-group-col-actions { display: flex; justify-content: flex-end; }
+.product-group-col-actions { display: flex; justify-content: flex-end; min-width: 0; }
 .product-group-cover { position: relative; display: grid; overflow: hidden; width: 72px; height: 72px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 9px; background: var(--surface-3); }
 .product-group-cover img { width: 100%; height: 100%; object-fit: cover; }
 .product-group-cover-empty { color: var(--subtle); font-size: 8px; text-align: center; }
@@ -1367,8 +1423,26 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .product-group-meta-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: var(--muted); font-size: 10.5px; font-weight: 600; }
 .product-group-meta-item { white-space: nowrap; }
 .product-group-meta-chip { padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); font-size: 9px; font-weight: 650; }
-.product-group-compact-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.product-group-compact-actions .button-secondary { min-height: 30px; padding: 0 10px; font-size: 9px; white-space: nowrap; }
+/* Real-browser layout bug fix (Ready badge/Preview button overlap,
+   confirmed with actual DOM bounding-rect measurements at 1536/1366/1024px
+   — see the static repro used to diagnose this): the previous rule set
+   `flex: 0 0 auto`, which disables flex-shrink entirely. With 5 real
+   actions (Preview/Edit fields/eBay details/Manage photos/overflow) this
+   container's natural content width is far wider than its 220px grid
+   column, but `flex-shrink: 0` forbid it from ever being compressed to
+   fit — so instead of wrapping onto extra lines (its `flex-wrap: wrap`
+   never got the chance to activate), the whole block simply overflowed
+   its own column LEFTWARD (justify-content: flex-end anchors its right
+   edge to the column's right edge, so a too-wide box grows past the
+   column's LEFT edge) — directly on top of the status column and its
+   Ready badge next door. `flex: 1 1 auto` + `min-width: 0` lets this
+   container actually shrink to its real 220px column width, which is what
+   makes `flex-wrap: wrap` do its job — extra buttons wrap onto a second
+   line inside the column instead of bleeding into the next one. Buttons
+   themselves get `flex-shrink: 0` so wrapping never squashes/truncates a
+   button's own label. */
+.product-group-compact-actions { display: flex; flex: 1 1 auto; min-width: 0; max-width: 100%; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.product-group-compact-actions .button-secondary { min-height: 30px; padding: 0 10px; font-size: 9px; white-space: nowrap; flex-shrink: 0; }
 .product-group-expanded-body { margin-top: 12px; }
 
 .listing-generation-status { display: inline-flex; padding: 3px 8px; border-radius: 6px; font-size: 9px; font-weight: 700; white-space: nowrap; }
@@ -1377,6 +1451,18 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .listing-generation-status-generating { color: var(--primary); background: var(--primary-soft); }
 .listing-generation-status-failed { color: var(--danger); background: var(--danger-soft); }
 .listing-generation-status-not_generated { color: var(--muted); background: var(--surface-3); }
+
+/* Phase 6/13 fix — eBay-specific status tones, deliberately separate
+   classes from the Vinted ones above (never reused/aliased) so a Vinted
+   badge change can never accidentally recolour an eBay one or vice versa.
+   Red only for a genuine generation failure; amber for anything still
+   incomplete; green only for real completion — text label always
+   accompanies colour (see EBAY_CARD_STATUS_LABELS), never colour alone. */
+.listing-generation-status-ebay-success { color: #16845d; background: rgba(38, 190, 131, .12); }
+.listing-generation-status-ebay-warning { color: #8a6d1d; background: color-mix(in srgb, #d9a441 18%, transparent); }
+.listing-generation-status-ebay-danger { color: var(--danger); background: var(--danger-soft); }
+.listing-generation-status-ebay-primary { color: var(--primary); background: var(--primary-soft); }
+.listing-generation-status-ebay-neutral { color: var(--muted); background: var(--surface-3); }
 
 /* Visual redesign — sticky bottom action bar, mirroring .bulk-save-bar's
    own fixed-position/blur/shadow pattern (same sidebar-aware left inset)
@@ -1414,8 +1500,24 @@ h1 { font-size: 1.5rem; font-weight: 720; }
   .listing-studio-create { padding-bottom: 110px; }
   /* Status column loses its label text below the sidebar-collapse width —
      the row grid can give that space back to the main column. */
-  .listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 40px 160px; }
+  /* Bug fix (product-card readiness/action overlap): the status column was
+     40px here, but the badge it holds ("Ready", "Needs review", "Not
+     generated"…) is `white-space: nowrap` with its own padding and never
+     shrinks below its text width. Grid cells don't clip overflow by
+     default, so at 40px the badge rendered past its own column's right
+     edge, visually on top of the Actions column's Preview button — exactly
+     the reported overlap. 96px is wide enough for the longest label ("Not
+     generated") at this column's font-size; the extra width comes out of
+     the flexible main column (1fr), not the fixed Actions column, so
+     buttons still have their needed room. */
+  .listing-row-grid { grid-template-columns: minmax(0, 1fr) 44px 96px 160px; }
   .listing-list-header-photos, .listing-list-header-status, .product-group-col-photos { text-align: center; }
+  /* Belt-and-braces alongside the width fix above: even if a future label
+     is longer than any current one, the badge/status text wraps onto a
+     second line inside its own column instead of overflowing sideways
+     into the actions column next to it. */
+  .product-group-col-status { flex-wrap: wrap; }
+  .listing-generation-status { white-space: normal; text-align: center; }
 }
 
 @media (max-width: 620px) {
@@ -1935,6 +2037,35 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .preview-listing-vinted-meta dt { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .preview-listing-vinted-meta dd { margin: 2px 0 0; color: var(--text); font-size: 11.5px; font-weight: 650; }
 .preview-listing-vinted-price-placeholder { color: var(--subtle); font-style: italic; }
+
+/* Fault 2 fix — marketplace-aware Preview (Vinted/eBay UK tab switch,
+   only rendered when a generated eBay draft actually exists for this
+   product; reuses .period-switch's own base rules, so no new pill
+   styling is introduced). */
+.preview-marketplace-tabs { margin-bottom: 12px; }
+.preview-listing-marketplace-badge { align-self: flex-start; padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--primary); background: var(--primary-soft); font-size: 8.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.preview-listing-ebay-category { margin: 0; color: var(--text); font-size: 11.5px; font-weight: 650; }
+.preview-listing-ebay-readiness { margin: 4px 0 0; color: var(--muted); font-size: 10.5px; font-weight: 600; }
+/* Phase 7 fix — the explicit "No eBay UK draft has been generated" /
+   generation-failure states, never a silent Vinted substitute. */
+.preview-listing-empty-state { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 24px 4px; color: var(--muted); font-size: 12px; }
+.upload-photo-error button { margin-left: 10px; }
+
+/* Phase 11/12 fix — the fallback banner needs room for a reason line and
+   attempt count above Retry, not just one line of text + button inline. */
+.preview-listing-degraded-banner { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.preview-listing-degraded-banner p { margin: 0; }
+.preview-listing-degraded-banner button { margin-left: 0; margin-top: 4px; }
+/* Never the same visual weight as a genuine success badge — amber, not
+   the default primary-purple badge colour, and never says "eBay UK draft"
+   on its own (see this component's own comment on why). */
+.preview-listing-marketplace-badge-degraded { color: #8a6d1d; background: color-mix(in srgb, #d9a441 18%, transparent); border-color: color-mix(in srgb, #d9a441 30%, var(--line)); text-transform: none; letter-spacing: normal; font-size: 9.5px; }
+.preview-listing-ebay-generated-notice { margin: 0 0 10px; color: #16845d; font-size: 10.5px; font-weight: 650; }
+.preview-listing-ebay-blockers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.preview-listing-ebay-ok { color: var(--text); }
+.preview-listing-ebay-ok::before { content: "✓ "; color: #16845d; }
+.preview-listing-ebay-blocked { color: var(--text); }
+.preview-listing-ebay-blocked::before { content: "✕ "; color: var(--danger); }
 
 /* 1024-1439px — a slightly narrower inspector column, Cost/Price/Profit
    still fully visible in the table (only their width tightens, never
@@ -2578,3 +2709,43 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .ebay-import-progress{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}.ebay-import-progress-head{display:flex;min-height:54px;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line)}.ebay-import-progress-head>div{display:flex;flex-direction:column}.ebay-import-progress-head strong{font-size:11px}.ebay-import-progress-head span{margin-top:3px;color:var(--muted);font-size:8.5px}.ebay-import-items{max-height:330px;overflow-y:auto}.ebay-import-item{display:grid;grid-template-columns:25px minmax(0,1fr) auto;align-items:center;gap:9px;min-height:55px;padding:9px 11px;border-bottom:1px solid var(--line)}.ebay-import-item:last-child{border-bottom:0}.ebay-import-item-icon{display:grid;width:23px;height:23px;place-items:center;border-radius:50%;background:#23233a;color:#9c8cff;font-size:11px;font-weight:850}.ebay-import-item-extracting .ebay-import-item-icon,.ebay-import-item-downloading_photos .ebay-import-item-icon,.ebay-import-item-processing .ebay-import-item-icon{animation:spin 1s linear infinite}.ebay-import-item-imported .ebay-import-item-icon{background:#123a2c;color:#42dfa6}.ebay-import-item-failed .ebay-import-item-icon{background:#3b1823;color:#ff607e}.ebay-import-item>div{display:flex;min-width:0;flex-direction:column}.ebay-import-item strong{overflow:hidden;font-size:9.5px;text-overflow:ellipsis;white-space:nowrap}.ebay-import-item small{margin-top:3px;color:var(--muted);font-size:8px}.ebay-import-item p{margin:4px 0 0;color:var(--danger);font-size:8px;line-height:1.35}.ebay-import-loading{padding:20px;color:var(--muted);font-size:9px}.ebay-import-error{grid-column:1/-1;padding:9px 11px;border:1px solid color-mix(in srgb,var(--danger) 40%,var(--line));border-radius:8px;background:var(--danger-soft);color:var(--danger);font-size:9px}.ebay-import-dialog>footer{display:flex;min-height:58px;align-items:center;justify-content:space-between;gap:16px;padding:10px 22px;border-top:1px solid var(--line);color:var(--muted);font-size:9px}
 .ebay-import-progress-head>.ebay-import-progress-actions{flex-flow:row wrap;justify-content:flex-end;gap:7px}
 @media(max-width:720px){.ebay-import-body{grid-template-columns:1fr}.ebay-import-dialog{max-height:96vh}.ebay-import-dialog>footer{align-items:flex-start;flex-direction:column}.listing-source-actions{justify-content:stretch}.listing-import-button{width:100%}}
+
+/* Stage 6 (eBay draft batches) — Listings Review's own eBay workflow.
+   Appended here, isolated (new class names only, nothing overridden),
+   matching this file's own established "append new features' styles
+   rather than interleaving them" convention (see the Hidden-active-batch
+   section's own comment above). Every colour/spacing/radius token reuses
+   the existing --lr- prefixed tokens (and --danger/--line) already used
+   throughout this page — no new palette is introduced. */
+
+/* The small Vinted/eBay text toggle beside the Workflow column heading
+   and beside LIVE ACTIVITY — reuses the exact same pill-button visual
+   language as .lr-activity-filter-btn above. */
+.lr-marketplace-toggle { display: inline-flex; margin-left: 8px; gap: 4px; vertical-align: middle; }
+.lr-marketplace-toggle-btn { padding: 2px 8px; border: 1px solid var(--lr-border); border-radius: 999px; color: var(--lr-muted); background: var(--lr-surface); font-size: 9px; font-weight: 650; text-transform: none; letter-spacing: 0; white-space: nowrap; cursor: pointer; }
+.lr-marketplace-toggle-btn:hover { color: var(--lr-text); }
+.lr-marketplace-toggle-btn.active { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-violet) 40%, var(--lr-border)); background: var(--lr-violet-soft); }
+
+/* The inspector's Vinted/eBay tab strip — sits between the SKU line and
+   the workflow-status pill, same visual weight as .lr-activity-filters. */
+.lr-inspector-tabs { display: flex; gap: 6px; margin: 6px 0 2px; }
+.lr-inspector-tab { padding: 4px 12px; border: 1px solid var(--lr-border); border-radius: 8px; color: var(--lr-muted); background: var(--lr-surface); font-size: 10.5px; font-weight: 700; cursor: pointer; }
+.lr-inspector-tab:hover { color: var(--lr-text); }
+.lr-inspector-tab.active { color: var(--lr-text); border-color: color-mix(in srgb, var(--lr-violet) 45%, var(--lr-border)); background: var(--lr-violet-soft); }
+
+/* eBay policy/location selectors — same 2-column field grid + label/
+   select styling .ebay-account-policy-fields already established for
+   Settings' own defaults form. */
+.lr-ebay-policies { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; padding-top: 10px; border-top: 1px dashed var(--lr-border); }
+.lr-ebay-policies-heading { margin: 0; color: var(--lr-muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-ebay-policies .field span.label, .lr-ebay-policies .field > span:first-child { color: var(--lr-muted); font-size: 9px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.lr-ebay-policies .input { width: 100%; border-color: var(--lr-border); background: var(--lr-surface); color: var(--lr-text); }
+
+/* Bulk "Set eBay shipping policy" — a drop-UP panel (this control lives in
+   the bulk bar, near the bottom of the viewport) anchored to its trigger
+   button, same card styling as the inspector's own bordered sections. */
+.lr-bulk-ebay-policy { position: relative; display: inline-flex; }
+.lr-bulk-ebay-policy-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; width: 260px; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--surface); box-shadow: 0 16px 40px rgba(0,0,0,.35); }
+.lr-bulk-ebay-policy-panel .input { width: 100%; }
+.lr-bulk-ebay-policy-count { margin: 0; color: var(--lr-muted); font-size: 10.5px; }
+.lr-bulk-ebay-policy-result { margin: 0; color: var(--lr-text); font-size: 10.5px; }

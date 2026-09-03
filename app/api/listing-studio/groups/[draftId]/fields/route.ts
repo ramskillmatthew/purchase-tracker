@@ -18,6 +18,14 @@ type DraftRow = {
   vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
   vinted_audience_source: "ai" | "manual" | null;
   vinted_category_id: number | null; vinted_category_path: string | null; vinted_category_source: "ai" | "manual" | null;
+  vinted_category_status: string | null;
+  // Marketplace-isolation fix (the same reported-and-fixed defect as the
+  // generate route's own `shouldWriteVintedContent`, discovered while
+  // fixing "eBay-only generation makes the draft inaccessible") — needed
+  // to decide whether a Vinted draft already exists, so saving a shared
+  // fields edit for an eBay-only product never SILENTLY CREATES a Vinted
+  // draft (title/description/category) the owner never asked for.
+  generated_title: string | null; generated_description: string | null;
 };
 
 // A blank field is the same "not set" state whether it arrives as an empty
@@ -58,10 +66,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     const body = updateListingFieldsRequestSchema.parse(await request.json());
 
     const drafts = await supabaseRequestAll<DraftRow>(
-      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,vinted_audience,vinted_audience_source,vinted_category_id,vinted_category_path,vinted_category_source`,
+      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,vinted_audience,vinted_audience_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,generated_title,generated_description`,
     );
     const draft = drafts[0];
     if (!draft) return NextResponse.json({ error: "Group not found." }, { status: 404 });
+    // Marketplace-isolation fix — a Vinted draft (title/description/
+    // category) is only ever regenerated/written below when one already
+    // exists. Editing shared facts (brand/model/colours/etc, used by
+    // EITHER marketplace) must never, as a side effect, silently CREATE a
+    // Vinted draft for a product that only has an eBay draft (or no draft
+    // at all yet) — Vinted content is only ever created by an explicit
+    // Vinted-targeting "Generate listings" run, never implicitly here.
+    const shouldWriteVintedContent = Boolean(draft.generated_title && draft.generated_description);
 
     const rawModel = normalize(body.model);
     const rawProductType = normalize(body.productType);
@@ -92,67 +108,74 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
       // free-text to trim/normalize here, unlike the plain-string fields above.
       colours: body.colours, material: body.material, ukSize: normalize(body.ukSize), sku: normalize(body.sku),
     };
-    const generatedTitle = generateListingTitle(structuredFields);
-    const generatedDescription = generateListingDescription(structuredFields);
-
+    // Marketplace-isolation fix — every one of these `let`s keeps
+    // whatever was already stored for this draft when
+    // `shouldWriteVintedContent` is false, so a shared-fields edit for a
+    // product with no Vinted draft yet can never fabricate one (title,
+    // description, AND Vinted's own category/audience-source taxonomy,
+    // which is a completely separate concept from eBay's own category).
+    let generatedTitle = draft.generated_title;
+    let generatedDescription = draft.generated_description;
     let categoryId = draft.vinted_category_id;
     let categoryPath: string | null = draft.vinted_category_path;
     let categorySource = draft.vinted_category_source;
-    // null = no category and no attempted-but-failed reason to show (an
-    // explicit clear, or nothing was ever attempted) — distinct from a
-    // real VintedCategoryAssignmentReason string.
-    let categoryStatus: string | null = null;
+    let categoryStatus: string | null = draft.vinted_category_status;
     let recomputed = false;
     let costLogEntry: { model: string | null; inputTokens: number | null; outputTokens: number | null; candidateCount: number; status: "success" | "failed" } | null = null;
 
-    if (!audienceChanged && body.vintedCategoryId !== null && body.vintedCategoryId === draft.vinted_category_id) {
-      // Follow-up correction (2026-08-07): the client always echoes back
-      // whatever category id was already stored (EditListingFieldsDialog's
-      // local state starts from the current draft — see its own top
-      // comment), even when the user never touched the category picker at
-      // all. Treating every non-null vintedCategoryId as a fresh "manual
-      // pick" — the previous behaviour — silently reclassified an
-      // untouched AI-assigned category as manual on the very next
-      // unrelated save (e.g. just fixing a typo in Brand), permanently
-      // freezing it from ever being automatically reassigned/improved
-      // again even though the user never chose it themselves. An
-      // unchanged id/path/source is simply carried forward as-is.
-      categoryId = draft.vinted_category_id;
-      categoryPath = draft.vinted_category_path;
-      categorySource = draft.vinted_category_source;
-      categoryStatus = draft.vinted_category_source ? "category_assigned" : null;
-    } else if (body.vintedCategoryId !== null) {
-      // Milestone 7: a manual pick must be a real, currently active +
-      // selectable + leaf category — re-validated here server-side, never
-      // trusted from the request alone. A manual pick always wins, even
-      // if the audience also changed in this same save.
-      const category = await getVintedCategoryById(body.vintedCategoryId);
-      if (!isPublishableVintedCategory(category)) {
-        return NextResponse.json({ error: "That category is not currently available. Please search and choose another." }, { status: 400 });
-      }
-      categoryId = body.vintedCategoryId;
-      categoryPath = category.full_path;
-      categorySource = "manual";
-      categoryStatus = "category_assigned";
-    } else if (audienceChanged) {
-      // The client already cleared its own category selection for us —
-      // recompute deterministically/via the bounded AI step using the new audience.
-      recomputed = true;
-      const { result, aiCost } = await resolveVintedCategoryAssignment({
-        vintedAudience: finalVintedAudience, productType: structuredFields.productType, brand: structuredFields.brand, model: structuredFields.model,
-      });
-      categoryStatus = result.reason;
-      costLogEntry = aiCost;
-      if (result.reason === "category_assigned") {
-        categoryId = result.categoryId; categoryPath = result.categoryPath; categorySource = "ai";
+    if (shouldWriteVintedContent) {
+      generatedTitle = generateListingTitle(structuredFields);
+      generatedDescription = generateListingDescription(structuredFields);
+
+      if (!audienceChanged && body.vintedCategoryId !== null && body.vintedCategoryId === draft.vinted_category_id) {
+        // Follow-up correction (2026-08-07): the client always echoes back
+        // whatever category id was already stored (EditListingFieldsDialog's
+        // local state starts from the current draft — see its own top
+        // comment), even when the user never touched the category picker at
+        // all. Treating every non-null vintedCategoryId as a fresh "manual
+        // pick" — the previous behaviour — silently reclassified an
+        // untouched AI-assigned category as manual on the very next
+        // unrelated save (e.g. just fixing a typo in Brand), permanently
+        // freezing it from ever being automatically reassigned/improved
+        // again even though the user never chose it themselves. An
+        // unchanged id/path/source is simply carried forward as-is.
+        categoryId = draft.vinted_category_id;
+        categoryPath = draft.vinted_category_path;
+        categorySource = draft.vinted_category_source;
+        categoryStatus = draft.vinted_category_source ? "category_assigned" : null;
+      } else if (body.vintedCategoryId !== null) {
+        // Milestone 7: a manual pick must be a real, currently active +
+        // selectable + leaf category — re-validated here server-side, never
+        // trusted from the request alone. A manual pick always wins, even
+        // if the audience also changed in this same save.
+        const category = await getVintedCategoryById(body.vintedCategoryId);
+        if (!isPublishableVintedCategory(category)) {
+          return NextResponse.json({ error: "That category is not currently available. Please search and choose another." }, { status: 400 });
+        }
+        categoryId = body.vintedCategoryId;
+        categoryPath = category.full_path;
+        categorySource = "manual";
+        categoryStatus = "category_assigned";
+      } else if (audienceChanged) {
+        // The client already cleared its own category selection for us —
+        // recompute deterministically/via the bounded AI step using the new audience.
+        recomputed = true;
+        const { result, aiCost } = await resolveVintedCategoryAssignment({
+          vintedAudience: finalVintedAudience, productType: structuredFields.productType, brand: structuredFields.brand, model: structuredFields.model,
+        });
+        categoryStatus = result.reason;
+        costLogEntry = aiCost;
+        if (result.reason === "category_assigned") {
+          categoryId = result.categoryId; categoryPath = result.categoryPath; categorySource = "ai";
+        } else {
+          categoryId = null; categoryPath = null; categorySource = null;
+        }
       } else {
+        // No manual pick this save, audience unchanged: vintedCategoryId
+        // being null here means the picker was explicitly cleared (or
+        // already had nothing set) — always honoured.
         categoryId = null; categoryPath = null; categorySource = null;
       }
-    } else {
-      // No manual pick this save, audience unchanged: vintedCategoryId
-      // being null here means the picker was explicitly cleared (or
-      // already had nothing set) — always honoured.
-      categoryId = null; categoryPath = null; categorySource = null;
     }
 
     const nowIso = new Date().toISOString();

@@ -6,6 +6,10 @@ import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 import { marketplaceSchema, marketplaceDraftSettingsSchema } from "@/lib/validation/listing-studio-marketplace";
 import { getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
 import { computeMarketplaceReadiness } from "@/lib/listing-studio/marketplace-readiness";
+import { readContentGenerationState } from "@/lib/listing-studio/ebay-content-generation-state";
+import { getEbayAspectDefinitions } from "@/lib/listing-studio/ebay-aspect-service";
+import { isAspectValueFilled, isAspectCountableForReadiness } from "@/lib/listing-studio/ebay-aspect-matching";
+import { withoutMessageCodes, SELLING_SETTINGS_MESSAGE_CODES } from "@/lib/listing-studio/ebay-validation-messages";
 import type { MarketplaceValidationMessage } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
@@ -52,20 +56,57 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     const nextPrice = patch.pricePence !== undefined ? patch.pricePence : existing.pricePence;
     const nextQuantity = patch.quantity !== undefined ? patch.quantity : existing.quantity;
 
-    // Recomputed from the draft's current known state — category/condition
-    // and dynamic aspects are whatever Stage 4/5 (or a manual choice) has
-    // already set on this row; this route never invents or clears them.
-    const requiredAspectsFilled = Object.values(existing.dynamicData).filter(a => a.confidence !== "unknown").map(() => true);
+    // Live-diagnostic follow-up fix (proven root cause of a price save
+    // silently corrupting readiness's required-aspects count) — the old
+    // heuristic counted EVERY non-"unknown" dynamicData entry as "required
+    // and filled", including reserved pseudo-aspects like __packageSize/
+    // __productFacts and genuinely OPTIONAL/RECOMMENDED real aspects. This
+    // re-fetches the same (DB-)cached aspect schema Stage 5 already uses
+    // and counts only aspects actually marked REQUIRED by eBay itself,
+    // excluding intentionally-not-applicable ones (regional shoe sizes).
+    // This is stats-only for a price/title/description/quantity save: a
+    // hiccup fetching the aspect schema must NEVER block the actual save
+    // the owner asked for (falls back to the pre-fix "no aspects counted"
+    // behaviour, same as when no category is selected yet).
+    let requiredAspectsFilled: boolean[] = [];
+    let recommendedAspectsFilled: boolean[] = [];
+    if (marketplaceValue === "EBAY_UK" && existing.categoryId) {
+      let definitions: Awaited<ReturnType<typeof getEbayAspectDefinitions>> | undefined;
+      try { definitions = await getEbayAspectDefinitions(existing.categoryId); } catch { /* stats-only — never blocks the save */ }
+      if (definitions?.status === "success") {
+        requiredAspectsFilled = definitions.grouped.required
+          .filter(a => isAspectCountableForReadiness(existing.dynamicData[a.name]))
+          .map(a => isAspectValueFilled(existing.dynamicData[a.name] ?? { value: null, confidence: "unknown", source: "none", appliedAutomatically: false, needsReview: false, userConfirmed: false, updatedAt: "" }));
+        recommendedAspectsFilled = definitions.grouped.recommended
+          .filter(a => isAspectCountableForReadiness(existing.dynamicData[a.name]))
+          .map(a => isAspectValueFilled(existing.dynamicData[a.name] ?? { value: null, confidence: "unknown", source: "none", appliedAutomatically: false, needsReview: false, userConfirmed: false, updatedAt: "" }));
+      }
+    }
+    const hasGeneratedContent = readContentGenerationState(existing.dynamicData, {
+      sourceType: existing.sourceType, contentMode: existing.contentMode,
+      hasTitle: Boolean(existing.title), hasDescription: Boolean(existing.description),
+    }).state === "generated";
     const readiness = computeMarketplaceReadiness({
       hasCategory: !!existing.categoryId, hasCondition: !!existing.conditionValue,
       hasTitle: !!nextTitle, hasDescriptionOrGenerationPath: !!nextDescription,
       hasPhoto: true, hasPrice: nextPrice != null, hasQuantity: nextQuantity != null,
-      hasSufficientSellingSettings: true, requiredAspectsFilled, recommendedAspectsFilled: [],
+      hasSufficientSellingSettings: true, hasGeneratedContent, requiredAspectsFilled, recommendedAspectsFilled,
     });
-    const validationMessages: MarketplaceValidationMessage[] = [];
+    // Live-diagnostic follow-up fix — this route used to rebuild
+    // validationMessages from scratch on every save, silently discarding
+    // any existing aspect_*/category_needs_confirmation/ai_warning
+    // messages a previous category/aspect pass had already recorded. Now
+    // it only replaces the codes it actually recomputes here.
+    const validationMessages: MarketplaceValidationMessage[] = withoutMessageCodes(
+      existing.validationMessages.filter(m => m.code !== "category_not_set"),
+      SELLING_SETTINGS_MESSAGE_CODES,
+    );
     if (!existing.categoryId) validationMessages.push({ code: "category_not_set", message: "This product needs a category before its eBay details can be prepared.", field: "category", severity: "blocking" });
     if (!existing.conditionValue) validationMessages.push({ code: "condition_not_set", message: "An eBay condition is required.", field: "condition", severity: "blocking" });
-    if (nextPrice == null) validationMessages.push({ code: "price_not_set", message: "A price is required.", field: "price", severity: "blocking" });
+    // Stage 6 correction — price no longer blocks eBay content readiness
+    // (see lib/listing-studio/marketplace-readiness.ts's own comment); it's
+    // entered later in Listings Review and only gates draft creation there.
+    if (nextPrice == null) validationMessages.push({ code: "price_not_set", message: "No eBay selling price yet — set it in Listings Review before creating a draft.", field: "price", severity: "suggestion" });
     if (nextQuantity == null) validationMessages.push({ code: "quantity_not_set", message: "A quantity is required.", field: "quantity", severity: "blocking" });
 
     const dbPatch: Record<string, unknown> = {

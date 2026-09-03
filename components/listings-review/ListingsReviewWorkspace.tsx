@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ListingsFilterBar, { type TopTab } from "./ListingsFilterBar";
-import ListingsTable, { type ListingTableRow } from "./ListingsTable";
-import ListingDetailsPanel, { type ListingDetails } from "./ListingDetailsPanel";
+import ListingsTable, { type ListingTableRow, type ListingMarketplaceView } from "./ListingsTable";
+import ListingDetailsPanel, { type ListingDetails, type EbayTabData } from "./ListingDetailsPanel";
 import DraftActivityPanel, { type ActivityEvent, type ActivityBatchFilter } from "./DraftActivityPanel";
 import ExtensionBatchGrid, { type BatchBoxViewModel } from "./ExtensionBatchGrid";
 import { RecoverStuckBatchDialog, type RecoverDialogBatch, type RecoverDialogListing } from "./RecoverStuckBatchDialog";
@@ -13,17 +13,63 @@ import PreviewListingDialog from "@/components/listing-studio/PreviewListingDial
 import ConfirmDialog from "@/components/ConfirmDialog";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
 import { KpiIcon } from "./KpiIcon";
+import type { EbayPolicyOption, EbayLocationOption, EbayPolicySelection } from "./EbayPolicySelectors";
+import BulkEbayPolicyControl, { type BulkPolicyApplyResult } from "./BulkEbayPolicyControl";
 import {
   computeListingReviewStatus, buildListingWarnings, matchesListingSearch, matchesQuickFilter,
   type ListingQuickFilter, type ReviewableListing,
 } from "@/lib/listing-studio/listing-review";
 import { computeExtensionWorkflowStatus, WORKFLOW_STATUS_TAB_GROUPS, isBatchStatusTerminal, shouldApplyBatchPollResponse, type ExtensionWorkflowStatus } from "@/lib/listing-studio/extension-workflow-status";
+import {
+  EBAY_WORKFLOW_STATUS_LABELS, isEbayBatchStatusTerminal, isEbayWorkflowInProgress, computeEbayDraftWorkflowStatus, type EbayWorkflowStatus, type EbayDraftItemStatus,
+} from "@/lib/listing-studio/ebay-workflow-status";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 import { computeCostPence, computeProfitPence, type SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
 import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-export-schema";
 import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
+
+// Stage 6 (eBay draft batches) — mirrors app/api/listing-studio/listings-review/route.ts's
+// own response shape for each product's eBay marketplace draft (a plain
+// JSON-serialised MarketplaceDraft, camelCase, plus the joined latest-batch
+// status as `ebayStatus`, still snake_case since it comes straight from the
+// RPC row shape — never re-cased client-side, matching how
+// LatestExtensionStatusRow above is handled identically).
+type EbayMarketplaceDraftRow = {
+  id: string; productDraftId: string; title: string | null; description: string | null;
+  categoryId: string | null; categoryPath: string | null; conditionValue: string | null;
+  pricePence: number | null; quantity: number | null;
+  readiness: { ready: boolean };
+  ebayFulfillmentPolicyId: string | null; ebayReturnPolicyId: string | null; ebayPaymentPolicyId: string | null;
+  ebayMerchantLocationKey: string | null; ebayOfferId: string | null;
+  ebayStatus: {
+    marketplace_draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
+    error_code: string | null; error_message: string | null; ebay_offer_id: string | null;
+    started_at: string | null; completed_at: string | null;
+  } | null;
+};
+
+// Mirrors app/api/listing-studio/ebay-draft-batches/[batchId]/route.ts's GET
+// response shape exactly.
+type EbayBatchItemRow = {
+  itemId: string; marketplaceDraftId: string; draftId: string; queuePosition: number; status: EbayDraftItemStatus;
+  attemptCount: number; errorCode: string | null; errorMessage: string | null; ebayOfferId: string | null;
+  startedAt: string | null; completedAt: string | null; generatedTitle: string | null; sku: string | null;
+};
+type EbayBatchStatus = {
+  batchId: string; status: string; listingCount: number; displayNumber: number;
+  createdAt: string; completedAt: string | null; boxDismissedAt: string | null; activityDismissedAt: string | null;
+  items: EbayBatchItemRow[];
+};
+type EbayStuckBatch = { batchId: string; displayNumber: number; status: string; listingCount: number; createdAt: string };
+
+// Corrective pass — every eBay item status that counts as "still being
+// actively worked on" for the marketplace-aware "Sent"/"Drafting" filter
+// counts, mirroring WORKFLOW_STATUS_TAB_GROUPS.sent's own Vinted
+// equivalent. Module-level (not recomputed, and not a hook dependency)
+// since it's a fixed constant, never derived from props/state.
+const EBAY_IN_PROGRESS_STATUSES: readonly EbayWorkflowStatus[] = ["queued", "uploading_photos", "creating_inventory_item", "creating_draft", "verifying_draft"];
 
 // Follow-up correction (orphaned extension batch recovery) — mirrors
 // GET /api/listing-studio/extension-batches's own `recoverable` entry
@@ -99,11 +145,16 @@ type ReviewDraftRow = {
   extension_status: LatestExtensionStatusRow | null;
 };
 type ReviewImageRow = { id: string; draft_id: string; sort_order: number };
-type ReviewData = { drafts: ReviewDraftRow[]; images: ReviewImageRow[] };
+type ReviewData = { drafts: ReviewDraftRow[]; images: ReviewImageRow[]; ebayDrafts: EbayMarketplaceDraftRow[] };
 
 // Every field the UI or its derived status/warnings/edited-detection logic
 // needs, computed once per listing when the underlying data actually
 // changes — never re-derived per render of any child component.
+//
+// Stage 6 (eBay draft batches) — `ebay` (used by ListingDetailsPanel's own
+// tab) and the flat `ebay*` fields (used by ListingsTable's own workflow
+// column) are two views of the SAME underlying eBay data, both built once
+// here from the same source — never two independently-computed answers.
 type ListingRow = ListingDetails & ReviewableListing & {
   updatedAt: string; photoIds: string[];
   costPence: number | null; profitPence: number | null;
@@ -114,6 +165,13 @@ type ListingRow = ListingDetails & ReviewableListing & {
   detail: string | null;
   vintedDraftId: string | null;
   errorMessage: string | null;
+  hasEbayPreparation: boolean;
+  ebayContentReady: boolean;
+  ebayWorkflowStatus: EbayWorkflowStatus | null;
+  ebayQueuePosition: number | null;
+  ebayErrorMessage: string | null;
+  ebaySellingPricePence: number | null;
+  ebayProfitPence: number | null;
 };
 
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
@@ -144,6 +202,40 @@ export default function ListingsReviewWorkspace() {
   const [images, setImages] = useState<ReviewImageRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+
+  // Stage 6 (eBay draft batches) — independent eBay marketplace-draft data
+  // (never merged into `drafts` above, which stays exactly what it always
+  // was: Vinted data only). Policies/locations are fetched once from the
+  // existing eBay account endpoint — never re-derived or duplicated here.
+  const [ebayDrafts, setEbayDrafts] = useState<EbayMarketplaceDraftRow[]>([]);
+  const [ebayPolicies, setEbayPolicies] = useState<EbayPolicyOption[]>([]);
+  const [ebayLocations, setEbayLocations] = useState<EbayLocationOption[]>([]);
+  const [ebayAccountUsable, setEbayAccountUsable] = useState(false);
+  // The small Vinted/eBay toggle beside the Workflow column heading —
+  // changes which marketplace's status/price/profit each row displays;
+  // never touches stored data. Independent of activityChannel below (the
+  // product spec's own "the workflow switch changes the displayed
+  // marketplace state only" vs. Live Activity's own separate toggle).
+  const [workflowMarketplaceView, setWorkflowMarketplaceView] = useState<ListingMarketplaceView>("VINTED");
+  // Live Activity's own independent Vinted/eBay toggle.
+  const [activityChannel, setActivityChannel] = useState<ListingMarketplaceView>("VINTED");
+
+  const [ebayCreatingDrafts, setEbayCreatingDrafts] = useState(false);
+  const [ebayCreateError, setEbayCreateError] = useState("");
+  const [ebayCreateMessage, setEbayCreateMessage] = useState("");
+  const [ebayVisibleBatchIds, setEbayVisibleBatchIds] = useState<Set<string>>(new Set());
+  const [ebayBatchStatusById, setEbayBatchStatusById] = useState<Map<string, EbayBatchStatus>>(new Map());
+  const [ebayStuckBatches, setEbayStuckBatches] = useState<EbayStuckBatch[]>([]);
+  const [ebayDismissTarget, setEbayDismissTarget] = useState<EbayStuckBatch | { batchId: string; displayNumber: number } | null>(null);
+  const [ebayActivityEvents, setEbayActivityEvents] = useState<ActivityEvent[]>([]);
+  const [ebayActivityDismissedBatchIds, setEbayActivityDismissedBatchIds] = useState<Set<string>>(new Set());
+  const [ebayActivityFilter, setEbayActivityFilter] = useState<string>("all");
+  const ebayPreviousItemsByBatchRef = useRef<Map<string, Map<string, EbayBatchItemRow>>>(new Map());
+  const ebayCompletedBatchesLoggedRef = useRef<Set<string>>(new Set());
+  const ebayVisibleBatchIdsRef = useRef<Set<string>>(new Set());
+  const ebayBatchStatusByIdRef = useRef<Map<string, EbayBatchStatus>>(new Map());
+  useEffect(() => { ebayVisibleBatchIdsRef.current = ebayVisibleBatchIds; }, [ebayVisibleBatchIds]);
+  useEffect(() => { ebayBatchStatusByIdRef.current = ebayBatchStatusById; }, [ebayBatchStatusById]);
 
   const [searchQuery, setSearchQuery] = useState("");
   // Listings Review redesign — the 5 top tabs (All/Ready/Needs review/
@@ -319,6 +411,7 @@ export default function ListingsReviewWorkspace() {
       const data = await response.json() as ReviewData;
       setDrafts(data.drafts);
       setImages(data.images);
+      setEbayDrafts(data.ebayDrafts ?? []);
       setLoadError("");
     } catch {
       setLoadError("Could not load your listings. Check your connection and try again.");
@@ -327,6 +420,47 @@ export default function ListingsReviewWorkspace() {
     }
   }, []);
   useEffect(() => { loadListings(); }, [loadListings]);
+
+  // Stage 6 (eBay draft batches) — the connected account's own currently-
+  // synced policies/locations, fetched once on mount (never per-listing;
+  // reused by every row/tab/bulk control). Reuses the EXISTING Settings
+  // endpoint rather than duplicating this data — never re-fetched just
+  // because this page opened after Settings already loaded it once.
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch("/api/ebay/connection");
+        if (!response.ok) return;
+        const body = await response.json() as {
+          connection: { connectionStatus: string } | null;
+          policies: Array<{ policyType: "FULFILLMENT" | "RETURN" | "PAYMENT"; ebayPolicyId: string; name: string; available: boolean }>;
+          locations: Array<{ merchantLocationKey: string; name: string | null; addressSummary: string | null; available: boolean }>;
+        };
+        setEbayAccountUsable(body.connection?.connectionStatus === "connected");
+        setEbayPolicies(body.policies.map(p => ({ policyType: p.policyType, ebayPolicyId: p.ebayPolicyId, name: p.name, available: p.available })));
+        setEbayLocations(body.locations);
+      } catch { /* best-effort — the page still works, eBay tabs just show no policy options yet */ }
+    })();
+  }, []);
+
+  // Stage 6 — resumes tracking every eBay draft batch still genuinely
+  // visible from an earlier page load, exactly mirroring the Vinted
+  // extension-batch resume effect above (but independent state).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/listing-studio/ebay-draft-batches");
+        if (!response.ok || cancelled) return;
+        const body = await response.json() as { batchIds: { batchId: string; displayNumber: number }[]; stuck?: EbayStuckBatch[] };
+        if (cancelled) return;
+        setEbayStuckBatches(body.stuck ?? []);
+        if (body.batchIds.length === 0) return;
+        setEbayVisibleBatchIds(current => { const next = new Set(current); for (const entry of body.batchIds) next.add(entry.batchId); return next; });
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Listings Review redesign — root-cause fix: resume tracking every
   // batch that's still genuinely visible (in flight, or terminal but not
@@ -375,6 +509,12 @@ export default function ListingsReviewWorkspace() {
     return map;
   }, [images]);
 
+  // Stage 6 (eBay draft batches) — one eBay marketplace draft per product
+  // at most (see supabase-listing-studio-marketplace.sql's own unique
+  // constraint), indexed once here rather than filtering ebayDrafts inside
+  // the per-row map below.
+  const ebayByProductId = useMemo(() => new Map(ebayDrafts.map(d => [d.productDraftId, d])), [ebayDrafts]);
+
   // Status/warnings/edited-ness/cost/profit computed exactly once per
   // listing here — never recomputed by ListingsTable or ListingDetailsPanel
   // themselves. Deliberately does NOT depend on batchStatus (the live
@@ -383,6 +523,7 @@ export default function ListingsReviewWorkspace() {
   // changed any listing's own data never re-runs this whole pipeline.
   const baseListingRows = useMemo(() => drafts.map(draft => {
     const photoIds = photoIdsByDraftId.get(draft.id) ?? [];
+    const ebayDraft = ebayByProductId.get(draft.id) ?? null;
     const reviewable: ReviewableListing = {
       brand: draft.brand, model: draft.model, productType: draft.product_type, colours: draft.colours ?? [], material: draft.material,
       ukSize: draft.uk_size, sku: draft.sku, ukSizeSource: draft.uk_size_source,
@@ -398,6 +539,11 @@ export default function ListingsReviewWorkspace() {
       condition: draft.condition, hasPhoto: photoIds.length > 0,
     };
     const costPence = computeCostPence(draft.purchase_match);
+    // Stage 6 — the SAME real purchase cost (costPence, computed once
+    // above) is used for eBay's own profit — "You paid" is a property of
+    // the purchase, not the marketplace. Only the SELLING price and
+    // therefore profit differ per marketplace.
+    const ebayProfitPence = ebayDraft ? computeProfitPence(costPence, ebayDraft.pricePence) : null;
     return {
       ...reviewable,
       id: draft.id,
@@ -411,8 +557,41 @@ export default function ListingsReviewWorkspace() {
       costPence,
       profitPence: computeProfitPence(costPence, draft.confirmed_price_pence),
       extensionStatusSnapshot: draft.extension_status,
+      // Corrective pass (canonical unified row model) — this page now
+      // legitimately includes eBay-only products (see the listings-review
+      // route's own header comment for the proven bug this closes): a row
+      // has real Vinted content only when BOTH generated_title and
+      // generated_description are non-null — exactly the same condition
+      // app/api/listing-studio/groups/[draftId]/generate/route.ts's own
+      // `shouldWriteVintedContent` gate uses to decide whether to ever
+      // write them, so client and server can never disagree about "does
+      // this product have a genuine Vinted preparation".
+      hasVintedPreparation: Boolean(draft.generated_title) && Boolean(draft.generated_description),
+      hasEbayPreparation: ebayDraft !== null,
+      ebayContentReady: ebayDraft?.readiness.ready ?? false,
+      ebaySellingPricePence: ebayDraft?.pricePence ?? null,
+      ebayProfitPence,
+      ebay: ebayDraft ? {
+        marketplaceDraftId: ebayDraft.id,
+        contentReady: ebayDraft.readiness.ready,
+        sellingPricePence: ebayDraft.pricePence,
+        costPence,
+        profitPence: ebayProfitPence,
+        selection: {
+          fulfillmentPolicyId: ebayDraft.ebayFulfillmentPolicyId, returnPolicyId: ebayDraft.ebayReturnPolicyId,
+          paymentPolicyId: ebayDraft.ebayPaymentPolicyId, merchantLocationKey: ebayDraft.ebayMerchantLocationKey,
+        } satisfies EbayPolicySelection,
+        offerId: ebayDraft.ebayOfferId,
+        // workflowStatus/queuePosition/errorMessage are the page-load
+        // aggregate here; the separate listingRows memo below layers the
+        // LIVE poll result on top, exactly mirroring how Vinted's own
+        // workflowStatus is layered (see liveItemByDraftId below).
+        workflowStatus: ebayDraft.ebayStatus ? computeEbayDraftWorkflowStatus(ebayDraft.ebayStatus.item_status) : null,
+        queuePosition: ebayDraft.ebayStatus?.queue_position ?? null,
+        errorMessage: ebayDraft.ebayStatus?.error_message ?? null,
+      } satisfies EbayTabData : null,
     };
-  }), [drafts, photoIdsByDraftId]);
+  }), [drafts, photoIdsByDraftId, ebayByProductId]);
 
   // Multi-batch support — one draft can appear in AT MOST one genuinely
   // live (non-terminal) batch at a time (enforced atomically server-side
@@ -440,6 +619,29 @@ export default function ListingsReviewWorkspace() {
     return map;
   }, [batchStatusById]);
 
+  // Stage 6 (eBay draft batches) — the exact same "live batch item wins,
+  // tie-break by most recently created batch" precedence as
+  // liveItemByDraftId above, independently keyed by marketplaceDraftId
+  // (never productDraftId — a product's eBay marketplace draft has its own
+  // distinct id). Completing/failing an eBay batch item never touches this
+  // same product's Vinted liveItemByDraftId entry, and vice versa.
+  const ebayLiveItemByMarketplaceDraftId = useMemo(() => {
+    const map = new Map<string, { item: EbayBatchItemRow; batch: EbayBatchStatus }>();
+    for (const batch of ebayBatchStatusById.values()) {
+      for (const item of batch.items) {
+        const existing = map.get(item.marketplaceDraftId);
+        if (!existing) { map.set(item.marketplaceDraftId, { item, batch }); continue; }
+        const existingLive = !isEbayBatchStatusTerminal(existing.batch.status);
+        const candidateLive = !isEbayBatchStatusTerminal(batch.status);
+        if (candidateLive && !existingLive) { map.set(item.marketplaceDraftId, { item, batch }); continue; }
+        if (candidateLive === existingLive && new Date(batch.createdAt).getTime() > new Date(existing.batch.createdAt).getTime()) {
+          map.set(item.marketplaceDraftId, { item, batch });
+        }
+      }
+    }
+    return map;
+  }, [ebayBatchStatusById]);
+
   // Layers real-time workflow status on top of the base rows: the LIVE
   // batch item for this draft wins when present (freshest — updates every
   // 4s poll), otherwise the page-load historical aggregate
@@ -464,8 +666,24 @@ export default function ListingsReviewWorkspace() {
     const detail = live ? live.item.detail : row.extensionStatusSnapshot?.step_detail ?? null;
     const vintedDraftId = live ? live.item.vintedDraftId : row.extensionStatusSnapshot?.vinted_draft_id ?? null;
     const errorMessage = live ? live.item.errorMessage : row.extensionStatusSnapshot?.error_message ?? null;
-    return { ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage };
-  }), [baseListingRows, liveItemByDraftId]);
+
+    // Stage 6 — same live-first-else-aggregate precedence, entirely
+    // independent of the Vinted fields just computed above. A live eBay
+    // batch item, when present, wins over row.ebay's own page-load
+    // aggregate (already set in baseListingRows); a cancelled/absent live
+    // item leaves that aggregate exactly as it was.
+    const ebayLive = row.ebay ? ebayLiveItemByMarketplaceDraftId.get(row.ebay.marketplaceDraftId) : undefined;
+    const ebayWorkflowStatus = ebayLive ? computeEbayDraftWorkflowStatus(ebayLive.item.status) : row.ebay?.workflowStatus ?? null;
+    const ebayQueuePosition = ebayLive ? ebayLive.item.queuePosition : row.ebay?.queuePosition ?? null;
+    const ebayErrorMessage = ebayLive ? ebayLive.item.errorMessage : row.ebay?.errorMessage ?? null;
+    const ebayOfferId = ebayLive?.item.ebayOfferId ?? row.ebay?.offerId ?? null;
+    const ebay = row.ebay ? { ...row.ebay, workflowStatus: ebayWorkflowStatus, queuePosition: ebayQueuePosition, errorMessage: ebayErrorMessage, offerId: ebayOfferId } : null;
+
+    return {
+      ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage,
+      ebayWorkflowStatus, ebayQueuePosition, ebayErrorMessage, ebay,
+    };
+  }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId]);
 
   const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);
 
@@ -474,19 +692,55 @@ export default function ListingsReviewWorkspace() {
     return [...values].sort((a, b) => a.localeCompare(b));
   }, [listingRows]);
 
-  // Readiness (Ready/Needs review) and extension workflow (Drafts/Sent)
-  // are deliberately separate concepts, per WORKFLOW_STATUS_TAB_GROUPS —
-  // never merged into one count. "Ready" includes "edited" (both pass
-  // every readiness rule; "edited" just hasn't been re-confirmed since a
-  // change), matching this page's own existing readiness definition.
-  const readyCount = useMemo(() => listingRows.filter(row => row.status !== "needs_review").length, [listingRows]);
-  const needsReviewCount = useMemo(() => listingRows.filter(row => row.status === "needs_review").length, [listingRows]);
-  const draftsCount = useMemo(() => listingRows.filter(row => row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)).length, [listingRows]);
-  const sentCount = useMemo(() => listingRows.filter(row => row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)).length, [listingRows]);
-  const failedCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "failed").length, [listingRows]);
+  // Corrective pass — every one of these now follows the active
+  // Workflow-column channel (workflowMarketplaceView), per the product
+  // spec's own "Marketplace-aware KPI cards and filters" requirement.
+  // `channelRows` scopes to rows that genuinely HAVE the active channel's
+  // preparation FIRST — "rows without the active marketplace preparation
+  // should not distort active-channel totals" — so a Vinted-only row can
+  // never inflate/deflate an eBay-mode count, and vice versa. Within that
+  // scope, readiness (Ready/Needs review) and workflow progress
+  // (Drafting/Drafts/Sent/Failed) stay the same two deliberately SEPARATE
+  // concepts this page has always kept apart — never merged into one
+  // count — just computed from whichever channel's own fields apply.
+  const channelRows = useMemo(
+    () => listingRows.filter(row => (workflowMarketplaceView === "VINTED" ? row.hasVintedPreparation : row.hasEbayPreparation)),
+    [listingRows, workflowMarketplaceView],
+  );
+  // The "Listings" KPI card's own count — channel-scoped (per the spec's
+  // own "Listings count includes rows with an eBay preparation" wording).
+  // Deliberately a SEPARATE value from the filter bar's "All" tab count
+  // below, which stays the genuinely unfiltered total — "All" always
+  // means every row on the page, on either channel, so a row without the
+  // active channel's preparation is never hidden from it, only shown as
+  // "Not prepared" in the table (see ListingsTable.tsx's own
+  // resolveWorkflowDisplay).
+  const channelListingsCount = channelRows.length;
+
+  const readyCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED" ? row.status !== "needs_review" : row.ebayContentReady,
+  ).length, [channelRows, workflowMarketplaceView]);
+  const needsReviewCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED" ? row.status === "needs_review" : !row.ebayContentReady,
+  ).length, [channelRows, workflowMarketplaceView]);
+  const draftsCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED"
+      ? row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)
+      : row.ebayWorkflowStatus === "completed",
+  ).length, [channelRows, workflowMarketplaceView]);
+  const sentCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED"
+      ? row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)
+      : row.ebayWorkflowStatus !== null && (EBAY_IN_PROGRESS_STATUSES as string[]).includes(row.ebayWorkflowStatus),
+  ).length, [channelRows, workflowMarketplaceView]);
+  const failedCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED" ? row.workflowStatus === "failed" : row.ebayWorkflowStatus === "failed",
+  ).length, [channelRows, workflowMarketplaceView]);
   // Visual-accuracy redesign — the 4th KPI card. Real, persisted extension-
-  // item state (preparing/filling/saving), never a client-only guess.
-  const draftingCount = useMemo(() => listingRows.filter(row => row.workflowStatus === "in_progress").length, [listingRows]);
+  // (or eBay draft-batch-) item state, never a client-only guess.
+  const draftingCount = useMemo(() => channelRows.filter(row =>
+    workflowMarketplaceView === "VINTED" ? row.workflowStatus === "in_progress" : isEbayWorkflowInProgress(row.ebayWorkflowStatus),
+  ).length, [channelRows, workflowMarketplaceView]);
 
   const filtersActive = topTab !== "all" || categoryFilter !== "all" || activeQuickFilters.size > 0 || showEditedOnly || showFailedOnly || showSentOnly || searchQuery.trim().length > 0;
   const clearFilters = useCallback(() => {
@@ -494,17 +748,31 @@ export default function ListingsReviewWorkspace() {
     setShowEditedOnly(false); setShowFailedOnly(false); setShowSentOnly(false); setSearchQuery("");
   }, []);
 
+  // Corrective pass — "All" (topTab === "all") is deliberately the ONE
+  // exception that never channel-filters: it always means "every row on
+  // the page", exactly as it always has, so a row without the active
+  // channel's preparation still appears (as "Not prepared") rather than
+  // vanishing the instant the Workflow toggle is switched. Every OTHER
+  // top-tab filter (Ready/Need review/Drafts) is channel-aware and, as a
+  // natural consequence of the criteria themselves, only ever matches
+  // rows that DO have the active channel's own preparation.
   const filteredRows = useMemo(() => listingRows.filter(row => {
-    if (topTab === "ready" && row.status === "needs_review") return false;
-    if (topTab === "needs_review" && row.status !== "needs_review") return false;
-    if (topTab === "drafted" && row.workflowStatus !== "drafted") return false;
+    if (topTab === "ready") {
+      if (workflowMarketplaceView === "VINTED" ? (!row.hasVintedPreparation || row.status === "needs_review") : (!row.hasEbayPreparation || !row.ebayContentReady)) return false;
+    }
+    if (topTab === "needs_review") {
+      if (workflowMarketplaceView === "VINTED" ? (!row.hasVintedPreparation || row.status !== "needs_review") : (!row.hasEbayPreparation || row.ebayContentReady)) return false;
+    }
+    if (topTab === "drafted") {
+      if (workflowMarketplaceView === "VINTED" ? row.workflowStatus !== "drafted" : row.ebayWorkflowStatus !== "completed") return false;
+    }
     if (categoryFilter !== "all" && row.productType !== categoryFilter) return false;
     if (showEditedOnly && row.status !== "edited") return false;
     if (showFailedOnly && row.workflowStatus !== "failed") return false;
     if (showSentOnly && !(row.workflowStatus !== null && (WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus))) return false;
     for (const filter of activeQuickFilters) if (!matchesQuickFilter(row, filter)) return false;
     return matchesListingSearch({ generatedTitle: row.generatedTitle, sku: row.sku, brand: row.brand, model: row.model, colours: row.colours }, searchQuery);
-  }), [listingRows, topTab, categoryFilter, showEditedOnly, showFailedOnly, showSentOnly, activeQuickFilters, searchQuery]);
+  }), [listingRows, topTab, workflowMarketplaceView, categoryFilter, showEditedOnly, showFailedOnly, showSentOnly, activeQuickFilters, searchQuery]);
 
   const selectedListingPosition = useMemo(() => {
     const index = filteredRows.findIndex(row => row.id === selectedListingId);
@@ -584,6 +852,117 @@ export default function ListingsReviewWorkspace() {
   const handleSellingPriceSaved = useCallback((listingId: string, pence: number) => {
     setDrafts(current => current.map(draft => draft.id === listingId ? { ...draft, confirmed_price_pence: pence, updated_at: new Date().toISOString() } : draft));
   }, []);
+
+  // Stage 6 (eBay draft batches) — mirrors handleSellingPriceSaved's own
+  // "the route already saved it; just reflect the result locally" pattern,
+  // for whichever eBay field(s) were just saved (price and/or one policy).
+  // Only ever patches ebayDrafts (never `drafts`, the Vinted array) — the
+  // two marketplaces' local state can never cross-contaminate.
+  const handleEbaySettingsSaved = useCallback((listingId: string, patch: { sellingPricePence?: number } & Partial<EbayPolicySelection>) => {
+    setEbayDrafts(current => current.map(d => {
+      if (d.productDraftId !== listingId) return d;
+      return {
+        ...d,
+        pricePence: patch.sellingPricePence !== undefined ? patch.sellingPricePence : d.pricePence,
+        ebayFulfillmentPolicyId: patch.fulfillmentPolicyId !== undefined ? patch.fulfillmentPolicyId : d.ebayFulfillmentPolicyId,
+        ebayReturnPolicyId: patch.returnPolicyId !== undefined ? patch.returnPolicyId : d.ebayReturnPolicyId,
+        ebayPaymentPolicyId: patch.paymentPolicyId !== undefined ? patch.paymentPolicyId : d.ebayPaymentPolicyId,
+        ebayMerchantLocationKey: patch.merchantLocationKey !== undefined ? patch.merchantLocationKey : d.ebayMerchantLocationKey,
+      };
+    }));
+  }, []);
+
+  // A conservative CLIENT-SIDE estimate only, for the "Create N eBay
+  // drafts" button's own label/enabled state — the server independently
+  // re-verifies full eligibility (price, content readiness, all three
+  // policies, location, no existing offer) before ever creating a batch;
+  // this never skips that server-side check, it only avoids showing a
+  // wildly wrong count in the UI before the click.
+  const eligibleEbayCount = useMemo(() => [...bulkSelectedIds].filter(id => {
+    const row = listingsById.get(id);
+    if (!row?.ebay || row.ebay.offerId !== null || !row.ebay.contentReady) return false;
+    const s = row.ebay.selection;
+    return row.ebay.sellingPricePence != null && row.ebay.sellingPricePence > 0
+      && Boolean(s.fulfillmentPolicyId) && Boolean(s.returnPolicyId) && Boolean(s.paymentPolicyId) && Boolean(s.merchantLocationKey);
+  }).length, [bulkSelectedIds, listingsById]);
+
+  async function handleCreateEbayDrafts() {
+    const ids = [...bulkSelectedIds];
+    if (!ids.length || ebayCreatingDrafts) return;
+    setEbayCreatingDrafts(true); setEbayCreateError(""); setEbayCreateMessage("");
+    try {
+      const response = await fetch("/api/listing-studio/ebay-draft-batches", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setEbayCreateError(body.error || "Could not create eBay drafts."); return; }
+      if (body.batchId) setEbayVisibleBatchIds(current => new Set(current).add(body.batchId));
+      const skippedNote = body.skippedCount > 0 ? ` ${body.skippedCount} skipped: ${[...new Set((body.skipped as Array<{ reasons: string[] }>).flatMap(s => s.reasons))].join(", ")}.` : "";
+      setEbayCreateMessage(`${body.eligibleCount} eBay draft${body.eligibleCount === 1 ? "" : "s"} started.${skippedNote}`);
+    } catch {
+      setEbayCreateError("Network error — could not create eBay drafts. Your selection has been kept.");
+    } finally {
+      setEbayCreatingDrafts(false);
+    }
+  }
+
+  // Passed to BulkEbayPolicyControl — applies one shipping policy to every
+  // eligible selected listing, then reloads so each row/tab reflects the
+  // server's own final state (mirrors handleBulkAssignCategories' own
+  // "one request, then reload" convention below).
+  const handleApplyBulkEbayPolicy = useCallback(async (ebayPolicyId: string): Promise<BulkPolicyApplyResult> => {
+    const ids = [...bulkSelectedIds];
+    try {
+      const response = await fetch("/api/listing-studio/listings-review/ebay-bulk-policy", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids, policyType: "FULFILLMENT", ebayPolicyId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) return { appliedCount: 0, skippedCount: ids.length, skipped: ids.map(draftId => ({ draftId, reason: body.error || "Could not apply." })) };
+      await loadListings();
+      return body as BulkPolicyApplyResult;
+    } catch {
+      return { appliedCount: 0, skippedCount: ids.length, skipped: ids.map(draftId => ({ draftId, reason: "Network error" })) };
+    }
+  }, [bulkSelectedIds, loadListings]);
+
+  const handleCancelEbayBatch = useCallback(async (batchId: string) => {
+    await fetch(`/api/listing-studio/ebay-draft-batches/${batchId}`, { method: "DELETE" }).catch(() => {});
+  }, []);
+
+  const handleDismissEbayBatchBox = useCallback(async (batchId: string) => {
+    setEbayVisibleBatchIds(current => { const next = new Set(current); next.delete(batchId); return next; });
+    setEbayBatchStatusById(current => { const next = new Map(current); next.delete(batchId); return next; });
+    setEbayActivityDismissedBatchIds(current => new Set(current).add(batchId));
+    setEbayActivityFilter(current => (current === batchId ? "all" : current));
+    await fetch(`/api/listing-studio/ebay-draft-batches/${batchId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_box" }),
+    }).catch(() => {});
+  }, []);
+
+  const handleDismissEbayBatchActivity = useCallback((batchId: string) => {
+    setEbayActivityDismissedBatchIds(current => new Set(current).add(batchId));
+    setEbayActivityFilter(current => (current === batchId ? "all" : current));
+    fetch(`/api/listing-studio/ebay-draft-batches/${batchId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_activity" }),
+    }).catch(() => {});
+  }, []);
+
+  // Stuck-batch dismissal (product spec requirement) — a small × on each
+  // stuck eBay batch row opens a real confirmation dialog (never a browser
+  // alert), explaining that dismissing only removes it from the recovery
+  // list and never deletes listings or completed drafts. Reuses the box-
+  // dismiss action/endpoint above — dismissing a still-non-terminal batch
+  // is safe for eBay (no browser-extension pairing to interrupt, unlike
+  // the Vinted recover flow this deliberately does NOT reuse).
+  const [ebayStuckConfirmOpen, setEbayStuckConfirmOpen] = useState(false);
+  function openEbayStuckDismissConfirm(batch: EbayStuckBatch) { setEbayDismissTarget(batch); setEbayStuckConfirmOpen(true); }
+  async function confirmEbayStuckDismiss() {
+    if (!ebayDismissTarget) return;
+    setEbayStuckConfirmOpen(false);
+    setEbayStuckBatches(current => current.filter(b => b.batchId !== ebayDismissTarget.batchId));
+    await handleDismissEbayBatchBox(ebayDismissTarget.batchId);
+    setEbayDismissTarget(null);
+  }
 
   async function handleMarkReady(listingId: string) {
     setMarkingReadyId(listingId);
@@ -1178,6 +1557,105 @@ export default function ListingsReviewWorkspace() {
     return () => { cancelled = true; if (timeoutId !== undefined) clearTimeout(timeoutId); };
   }, [hasVisibleBatches]);
 
+  // Stage 6 (eBay draft batches) — the eBay equivalent of the Vinted poll
+  // loop just above: one self-rescheduling 4s poll covering every visible,
+  // not-yet-known-terminal eBay batch, diffing each poll's items against
+  // the previous one to synthesize real Live Activity events (never
+  // fabricated) — simpler than the Vinted version above since an eBay
+  // item's own persisted `status` IS already the full granular stage
+  // (queued/uploading_photos/creating_inventory_item/creating_draft/
+  // verifying_draft/completed/failed), with no separate currentStep/detail
+  // sub-fields to track. Completely independent state from the Vinted loop
+  // — polling/dismissing/completing an eBay batch never touches
+  // batchStatusById, activityEvents, or any other Vinted-only state above.
+  const hasVisibleEbayBatches = ebayVisibleBatchIds.size > 0;
+  useEffect(() => {
+    if (!hasVisibleEbayBatches) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    function applyEbayBatchResult(batchId: string, body: EbayBatchStatus) {
+      setEbayBatchStatusById(current => new Map(current).set(batchId, body));
+      const batchLabel = `Batch ${body.displayNumber}`;
+      const previousItems = ebayPreviousItemsByBatchRef.current.get(batchId) ?? null;
+      if (previousItems === null) {
+        setEbayActivityEvents(current => [
+          { id: `${batchId}:sent`, batchId, batchLabel, tone: "sent", message: `${body.items.length} listing${body.items.length === 1 ? "" : "s"} sent for eBay drafting`, timestampIso: body.createdAt },
+          ...current,
+        ]);
+      } else {
+        const newEvents: ActivityEvent[] = [];
+        for (const item of body.items) {
+          const prev = previousItems.get(item.itemId);
+          if (!prev || item.status === prev.status) continue;
+          const label = item.generatedTitle || item.sku || "Listing";
+          if (item.status === "completed") {
+            newEvents.push({ id: `${item.itemId}:completed`, batchId, batchLabel, tone: "success", message: `${label} — eBay draft completed`, timestampIso: item.completedAt ?? new Date().toISOString() });
+          } else if (item.status === "failed") {
+            newEvents.push({ id: `${item.itemId}:failed`, batchId, batchLabel, tone: "failure", message: `${label} — failed: ${item.errorMessage ?? "Unknown error"}`, timestampIso: item.completedAt ?? new Date().toISOString() });
+          } else {
+            const stageLabel = EBAY_WORKFLOW_STATUS_LABELS[item.status as EbayWorkflowStatus] ?? item.status;
+            newEvents.push({ id: `${item.itemId}:${item.status}`, batchId, batchLabel, tone: "progress", message: `${label} — ${stageLabel.toLowerCase()}`, timestampIso: item.startedAt ?? new Date().toISOString() });
+          }
+        }
+        if (newEvents.length > 0) setEbayActivityEvents(current => [...newEvents, ...current]);
+      }
+      ebayPreviousItemsByBatchRef.current.set(batchId, new Map(body.items.map(item => [item.itemId, item])));
+
+      if (body.status === "completed" && !ebayCompletedBatchesLoggedRef.current.has(batchId)) {
+        ebayCompletedBatchesLoggedRef.current.add(batchId);
+        const completedCount = body.items.filter(item => item.status === "completed").length;
+        setEbayActivityEvents(current => [
+          { id: `${batchId}:batch-complete`, batchId, batchLabel, tone: "success", message: `Batch completed — ${completedCount} eBay draft${completedCount === 1 ? "" : "s"} created`, timestampIso: body.completedAt ?? new Date().toISOString() },
+          ...current,
+        ]);
+        // Refreshes ebayDrafts so each completed row's offer id/readiness
+        // reflects the server's own final state (mirrors the Vinted loop's
+        // own reliance on a fresh row load after a batch completes — see
+        // handleRecoverBatch's own loadListings() call).
+        loadListings();
+      }
+    }
+
+    async function poll() {
+      const idsToPoll = [...ebayVisibleBatchIdsRef.current].filter(id => {
+        const known = ebayBatchStatusByIdRef.current.get(id);
+        return !known || !isEbayBatchStatusTerminal(known.status);
+      });
+      if (idsToPoll.length === 0) { if (!cancelled) timeoutId = setTimeout(poll, 4000); return; }
+
+      // Corrective pass — POST .../process, not GET: this same call both
+      // advances real, bounded, persisted work (claims a few items,
+      // steps each forward once) AND returns the batch's fresh full
+      // status, so every poll tick this page is open is itself the
+      // client-triggered driver of forward progress (see
+      // lib/listing-studio/ebay-draft-batches.ts's own header comment) —
+      // never a read-only observer of work happening somewhere else.
+      const results = await Promise.all(idsToPoll.map(async id => {
+        try {
+          const response = await fetch(`/api/listing-studio/ebay-draft-batches/${id}/process`, { method: "POST" });
+          if (!response.ok) return { id, ok: false as const, status: response.status };
+          return { id, ok: true as const, body: await response.json() as EbayBatchStatus };
+        } catch { return { id, ok: false as const, status: 0 }; }
+      }));
+      if (cancelled) return;
+
+      for (const result of results) {
+        if (!result.ok) {
+          if (result.status === 404) {
+            setEbayVisibleBatchIds(current => { const next = new Set(current); next.delete(result.id); return next; });
+            setEbayBatchStatusById(current => { const next = new Map(current); next.delete(result.id); return next; });
+          }
+          continue;
+        }
+        applyEbayBatchResult(result.id, result.body);
+      }
+      if (!cancelled) timeoutId = setTimeout(poll, 4000);
+    }
+    poll();
+    return () => { cancelled = true; if (timeoutId !== undefined) clearTimeout(timeoutId); };
+  }, [hasVisibleEbayBatches, loadListings]);
+
   async function commitDelete(ids: string[]) {
     setBulkActionRunning(true);
     setBulkActionError("");
@@ -1301,6 +1779,73 @@ export default function ListingsReviewWorkspace() {
     !activityDismissedBatchIds.has(event.batchId) && (activityFilter === "all" || event.batchId === activityFilter),
   ), [activityEvents, activityDismissedBatchIds, activityFilter]);
 
+  // Stage 6 (eBay draft batches) — the eBay equivalents of
+  // batchBoxViewModels/anyBatchLive/activityFilterOptions/
+  // visibleActivityEvents above. Reuses ExtensionBatchGrid.tsx directly:
+  // an eBay batch's status is always 'pending'/'in_progress'/'completed'/
+  // 'cancelled' — 'pending' renders that component's own "Preparing
+  // batch…" state, 'in_progress' renders its "Processing — X of Y" +
+  // Cancel state (the box's own generic wording never claims a
+  // Vinted-specific "Vinted drafts" outcome), 'completed'/'cancelled'
+  // render its terminal summary — its "waiting for pairing" branch is
+  // simply never reached, since no eBay batch ever has status
+  // 'pending_claim' and pairingCode is always null here.
+  const ebayBatchBoxViewModels: BatchBoxViewModel[] = useMemo(() => [...ebayVisibleBatchIds].map(id => {
+    const status = ebayBatchStatusById.get(id);
+    if (!status) return { batchId: id, displayNumber: 0, browserLabel: null, status: "pending", listingCount: 0, completedCount: 0, failedCount: 0, cancelledCount: 0, currentItemLabel: null, pairingCode: null, expiresAt: null, codeCopied: false };
+    const completedCount = status.items.filter(item => item.status === "completed").length;
+    const failedCount = status.items.filter(item => item.status === "failed").length;
+    const cancelledCount = status.items.filter(item => item.status === "cancelled").length;
+    const inProgressItem = status.items.find(item => item.status !== "queued" && item.status !== "completed" && item.status !== "failed" && item.status !== "cancelled");
+    const currentItemLabel = inProgressItem ? `${inProgressItem.generatedTitle || inProgressItem.sku || "Listing"} — ${EBAY_WORKFLOW_STATUS_LABELS[inProgressItem.status as EbayWorkflowStatus] ?? inProgressItem.status}` : null;
+    return {
+      batchId: id, displayNumber: status.displayNumber, browserLabel: null,
+      status: status.status, listingCount: status.listingCount, completedCount, failedCount, cancelledCount,
+      currentItemLabel, pairingCode: null, expiresAt: null, codeCopied: false,
+    };
+  }).sort((a, b) => a.displayNumber - b.displayNumber), [ebayVisibleBatchIds, ebayBatchStatusById]);
+
+  const anyEbayBatchLive = useMemo(() => [...ebayBatchStatusById.values()].some(status => !isEbayBatchStatusTerminal(status.status)), [ebayBatchStatusById]);
+
+  const ebayActivityFilterOptions: ActivityBatchFilter[] = useMemo(() =>
+    [...ebayBatchStatusById.entries()]
+      .filter(([id]) => !ebayActivityDismissedBatchIds.has(id))
+      .sort((a, b) => a[1].displayNumber - b[1].displayNumber)
+      .map(([id, status]) => ({ batchId: id, label: `Batch ${status.displayNumber}` })),
+  [ebayBatchStatusById, ebayActivityDismissedBatchIds]);
+
+  const visibleEbayActivityEvents = useMemo(() => ebayActivityEvents.filter(event =>
+    !ebayActivityDismissedBatchIds.has(event.batchId) && (ebayActivityFilter === "all" || event.batchId === ebayActivityFilter),
+  ), [ebayActivityEvents, ebayActivityDismissedBatchIds, ebayActivityFilter]);
+
+  // Corrective pass — which marketplaces to offer in the Workflow-column
+  // toggle. "VINTED" is no longer unconditionally included: this page can
+  // now genuinely contain ONLY eBay-only listings (see the listings-
+  // review route's own unified-row-model header comment), in which case
+  // showing a pointless Vinted option (with zero rows ever able to
+  // display anything but "Not prepared" under it) would violate the
+  // product spec's own "If it contains only eBay preparations, show no
+  // unnecessary toggle and display eBay" rule just as much as the
+  // reverse case would.
+  const marketplaceToggleOptions: ListingMarketplaceView[] = useMemo(() => {
+    const options: ListingMarketplaceView[] = [];
+    if (listingRows.some(row => row.hasVintedPreparation)) options.push("VINTED");
+    if (listingRows.some(row => row.hasEbayPreparation)) options.push("EBAY_UK");
+    return options.length ? options : ["VINTED"]; // defensive — an empty page has nothing to toggle either way
+  }, [listingRows]);
+
+  // Auto-corrects the active Workflow/Live-Activity channel the instant
+  // it stops being one of the genuinely available options (e.g. the last
+  // Vinted-prepared row on the page gets deleted while eBay view isn't
+  // already selected) — never leaves the page silently stuck showing a
+  // channel with nothing real behind it.
+  useEffect(() => {
+    if (!marketplaceToggleOptions.includes(workflowMarketplaceView)) setWorkflowMarketplaceView(marketplaceToggleOptions[0]);
+  }, [marketplaceToggleOptions, workflowMarketplaceView]);
+  useEffect(() => {
+    if (!marketplaceToggleOptions.includes(activityChannel)) setActivityChannel(marketplaceToggleOptions[0]);
+  }, [marketplaceToggleOptions, activityChannel]);
+
   return <div className="lr-layout">
     <div className="lr-topline">
       <h1>Listings Review</h1>
@@ -1315,7 +1860,7 @@ export default function ListingsReviewWorkspace() {
     <div className="lr-kpis" role="group" aria-label="Workspace summary">
       <div className="lr-kpi lr-kpi-listings">
         <KpiIcon tone="listings"><path d="M1.5 1.5h4.6L11.5 6.6 6.6 11.5 1.5 6.4V1.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><circle cx="4" cy="4" r=".9" fill="currentColor" /></KpiIcon>
-        <div><strong>{listingRows.length}</strong><span className="lr-kpi-label">Listings</span></div>
+        <div><strong>{channelListingsCount}</strong><span className="lr-kpi-label">Listings</span></div>
       </div>
       <div className="lr-kpi lr-kpi-ready">
         <KpiIcon tone="ready"><path d="M2 6.8l3 3 6-6.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></KpiIcon>
@@ -1427,6 +1972,33 @@ export default function ListingsReviewWorkspace() {
       onRecover={handleRecoverBatch}
     />}
 
+    {/* Stage 6 (eBay draft batches) — same full-width position/behaviour
+        as the Vinted "Hidden active batch" section and batch grid just
+        above, entirely independent state: dismissing/recovering an eBay
+        batch never touches a Vinted one, and vice versa. */}
+    {ebayStuckBatches.length > 0 && <section className="lr-hidden-batches-section" aria-label="Stuck eBay draft batches">
+      <p className="lr-hidden-batches-title">Stuck eBay draft batch{ebayStuckBatches.length === 1 ? "" : "es"}</p>
+      {ebayStuckBatches.map(batch => <div key={batch.batchId} className="lr-hidden-batch-row">
+        <span className="lr-hidden-batch-label">Batch #{batch.displayNumber} — {batch.status} — {batch.listingCount} listing{batch.listingCount === 1 ? "" : "s"}</span>
+        <button type="button" className="lr-hidden-batch-recover-button" onClick={() => openEbayStuckDismissConfirm(batch)}>Dismiss batch</button>
+      </div>)}
+    </section>}
+
+    <ExtensionBatchGrid
+      batches={ebayBatchBoxViewModels}
+      onCancel={handleCancelEbayBatch}
+      onDismissBox={handleDismissEbayBatchBox}
+      onCopyCode={() => {}}
+    />
+
+    {ebayStuckConfirmOpen && ebayDismissTarget && <ConfirmDialog
+      title={`Dismiss stuck eBay batch #${ebayDismissTarget.displayNumber}?`}
+      message="This removes the batch from the recovery list. It will not delete any listings or completed eBay drafts — anything already created remains exactly as it is."
+      confirmLabel="Dismiss batch"
+      onConfirm={confirmEbayStuckDismiss}
+      onCancel={() => { setEbayStuckConfirmOpen(false); setEbayDismissTarget(null); }}
+    />}
+
     {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
 
     {/* Two-column workspace (reference image 4's exact proportions). The
@@ -1446,6 +2018,9 @@ export default function ListingsReviewWorkspace() {
           onPreview={setPreviewListingId}
           onEditFields={setEditFieldsListingId}
           onSendToExtension={id => handleSendToExtension([id])}
+          activeMarketplace={workflowMarketplaceView}
+          marketplaceToggleOptions={marketplaceToggleOptions}
+          onMarketplaceChange={setWorkflowMarketplaceView}
         />
         {bulkCount > 0 && <div className="lr-bulk-bar" role="toolbar" aria-label="Bulk actions">
           <div className="lr-bulk-bar-selection" role="status">
@@ -1478,8 +2053,28 @@ export default function ListingsReviewWorkspace() {
             >
               {sendToExtensionRunning ? "Preparing batch…" : `Send ${bulkCount} to extension`}
             </button>
+            {/* Stage 6 (eBay draft batches) — sibling eBay actions, same
+                design language, entirely independent of the Vinted button
+                above (creating eBay drafts never touches Vinted state, and
+                vice versa). Only shown once at least one visible listing
+                has an eBay preparation, matching the Workflow toggle's own
+                visibility rule. */}
+            {marketplaceToggleOptions.includes("EBAY_UK") && <>
+              <BulkEbayPolicyControl eligibleCount={eligibleEbayCount} policies={ebayPolicies} onApply={handleApplyBulkEbayPolicy} />
+              <button
+                type="button"
+                className="button"
+                disabled={ebayCreatingDrafts || eligibleEbayCount === 0}
+                title="Creates unpublished eBay Inventory items and offers — never publishes anything"
+                onClick={handleCreateEbayDrafts}
+              >
+                {ebayCreatingDrafts ? "Creating…" : `Create ${eligibleEbayCount} eBay draft${eligibleEbayCount === 1 ? "" : "s"}`}
+              </button>
+            </>}
           </div>
         </div>}
+        {ebayCreateError && <div className="home-error" role="alert">{ebayCreateError}</div>}
+        {ebayCreateMessage && <div className="lr-bulk-message" role="status">{ebayCreateMessage}</div>}
       </div>
       <div className="lr-rail">
         <ListingDetailsPanel
@@ -1488,6 +2083,10 @@ export default function ListingsReviewWorkspace() {
           markingReady={markingReadyId === selectedListingId}
           assigningCategory={assigningCategoryId === selectedListingId}
           reassessingAudience={reassessingAudienceId === selectedListingId}
+          ebayPolicies={ebayPolicies}
+          ebayLocations={ebayLocations}
+          onEbaySettingsSaved={handleEbaySettingsSaved}
+          activeWorkflowChannel={workflowMarketplaceView}
           onOpenCarousel={(id, photoId) => openCarousel(id, photoId)}
           onPreview={setPreviewListingId}
           onEditFields={setEditFieldsListingId}
@@ -1507,12 +2106,15 @@ export default function ListingsReviewWorkspace() {
           onSendToExtension={id => handleSendToExtension([id])}
         />
         <DraftActivityPanel
-          events={visibleActivityEvents}
-          isLive={anyBatchLive}
-          filters={activityFilterOptions}
-          selectedFilter={activityFilter}
-          onSelectFilter={setActivityFilter}
-          onDismissActivity={handleDismissBatchActivity}
+          events={activityChannel === "VINTED" ? visibleActivityEvents : visibleEbayActivityEvents}
+          isLive={activityChannel === "VINTED" ? anyBatchLive : anyEbayBatchLive}
+          filters={activityChannel === "VINTED" ? activityFilterOptions : ebayActivityFilterOptions}
+          selectedFilter={activityChannel === "VINTED" ? activityFilter : ebayActivityFilter}
+          onSelectFilter={activityChannel === "VINTED" ? setActivityFilter : setEbayActivityFilter}
+          onDismissActivity={activityChannel === "VINTED" ? handleDismissBatchActivity : handleDismissEbayBatchActivity}
+          channel={activityChannel}
+          onChannelChange={setActivityChannel}
+          showChannelToggle={marketplaceToggleOptions.includes("EBAY_UK")}
         />
       </div>
     </div>}
@@ -1525,6 +2127,7 @@ export default function ListingsReviewWorkspace() {
     />}
 
     {previewListing && <PreviewListingDialog
+      productDraftId={previewListing.id}
       groupTitle={previewListing.generatedTitle || "this listing"}
       generatedTitle={previewListing.generatedTitle}
       generatedDescription={previewListing.generatedDescription}

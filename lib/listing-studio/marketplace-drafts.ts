@@ -30,13 +30,20 @@ type MarketplaceDraftRow = {
   source_draft_id: string | null; source_ebay_item_id: string | null;
   dynamic_data_json: MarketplaceDynamicData;
   settings_json: PartialMarketplaceDraftSettings;
+  // Stage 6 (eBay draft batches) — see marketplace-types.ts's own comment
+  // on MarketplaceDraft's matching fields.
+  ebay_fulfillment_policy_id: string | null; ebay_return_policy_id: string | null; ebay_payment_policy_id: string | null;
+  ebay_merchant_location_key: string | null; ebay_offer_id: string | null; ebay_inventory_synced_at: string | null;
+  ebay_last_draft_error: string | null; ebay_photo_state_json: MarketplaceDraft["ebayPhotoState"];
   created_at: string; updated_at: string;
 };
 
 const EMPTY_READINESS: MarketplaceReadiness = { ready: false, completionPercent: 0, requiredComplete: 0, requiredTotal: 0, recommendedComplete: 0, recommendedTotal: 0 };
 
 export const MARKETPLACE_DRAFT_SELECT =
-  "id,product_draft_id,owner_id,marketplace,source_type,content_mode,title,description,category_id,category_name,category_path,category_source,category_confidence,category_alternatives_json,category_search_terms,condition_value,price_pence,quantity,currency,status,readiness_json,validation_messages_json,ai_generation_json,source_draft_id,source_ebay_item_id,dynamic_data_json,settings_json,created_at,updated_at";
+  "id,product_draft_id,owner_id,marketplace,source_type,content_mode,title,description,category_id,category_name,category_path,category_source,category_confidence,category_alternatives_json,category_search_terms,condition_value,price_pence,quantity,currency,status,readiness_json,validation_messages_json,ai_generation_json,source_draft_id,source_ebay_item_id,dynamic_data_json,settings_json,"
+  + "ebay_fulfillment_policy_id,ebay_return_policy_id,ebay_payment_policy_id,ebay_merchant_location_key,ebay_offer_id,ebay_inventory_synced_at,ebay_last_draft_error,ebay_photo_state_json,"
+  + "created_at,updated_at";
 
 function rowToMarketplaceDraft(row: MarketplaceDraftRow): MarketplaceDraft {
   return {
@@ -55,6 +62,9 @@ function rowToMarketplaceDraft(row: MarketplaceDraftRow): MarketplaceDraft {
     sourceDraftId: row.source_draft_id, sourceEbayItemId: row.source_ebay_item_id,
     dynamicData: row.dynamic_data_json ?? {},
     settings: row.settings_json ?? {},
+    ebayFulfillmentPolicyId: row.ebay_fulfillment_policy_id, ebayReturnPolicyId: row.ebay_return_policy_id, ebayPaymentPolicyId: row.ebay_payment_policy_id,
+    ebayMerchantLocationKey: row.ebay_merchant_location_key, ebayOfferId: row.ebay_offer_id, ebayInventorySyncedAt: row.ebay_inventory_synced_at,
+    ebayLastDraftError: row.ebay_last_draft_error, ebayPhotoState: row.ebay_photo_state_json ?? {},
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }

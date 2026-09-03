@@ -3,6 +3,9 @@
 import { memo, useEffect, useRef, useState } from "react";
 import SortablePhotoGrid, { type PhotoTileData } from "./SortablePhotoGrid";
 import OverflowMenu from "./OverflowMenu";
+import { computeEbayCardStatus, EBAY_CARD_STATUS_LABELS, EBAY_CARD_STATUS_TONES, type EbaySummary } from "@/lib/listing-studio/ebay-card-status";
+import type { GenerationTarget } from "@/lib/listing-studio/marketplace-types";
+import { computeCardActionAvailability, computeDisplayTitle } from "@/lib/listing-studio/product-card-selectors";
 
 // Visual redesign — widened to include every structured field the draft
 // row already carries (lib/listing-studio/types.ts / the workspace API's
@@ -98,7 +101,7 @@ export const STATUS_LABELS: Record<CardStatus, string> = {
 function ProductGroupCard({
   group, photos, selectedIds, onToggleSelect, onSelectAll, onClearSelection, onSelectRange, onRename, onReorder, onSetCover, onRemovePhoto,
   onSplitSelected, onMoveSelected, onMerge, onDelete, saveState, autoEdit, onAutoEditConsumed, listing, onEditFields, onPreviewListing, onOpenEbayDetails,
-  expanded, onToggleExpand, isGenerating, hasFailedGeneration,
+  expanded, onToggleExpand, isGenerating, hasFailedGeneration, marketplaceView, ebay, isGeneratingEbay,
 }: {
   group: GroupSummary;
   photos: PhotoTileData[];
@@ -142,6 +145,16 @@ function ProductGroupCard({
   onToggleExpand: (draftId: string) => void;
   isGenerating: boolean;
   hasFailedGeneration: boolean;
+  // Phase 6/13 fix — "The product card must display eBay status, not
+  // Vinted status" once eBay UK (or Both) is selected. `marketplaceView`
+  // is the workspace's own currently-selected generation target;
+  // `ebay`/`isGeneratingEbay` are this product's own eBay summary (null
+  // when no eBay draft exists yet). Vinted's own `computeStatus` above is
+  // untouched — this is purely additive, chosen by the caller, never a
+  // second source of truth for the same badge.
+  marketplaceView: GenerationTarget;
+  ebay: EbaySummary | null;
+  isGeneratingEbay: boolean;
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(group.title ?? "");
@@ -176,6 +189,19 @@ function ProductGroupCard({
   }, [autoEdit]);
 
   const status = computeStatus(isUnsorted, listing, isGenerating, hasFailedGeneration, group.vinted_category_id);
+  // Phase 6/13 fix — computed unconditionally (cheap, pure) but only
+  // RENDERED when marketplaceView actually includes eBay UK, so a
+  // Vinted-only workspace never shows an eBay badge for a product with no
+  // eBay draft at all.
+  const ebayStatus = isUnsorted ? null : computeEbayCardStatus(ebay, isGeneratingEbay);
+  const showVintedStatus = marketplaceView === "VINTED" || marketplaceView === "BOTH";
+  const showEbayStatus = marketplaceView === "EBAY_UK" || marketplaceView === "BOTH";
+
+  const {
+    canPreviewVinted, canPreviewEbay, canEditSharedFields, canEditEbayDetails,
+    canRetryEbayGeneration, selectedMarketplaceStatus, showCardActions,
+  } = computeCardActionAvailability(listing, ebay, marketplaceView, status, ebayStatus);
+
   const coverPhoto = photos[0] ?? null;
   const stripPhotos = photos.slice(1, 6);
   const remainderCount = Math.max(0, photos.length - 1 - stripPhotos.length);
@@ -190,7 +216,8 @@ function ProductGroupCard({
   const sku = listing?.sku ?? group.sku;
   const colours = listing?.colours ?? group.colours ?? [];
   const material = listing?.material ?? group.material;
-  const titleLine = [brand, model].filter(Boolean).join(" ") || group.title || "Untitled group";
+
+  const displayTitle = computeDisplayTitle(group, listing, ebay, marketplaceView);
 
   function openCoverOrThumb() {
     // No dedicated full-image lightbox exists anywhere in this codebase —
@@ -240,7 +267,7 @@ function ProductGroupCard({
                   aria-label="Group name"
                 />
               : <button type="button" className="product-group-title-display" onDoubleClick={startEditingTitle} title="Double-click to rename">
-                  {isUnsorted ? (group.title || "Unsorted") : titleLine}
+                  {isUnsorted ? (group.title || "Unsorted") : displayTitle}
                 </button>}
             {isUnsorted && <span className="product-group-unsorted-badge">Inbox</span>}
             {!isUnsorted && group.source_type === "ebay_uk" && <span className="product-group-source-badge">Imported from eBay</span>}
@@ -261,8 +288,13 @@ function ProductGroupCard({
         <span className="record-count">{photos.length}</span>
       </div>
 
-      <div className="product-group-col product-group-col-status">
-        {status && <span className={`listing-generation-status listing-generation-status-${status}`} role="status">{STATUS_LABELS[status]}</span>}
+      <div className="product-group-col product-group-col-status" data-selected-marketplace-status={selectedMarketplaceStatus ?? undefined}>
+        {showVintedStatus && status && <span className={`listing-generation-status listing-generation-status-${status}`} role="status">
+          {marketplaceView === "BOTH" ? `Vinted: ${STATUS_LABELS[status]}` : STATUS_LABELS[status]}
+        </span>}
+        {showEbayStatus && ebayStatus && <span className={`listing-generation-status listing-generation-status-ebay-${EBAY_CARD_STATUS_TONES[ebayStatus]}`} role="status" data-can-retry={canRetryEbayGeneration || undefined}>
+          {marketplaceView === "BOTH" ? `eBay: ${EBAY_CARD_STATUS_LABELS[ebayStatus]}` : EBAY_CARD_STATUS_LABELS[ebayStatus]}
+        </span>}
         <span className="product-group-save-state" role="status">
           {saveState === "saving" && "Saving…"}
           {saveState === "saved" && "Saved"}
@@ -272,9 +304,9 @@ function ProductGroupCard({
 
       <div className="product-group-col product-group-col-actions">
         <div className="product-group-compact-actions">
-          {listing && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}
-          {listing && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}
-          {listing && <button type="button" className="button-secondary" onClick={() => onOpenEbayDetails(group.id)}>eBay details</button>}
+          {showCardActions && <button type="button" className="button-secondary" onClick={() => onPreviewListing(group.id)}>Preview</button>}
+          {showCardActions && canEditSharedFields && <button type="button" className="button-secondary" onClick={() => onEditFields(group.id)}>Edit fields</button>}
+          {showCardActions && canEditEbayDetails && <button type="button" className="button-secondary" onClick={() => onOpenEbayDetails(group.id)}>eBay details</button>}
           <button type="button" className="button-secondary" onClick={() => onToggleExpand(group.id)} aria-expanded={expanded}>
             {expanded ? "Collapse" : "Manage photos"}
           </button>

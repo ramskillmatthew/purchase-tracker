@@ -15,7 +15,7 @@ import { resolveEbayAspects, getEbayAspectDefinitions } from "@/lib/listing-stud
 function baseInput(overrides: Partial<Parameters<typeof resolveEbayAspects>[0]> = {}) {
   return {
     categoryId: "183454", brand: "Pokémon TCG", productType: "Elite Trainer Box", model: null, title: "Elite Trainer Box",
-    importedItemSpecifics: {}, sharedFacts: {}, vintedColours: [], vintedMaterial: null, automationMode: "balanced" as const,
+    importedItemSpecifics: {}, sharedFacts: {}, vintedColours: [], vintedMaterial: null, productFacts: null, automationMode: "balanced" as const,
     ...overrides,
   };
 }
@@ -106,6 +106,141 @@ describe("resolveEbayAspects — bounded AI fallback for unresolved required/rec
     const outcome = await resolveEbayAspects(baseInput());
     expect(outcome.status).toBe("success");
     if (outcome.status === "success") expect(outcome.stale).toBe(true);
+  });
+});
+
+describe("resolveEbayAspects — automatic product-facts mapping (Live-diagnostic follow-up fix, real On Running Cloud 5 reproduction)", () => {
+  const cloud5ProductFacts = {
+    brand: "On Running", model: "Cloud 5", productType: "Running Trainers", colours: ["Blue", "Grey"], material: "Mesh",
+    ukShoeSize: "4", clothingSize: null, gender: "womens" as const, itemFamily: "footwear" as const,
+    internalSku: "1644", styleCode: null, conditionState: "very_good_preowned" as const, updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  function footwearAspects() {
+    getCachedItemAspects.mockResolvedValue({
+      ok: true, data: { aspects: [
+        { localizedAspectName: "Brand", aspectConstraint: { aspectUsage: "REQUIRED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "On Running" }, { localizedValue: "Nike" }] },
+        { localizedAspectName: "Department", aspectConstraint: { aspectUsage: "REQUIRED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "Women" }, { localizedValue: "Men" }] },
+        { localizedAspectName: "UK Shoe Size", aspectConstraint: { aspectUsage: "REQUIRED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "3" }, { localizedValue: "4" }, { localizedValue: "5" }, { localizedValue: "7" }] },
+        { localizedAspectName: "Type", aspectConstraint: { aspectUsage: "REQUIRED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "Running Trainers" }, { localizedValue: "Trainers" }] },
+        { localizedAspectName: "Colour", aspectConstraint: { aspectUsage: "REQUIRED", aspectMode: "SELECTION_ONLY", itemToAspectCardinality: "MULTI" }, aspectValues: [{ localizedValue: "Blue" }, { localizedValue: "Grey" }] },
+        { localizedAspectName: "Upper Material", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "Mesh" }, { localizedValue: "Leather" }] },
+        { localizedAspectName: "Model", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "FREE_TEXT" } },
+        { localizedAspectName: "Vintage", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "Yes" }, { localizedValue: "No" }] },
+        { localizedAspectName: "Customised", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "Yes" }, { localizedValue: "No" }] },
+        { localizedAspectName: "US Shoe Size", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "5" }, { localizedValue: "6" }] },
+        { localizedAspectName: "EU Shoe Size", aspectConstraint: { aspectUsage: "RECOMMENDED", aspectMode: "SELECTION_ONLY" }, aspectValues: [{ localizedValue: "37" }, { localizedValue: "38" }] },
+      ], stale: false },
+    });
+  }
+
+  it("REQUIREMENT: maps Brand/Department/UK Shoe Size/Type/Colour/Upper Material/Model all automatically from productFacts, high confidence, never needing review", async () => {
+    footwearAspects();
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts, brand: null, productType: null, model: null }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData.Brand).toMatchObject({ value: "On Running", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData.Department).toMatchObject({ value: "Women", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData["UK Shoe Size"]).toMatchObject({ value: "4", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData.Type).toMatchObject({ value: "Running Trainers", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData.Colour).toMatchObject({ value: ["Blue", "Grey"], confidence: "high", needsReview: false });
+    expect(outcome.dynamicData["Upper Material"]).toMatchObject({ value: "Mesh", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData.Model).toMatchObject({ value: "Cloud 5", confidence: "high", needsReview: false });
+    expect(runEbayAspectSuggestion).not.toHaveBeenCalled(); // every REQUIRED/RECOMMENDED aspect resolved deterministically — no AI call needed
+  });
+
+  it("PROVEN ROOT CAUSE FIX: the deterministic below-UK-7 footwear rule wins over gender/vintedAudience for the Department aspect, even when they conflict", async () => {
+    footwearAspects();
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: { ...cloud5ProductFacts, ukShoeSize: "4", gender: "mens" } }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData.Department).toMatchObject({ value: "Women", confidence: "high", needsReview: false, source: "footwear_size_rule" });
+  });
+
+  it("REQUIREMENT: at UK size 7 and above, the deterministic rule does not apply — Department falls back to the ordinary gender-derived candidate", async () => {
+    footwearAspects();
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: { ...cloud5ProductFacts, ukShoeSize: "7", gender: "mens" } }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData.Department).toMatchObject({ value: "Men", source: "product_facts" });
+  });
+
+  it("REQUIREMENT: Vintage and Customised default to 'No', high confidence, never needing review, with no productFacts input required for them specifically", async () => {
+    footwearAspects();
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData.Vintage).toMatchObject({ value: "No", confidence: "high", needsReview: false });
+    expect(outcome.dynamicData.Customised).toMatchObject({ value: "No", confidence: "high", needsReview: false });
+  });
+
+  it("PROVEN ROOT CAUSE FIX: US/EU Shoe Size are never auto-populated or guessed — marked not_applicable, excluded from the AI fallback too", async () => {
+    footwearAspects();
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData["US Shoe Size"]).toMatchObject({ value: null, source: "not_applicable" });
+    expect(outcome.dynamicData["EU Shoe Size"]).toMatchObject({ value: null, source: "not_applicable" });
+    expect(runEbayAspectSuggestion).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveEbayAspects — Performance/Activity for running trainers (screenshot fix)", () => {
+  const cloud5ProductFacts = {
+    brand: "On Running", model: "Cloud 5", productType: "Running Trainers", colours: ["Blue"], material: "Mesh",
+    ukShoeSize: "4", clothingSize: null, gender: "womens" as const, itemFamily: "footwear" as const,
+    internalSku: "1644", styleCode: null, conditionState: "very_good_preowned" as const, updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  function aspectsWithPerformanceActivity(allowedActivityValues: string[], usage: "REQUIRED" | "RECOMMENDED" | "OPTIONAL" = "RECOMMENDED") {
+    getCachedItemAspects.mockResolvedValue({
+      ok: true, data: { aspects: [
+        // eBay's real aspect name literally contains a slash.
+        { localizedAspectName: "Performance/Activity", aspectConstraint: { aspectUsage: usage, aspectMode: "SELECTION_ONLY" }, aspectValues: allowedActivityValues.map(localizedValue => ({ localizedValue })) },
+      ], stale: false },
+    });
+  }
+
+  it("4/5/6/7/8. maps explicit running-trainer facts to the exact allowed 'Running & Jogging' value at HIGH confidence, no review, no AI call (slash in the aspect name does not break it)", async () => {
+    aspectsWithPerformanceActivity(["Running & Jogging", "Gym & Training", "Walking"]);
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts, title: "On Running Cloud 5 Running Trainers Women's UK 4", brand: null, productType: null, model: null }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData["Performance/Activity"]).toMatchObject({
+      value: "Running & Jogging", confidence: "high", needsReview: false, source: "footwear_activity_rule",
+    });
+    expect(runEbayAspectSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("6. when the category uses the shorter 'Running' value instead, that exact value is selected at HIGH confidence", async () => {
+    aspectsWithPerformanceActivity(["Basketball", "Running", "Tennis"]);
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts, title: "On Running Cloud 5 Running Trainers", brand: null, productType: null, model: null }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData["Performance/Activity"]).toMatchObject({ value: "Running", confidence: "high", needsReview: false });
+  });
+
+  it("9/10. an unsupported free-text value is NEVER stored — with no matching allowed value the aspect stays unresolved (recommended → blank, not a fabricated paraphrase)", async () => {
+    aspectsWithPerformanceActivity(["Casual", "Skateboarding", "Fashion"]); // no running-ish value at all
+    runEbayAspectSuggestion.mockResolvedValue({ status: "success", values: { "Performance/Activity": "Running & Jogging" }, model: "test", inputTokens: 1, outputTokens: 1 });
+    const outcome = await resolveEbayAspects(baseInput({ productFacts: cloud5ProductFacts, title: "Running Trainers", brand: null, productType: null, model: null }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    // Neither the deterministic candidates nor the AI's paraphrase match an
+    // allowed value → nothing stored, never "Running & Jogging" verbatim.
+    expect(outcome.dynamicData["Performance/Activity"].value).toBeNull();
+    expect(outcome.dynamicData["Performance/Activity"].confidence).toBe("unknown");
+  });
+
+  it("10. non-running footwear (gym trainers) gets no deterministic high-confidence value — falls to the ordinary heuristic/AI path", async () => {
+    aspectsWithPerformanceActivity(["Running & Jogging", "Gym & Training"]);
+    runEbayAspectSuggestion.mockResolvedValue({ status: "success", values: { "Performance/Activity": null }, model: "test", inputTokens: 0, outputTokens: 0 });
+    const outcome = await resolveEbayAspects(baseInput({
+      productFacts: { ...cloud5ProductFacts, productType: "Gym Trainers" }, title: "Reebok Nano Gym Trainers", brand: null, productType: null, model: null,
+    }));
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.dynamicData["Performance/Activity"].source).not.toBe("footwear_activity_rule");
   });
 });
 

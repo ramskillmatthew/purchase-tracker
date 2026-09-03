@@ -16,11 +16,14 @@ import { resolveVintedCategoryAssignment, describeVintedCategoryAssignmentReason
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { canonicaliseVintedBrand } from "@/lib/listing-studio/vinted-brand-canonicalisation";
 import { estimateAnthropicCostUsd } from "@/lib/listing-studio/anthropic-pricing";
-import type { VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
+import { listingGenerationFieldsSchema, type VintedAudienceValue, type ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 import { z } from "zod";
 import { marketplaceSchema } from "@/lib/validation/listing-studio-marketplace";
 import { buildEbayDraftFromGeneratedFields } from "@/lib/listing-studio/ebay-draft-generation";
-import { upsertMarketplaceDraft, getMarketplaceSettingsDefaults } from "@/lib/listing-studio/marketplace-drafts";
+import { readContentGenerationState, serialiseContentGenerationRecord } from "@/lib/listing-studio/ebay-content-generation-state";
+import { autoSuggestAndPersistEbayCategory } from "@/lib/listing-studio/ebay-category-automation";
+import { autoResolveAndPersistEbayAspects } from "@/lib/listing-studio/ebay-aspect-persistence";
+import { upsertMarketplaceDraft, getMarketplaceSettingsDefaults, getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
 import { resolveMarketplaceSettings, defaultContentModeForSourceType } from "@/lib/listing-studio/marketplace-settings";
 import { marketplaceDraftSettingsSchema } from "@/lib/validation/listing-studio-marketplace";
 import type { Marketplace } from "@/lib/listing-studio/marketplace-types";
@@ -47,8 +50,14 @@ const UNSORTED_TITLE = "Unsorted";
 // route only ever creates/regenerates a fresh draft). Never persisted
 // anywhere: this app has no standing "batch" entity for Listing Studio
 // generation, so it lives only as long as this one request.
+// Phase 3 fix — "Add server-side ... assertions against impossible target
+// combinations." "BOTH" is a UI-only concept the client always expands
+// before this route ever sees the request (marketplacesForTarget) — a
+// request naming it directly, or naming the same real marketplace twice,
+// is rejected outright rather than silently deduplicated/ignored.
 const generateRequestSchema = z.object({
-  targets: z.array(marketplaceSchema).min(1).default(["VINTED"]),
+  targets: z.array(marketplaceSchema).min(1).default(["VINTED"])
+    .refine(targets => new Set(targets).size === targets.length, { message: "Duplicate marketplace target." }),
   ebaySettings: marketplaceDraftSettingsSchema.optional(),
 });
 
@@ -58,6 +67,11 @@ type DraftRow = {
   vinted_category_status: string | null;
   vinted_audience: VintedAudienceValue | null; vinted_audience_source: "ai" | "manual" | null;
   suggested_price_pence: number | null; confirmed_price_pence: number | null;
+  // Phase 4/6 fix — needed to decide whether Vinted content already
+  // exists (so an eBay-only regeneration never re-runs vision AI or
+  // overwrites it) and, when it does, to reuse the already-stored
+  // structured facts instead of re-analysing photos.
+  generated_title: string | null; generated_description: string | null; ai_result_json: unknown;
 };
 type CategoryRunOutcome = { status: "success" | "failed"; errorMessage: string | null; responseJson: unknown };
 type ImageRow = { id: string; storage_path: string; mime_type: string };
@@ -88,7 +102,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
     const targetSet = new Set<Marketplace>(targets);
 
     const drafts = await supabaseRequestAll<DraftRow>(
-      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source,suggested_price_pence,confirmed_price_pence`,
+      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,title,uk_size,uk_size_source,vinted_category_id,vinted_category_path,vinted_category_source,vinted_category_status,vinted_audience,vinted_audience_source,suggested_price_pence,confirmed_price_pence,generated_title,generated_description,ai_result_json`,
     );
     const draft = drafts[0];
     if (!draft) return NextResponse.json({ error: "Group not found." }, { status: 404 });
@@ -101,31 +115,81 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
     // A generous, defensive bound — see MAX_GENERATION_IMAGES_PER_GROUP's own comment.
     const eligibleImages = images.slice(0, MAX_GENERATION_IMAGES_PER_GROUP);
 
-    const { blocks } = await prepareListingGenerationImageInputs(
-      eligibleImages.map(image => ({ id: image.id, storagePath: image.storage_path, mimeType: image.mime_type })),
-      LISTING_STUDIO_BUCKET,
-    );
-    if (!blocks.length) return NextResponse.json({ error: "Could not prepare any of this group's photos for analysis." }, { status: 502 });
-
     const model = process.env.ANTHROPIC_MODEL ?? null;
-    const startedAt = new Date().toISOString();
-    const outcome = await runListingGenerationAnalysis(blocks);
-    const completedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
 
-    if (outcome.status !== "success") {
-      await supabaseRequest("listing_analysis_runs", {
-        method: "POST", headers: { Prefer: "return=minimal" },
-        body: JSON.stringify({
-          draft_id: draftId, owner_id: user.id, stage: "generation", status: "failed",
-          model, prompt_version: LISTING_PROMPT_VERSIONS.generation, schema_version: LISTING_SCHEMA_VERSIONS.generation,
-          error_message: describeListingGenerationFailure(outcome.status), started_at: startedAt, completed_at: completedAt,
-        }),
-      }).catch(() => {});
-      const status = outcome.status === "not_configured" ? 503 : 502;
-      return NextResponse.json({ error: describeListingGenerationFailure(outcome.status) }, { status });
+    // Phase 4/6/marketplace-isolation fix — TWO independent decisions,
+    // never one conflated boolean:
+    //  1. `needsFreshAnalysis` — do we need to run the shared vision
+    //     analysis at all to obtain structured facts? This is genuinely
+    //     shared infrastructure (neither marketplace's own AI call — the
+    //     Vinted title/description below is template-based, not
+    //     AI-written, and eBay's own generation call reuses these SAME
+    //     `fields`), so it's fine to run it whenever no stored facts
+    //     exist yet, regardless of which marketplace was requested.
+    //  2. `shouldWriteVintedContent` — should the Vinted-writing block
+    //     below (title/description/category resolution/PATCH to
+    //     listing_drafts) actually run? This MUST be exactly
+    //     `targetSet.has("VINTED")`, with NO "first generation ever"
+    //     exception — the previous single-boolean version conflated
+    //     these two, so an eBay-only request on a brand-new product
+    //     (alreadyHasVintedContent === false) incorrectly ran the full
+    //     Vinted-writing pipeline too, creating a Vinted draft the owner
+    //     never asked for. See tests/listing-studio-marketplace-generate-route.test.ts
+    //     for the regression coverage proving this split holds.
+    const alreadyHasVintedContent = Boolean(draft.generated_title && draft.generated_description);
+    const needsFreshAnalysis = targetSet.has("VINTED") || !alreadyHasVintedContent;
+    const shouldWriteVintedContent = targetSet.has("VINTED");
+
+    let fields: ListingGenerationFields;
+    let startedAt = nowIso;
+    let completedAt = nowIso;
+
+    if (needsFreshAnalysis) {
+      const { blocks } = await prepareListingGenerationImageInputs(
+        eligibleImages.map(image => ({ id: image.id, storagePath: image.storage_path, mimeType: image.mime_type })),
+        LISTING_STUDIO_BUCKET,
+      );
+      if (!blocks.length) return NextResponse.json({ error: "Could not prepare any of this group's photos for analysis." }, { status: 502 });
+
+      startedAt = new Date().toISOString();
+      const outcome = await runListingGenerationAnalysis(blocks);
+      completedAt = new Date().toISOString();
+
+      if (outcome.status !== "success") {
+        await supabaseRequest("listing_analysis_runs", {
+          method: "POST", headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            draft_id: draftId, owner_id: user.id, stage: "generation", status: "failed",
+            model, prompt_version: LISTING_PROMPT_VERSIONS.generation, schema_version: LISTING_SCHEMA_VERSIONS.generation,
+            error_message: describeListingGenerationFailure(outcome.status), started_at: startedAt, completed_at: completedAt,
+          }),
+        }).catch(() => {});
+        const status = outcome.status === "not_configured" ? 503 : 502;
+        // Phase 3 fix — honest per-marketplace failure reporting: a
+        // Vinted analysis failure must never be silently reported as an
+        // eBay success (or vice versa). When Both was requested and
+        // Vinted's own vision analysis fails, the whole call fails here —
+        // exactly the pre-existing behaviour — but now says so explicitly
+        // via `vintedGenerated`/`ebayGenerated`, rather than a bare error.
+        return NextResponse.json({ error: describeListingGenerationFailure(outcome.status), vintedGenerated: false, ebayGenerated: false }, { status });
+      }
+      fields = outcome.data;
+    } else {
+      const parsedStored = listingGenerationFieldsSchema.safeParse(draft.ai_result_json);
+      if (!parsedStored.success) {
+        // Genuinely shouldn't happen (alreadyHasVintedContent implies a
+        // prior successful generation wrote this same JSON), but a
+        // corrupted/pre-migration row is handled honestly rather than
+        // crashing or silently falling back to a fresh (Vinted-touching)
+        // analysis the caller never asked for.
+        return NextResponse.json({
+          error: "This product's stored analysis is missing or unreadable — generate Vinted (or Both) once to rebuild it, then eBay UK can be generated on its own.",
+          code: "STORED_ANALYSIS_INVALID", vintedGenerated: false, ebayGenerated: false,
+        }, { status: 409 });
+      }
+      fields = parsedStored.data;
     }
-
-    const fields = outcome.data;
 
     // Milestone 4 sizing correction, then sizing coverage correction: the
     // AI only ever reports the size exactly as printed (system + value +
@@ -195,89 +259,103 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
       productType: normaliseFootwearListingText(fields.productType.value, draftItemFamily, finalVintedAudience),
       colours: fields.colours.value, material: fields.material.value, ukSize: finalUkSize, sku: fields.sku.value,
     };
-    const generatedTitle = generateListingTitle(structuredFields);
-    const generatedDescription = generateListingDescription(structuredFields);
-
+    // Phase 4/6/marketplace-isolation fix — everything below writes to
+    // the Vinted-shaped columns on `listing_drafts` (title, description,
+    // category, audience, audit rows). It only ever runs when
+    // `shouldWriteVintedContent` is true (i.e. VINTED was actually
+    // requested) — outside that, every one of these `let`s keeps the
+    // value already stored for this draft, so an eBay-only generation's
+    // response still reports Vinted's real current state honestly
+    // without this request having touched a single Vinted column, even
+    // on a brand-new product with no prior Vinted draft at all.
+    let generatedTitle = draft.generated_title;
+    let generatedDescription = draft.generated_description;
     let categoryId = draft.vinted_category_id;
     let categoryPath = draft.vinted_category_path;
     let categorySource = draft.vinted_category_source;
     let categoryStatus = draft.vinted_category_status;
-    let categoryRunOutcome: CategoryRunOutcome | null = null;
-    let categoryAiCostLog: { model: string | null; inputTokens: number | null; outputTokens: number | null; candidateCount: number; status: "success" | "failed" } | null = null;
 
-    if (draft.vinted_category_source !== "manual") {
-      const { result, aiCost } = await resolveVintedCategoryAssignment({
-        vintedAudience: finalVintedAudience, productType: structuredFields.productType,
-        brand: structuredFields.brand, model: structuredFields.model,
-      });
-      categoryStatus = result.reason;
-      categoryAiCostLog = aiCost;
-      if (result.reason === "category_assigned") {
-        categoryId = result.categoryId;
-        categoryPath = result.categoryPath;
-        categorySource = "ai";
-        categoryRunOutcome = { status: "success", errorMessage: null, responseJson: { vintedCategoryId: result.categoryId, method: result.method } };
-      } else {
-        categoryRunOutcome = { status: "failed", errorMessage: describeVintedCategoryAssignmentReason(result.reason), responseJson: { reason: result.reason } };
+    if (shouldWriteVintedContent) {
+      generatedTitle = generateListingTitle(structuredFields);
+      generatedDescription = generateListingDescription(structuredFields);
+
+      let categoryRunOutcome: CategoryRunOutcome | null = null;
+      let categoryAiCostLog: { model: string | null; inputTokens: number | null; outputTokens: number | null; candidateCount: number; status: "success" | "failed" } | null = null;
+
+      if (draft.vinted_category_source !== "manual") {
+        const { result, aiCost } = await resolveVintedCategoryAssignment({
+          vintedAudience: finalVintedAudience, productType: structuredFields.productType,
+          brand: structuredFields.brand, model: structuredFields.model,
+        });
+        categoryStatus = result.reason;
+        categoryAiCostLog = aiCost;
+        if (result.reason === "category_assigned") {
+          categoryId = result.categoryId;
+          categoryPath = result.categoryPath;
+          categorySource = "ai";
+          categoryRunOutcome = { status: "success", errorMessage: null, responseJson: { vintedCategoryId: result.categoryId, method: result.method } };
+        } else {
+          categoryRunOutcome = { status: "failed", errorMessage: describeVintedCategoryAssignmentReason(result.reason), responseJson: { reason: result.reason } };
+        }
       }
-    }
 
-    // The structured fields + derived title/description are the real,
-    // load-bearing write — never swallowed on failure (unlike the audit
-    // row below), so a failure here surfaces as a genuine error rather
-    // than silently reporting success with nothing actually saved.
-    await supabaseRequest(`listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}`, {
-      method: "PATCH", headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({
-        brand: structuredFields.brand, model: structuredFields.model, product_type: structuredFields.productType,
-        colours: structuredFields.colours, material: structuredFields.material, uk_size: finalUkSize, uk_size_source: finalUkSizeSource, sku: structuredFields.sku,
-        source_size_system: fields.sourceSize.system, source_size_value: fields.sourceSize.value,
-        source_size_gender: fields.sourceSize.gender,
-        vinted_audience: finalVintedAudience, vinted_audience_source: finalVintedAudienceSource, vinted_audience_evidence: finalVintedAudienceEvidence,
-        vinted_category_id: categoryId, vinted_category_path: categoryPath, vinted_category_source: categorySource, vinted_category_status: categoryStatus,
-        condition: LISTING_CONDITION_TEXT,
-        generated_title: generatedTitle, generated_description: generatedDescription,
-        status: "ready", ai_result_json: fields, updated_at: completedAt,
-      }),
-    });
+      // The structured fields + derived title/description are the real,
+      // load-bearing write — never swallowed on failure (unlike the audit
+      // row below), so a failure here surfaces as a genuine error rather
+      // than silently reporting success with nothing actually saved.
+      await supabaseRequest(`listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}`, {
+        method: "PATCH", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          brand: structuredFields.brand, model: structuredFields.model, product_type: structuredFields.productType,
+          colours: structuredFields.colours, material: structuredFields.material, uk_size: finalUkSize, uk_size_source: finalUkSizeSource, sku: structuredFields.sku,
+          source_size_system: fields.sourceSize.system, source_size_value: fields.sourceSize.value,
+          source_size_gender: fields.sourceSize.gender,
+          vinted_audience: finalVintedAudience, vinted_audience_source: finalVintedAudienceSource, vinted_audience_evidence: finalVintedAudienceEvidence,
+          vinted_category_id: categoryId, vinted_category_path: categoryPath, vinted_category_source: categorySource, vinted_category_status: categoryStatus,
+          condition: LISTING_CONDITION_TEXT,
+          generated_title: generatedTitle, generated_description: generatedDescription,
+          status: "ready", ai_result_json: fields, updated_at: completedAt,
+        }),
+      });
 
-    await supabaseRequest("listing_analysis_runs", {
-      method: "POST", headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({
-        draft_id: draftId, owner_id: user.id, stage: "generation", status: "success",
-        model, prompt_version: LISTING_PROMPT_VERSIONS.generation, schema_version: LISTING_SCHEMA_VERSIONS.generation,
-        response_json: fields, started_at: startedAt, completed_at: completedAt,
-      }),
-    }).catch(() => {});
-
-    if (categoryRunOutcome) {
       await supabaseRequest("listing_analysis_runs", {
         method: "POST", headers: { Prefer: "return=minimal" },
         body: JSON.stringify({
-          draft_id: draftId, owner_id: user.id, stage: "category_selection", status: categoryRunOutcome.status,
-          model, prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
-          response_json: categoryRunOutcome.responseJson, error_message: categoryRunOutcome.errorMessage,
-          started_at: completedAt, completed_at: new Date().toISOString(),
+          draft_id: draftId, owner_id: user.id, stage: "generation", status: "success",
+          model, prompt_version: LISTING_PROMPT_VERSIONS.generation, schema_version: LISTING_SCHEMA_VERSIONS.generation,
+          response_json: fields, started_at: startedAt, completed_at: completedAt,
         }),
       }).catch(() => {});
-    }
 
-    // Milestone 7 follow-up (cost tracking) — only ever recorded when the
-    // bounded category-selection AI call was ACTUALLY made (never for a
-    // deterministic single-candidate match, which needed no AI call at
-    // all) — see supabase-listing-studio.sql's vinted_category_selection_ai_calls.
-    if (categoryAiCostLog) {
-      await supabaseRequest("vinted_category_selection_ai_calls", {
-        method: "POST", headers: { Prefer: "return=minimal" },
-        body: JSON.stringify({
-          draft_id: draftId, owner_id: user.id, model: categoryAiCostLog.model,
-          input_tokens: categoryAiCostLog.inputTokens, output_tokens: categoryAiCostLog.outputTokens,
-          prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
-          candidate_count: categoryAiCostLog.candidateCount,
-          estimated_cost_usd: estimateAnthropicCostUsd(categoryAiCostLog.model, categoryAiCostLog.inputTokens, categoryAiCostLog.outputTokens),
-          status: categoryAiCostLog.status,
-        }),
-      }).catch(() => {});
+      if (categoryRunOutcome) {
+        await supabaseRequest("listing_analysis_runs", {
+          method: "POST", headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            draft_id: draftId, owner_id: user.id, stage: "category_selection", status: categoryRunOutcome.status,
+            model, prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
+            response_json: categoryRunOutcome.responseJson, error_message: categoryRunOutcome.errorMessage,
+            started_at: completedAt, completed_at: new Date().toISOString(),
+          }),
+        }).catch(() => {});
+      }
+
+      // Milestone 7 follow-up (cost tracking) — only ever recorded when the
+      // bounded category-selection AI call was ACTUALLY made (never for a
+      // deterministic single-candidate match, which needed no AI call at
+      // all) — see supabase-listing-studio.sql's vinted_category_selection_ai_calls.
+      if (categoryAiCostLog) {
+        await supabaseRequest("vinted_category_selection_ai_calls", {
+          method: "POST", headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            draft_id: draftId, owner_id: user.id, model: categoryAiCostLog.model,
+            input_tokens: categoryAiCostLog.inputTokens, output_tokens: categoryAiCostLog.outputTokens,
+            prompt_version: LISTING_PROMPT_VERSIONS.category_selection, schema_version: LISTING_SCHEMA_VERSIONS.category_selection,
+            candidate_count: categoryAiCostLog.candidateCount,
+            estimated_cost_usd: estimateAnthropicCostUsd(categoryAiCostLog.model, categoryAiCostLog.inputTokens, categoryAiCostLog.outputTokens),
+            status: categoryAiCostLog.status,
+          }),
+        }).catch(() => {});
+      }
     }
 
     // Stage 2 (marketplace-aware drafts): additive only — reuses the SAME
@@ -294,8 +372,34 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
       const resolvedSettings = resolveMarketplaceSettings(accountDefaults, ebaySettings, null);
       const contentMode = ebaySettings?.contentMode ?? accountDefaults.contentMode ?? defaultContentModeForSourceType("generated");
       const pricePence = draft.confirmed_price_pence ?? draft.suggested_price_pence;
-      const generation = buildEbayDraftFromGeneratedFields({
-        fields, ukSize: finalUkSize, hasPhoto: eligibleImages.length > 0, pricePence, quantity: resolvedSettings.quantity,
+
+      // Phase 3/8 fix — read the EXISTING eBay draft (if any) BEFORE
+      // generating: (1) so Retry correctly increments attemptCount rather
+      // than resetting it, and (2) so its OTHER dynamicData (item
+      // specifics, a manually-confirmed package size) is available to
+      // merge back in below, rather than a second separate read after.
+      // Soft-failure, matching every other read/patch in this eBay branch
+      // — a transient read failure here must never abort the whole
+      // "Generate listings" call; it just means attemptCount starts back
+      // at 0 for this one attempt (the worst case is an undercount, never
+      // a broken generation).
+      let previousAttemptCount = 0;
+      try {
+        const existingEbayDraft = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
+        if (existingEbayDraft) {
+          previousAttemptCount = readContentGenerationState(existingEbayDraft.dynamicData, {
+            sourceType: existingEbayDraft.sourceType, contentMode: existingEbayDraft.contentMode,
+            hasTitle: Boolean(existingEbayDraft.title), hasDescription: Boolean(existingEbayDraft.description),
+          }).attemptCount;
+        }
+      } catch {
+        // Never lets a read failure here break "Generate listings".
+      }
+
+      const generation = await buildEbayDraftFromGeneratedFields({
+        fields, ukSize: finalUkSize, vintedAudience: finalVintedAudience, itemFamily: draftItemFamily,
+        hasPhoto: eligibleImages.length > 0, pricePence, quantity: resolvedSettings.quantity,
+        knownConditionEvidence: fields.notes, previousAttemptCount,
       });
       ebayDraft = generation;
       await upsertMarketplaceDraft({
@@ -307,17 +411,107 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
         status: generation.status, readiness: generation.readiness, validationMessages: generation.validationMessages,
         aiGeneration: { model, promptVersion: LISTING_PROMPT_VERSIONS.generation, schemaVersion: LISTING_SCHEMA_VERSIONS.generation, generatedAt: completedAt },
       });
+
+      // Phase 3 fix — persists the authoritative content-generation state
+      // (GENERATED vs FALLBACK, never conflated) alongside the parcel-size
+      // suggestion, in ONE read-merge-write of dynamic_data_json — merged
+      // together deliberately (rather than as two separate read/patch
+      // pairs, the previous shape) so they can no longer race each other
+      // and silently drop one write. "Manual override always wins": a
+      // package size the owner has already confirmed
+      // (dynamicData.__packageSize.userConfirmed) is never touched by a
+      // later suggestion, regenerated or not.
+      try {
+        const draftAfterUpsert = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
+        if (draftAfterUpsert) {
+          const existingPackage = draftAfterUpsert.dynamicData.__packageSize;
+          const nextDynamicData: Record<string, unknown> = {
+            ...draftAfterUpsert.dynamicData,
+            __contentGeneration: serialiseContentGenerationRecord(generation.contentGeneration),
+            // Problem 8 fix, extended by the live-diagnostic follow-up fix
+            // (proven root cause of "item specifics are not automatically
+            // populated") — the FULL structured facts used to compose
+            // this title/description, persisted regardless of whether
+            // Vinted was ALSO targeted, so category/aspect automation
+            // never has to fall back to listing_drafts' own shared
+            // columns (which stay null for an eBay-only generation). Same
+            // reserved-pseudo-aspect pattern as __packageSize — no schema
+            // migration needed.
+            __productFacts: generation.productFacts,
+          };
+          if (!existingPackage?.userConfirmed) {
+            // Problem 5 fix — a high-confidence, ordinary, single-item
+            // match (suggestPackageSize's own `requiresReview: false`,
+            // e.g. an everyday pair of trainers) is a genuine, reliable
+            // default and must not be flagged uncertain; only a
+            // genuinely uncertain suggestion (bulky boots, multiple
+            // units, no match at all) keeps needsReview true. Never
+            // hardcoded true regardless of confidence, which is what
+            // previously flagged ordinary footwear for review every time.
+            nextDynamicData.__packageSize = {
+              value: generation.packageSuggestion.size, confidence: generation.packageSuggestion.confidence,
+              source: "heuristic", appliedAutomatically: true, needsReview: generation.packageSuggestion.requiresReview,
+              userConfirmed: false, updatedAt: new Date().toISOString(), reason: generation.packageSuggestion.reason,
+            };
+          }
+          await patchMarketplaceDraft(user.id, draftAfterUpsert.id, { dynamic_data_json: nextDynamicData });
+        }
+      } catch {
+        // Never lets a package-suggestion/content-state persistence
+        // failure break "Generate listings" — the eBay draft's own
+        // title/description/readiness above is already safely saved
+        // either way.
+      }
+
+      // Fault 3 fix — category (and, once one is resolved, item specifics)
+      // are now suggested AUTOMATICALLY as part of the eBay draft job
+      // itself, never requiring a manual "Suggest category" click first.
+      // Both steps are soft-failure: if eBay access isn't configured (the
+      // common local-dev case) or is temporarily unavailable, the eBay
+      // draft itself still exists and generation still succeeds — the
+      // owner can always retry from the eBay details dialog.
+      try {
+        const categoryOutcome = await autoSuggestAndPersistEbayCategory(user.id, draftId, resolvedSettings.automationMode);
+        if (categoryOutcome.status === "applied") {
+          const refreshedEbayDraft = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
+          if (refreshedEbayDraft) await autoResolveAndPersistEbayAspects(user.id, draftId, refreshedEbayDraft);
+        }
+      } catch {
+        // Never lets a category/taxonomy failure fail the whole "Generate
+        // listings" call — the eBay draft above is already safely saved.
+      }
     }
 
+    // Phase 3 fix — "The response must identify which marketplace
+    // succeeded or failed" / "Do not mark the product successful merely
+    // because the Vinted draft already exists." `vintedGenerated` is
+    // false whenever this call deliberately left Vinted untouched (an
+    // eBay-only regeneration) — never conflated with an actual failure,
+    // since nothing failed; it simply wasn't asked for. `ebayGenerated`
+    // is true only once a real EBAY_UK row was actually built this call;
+    // `ebayDegraded` flags the one soft-failure case where eBay's own AI
+    // call failed but a safe, honest deterministic fallback (never Vinted
+    // boilerplate) was still saved rather than losing the eBay draft
+    // outright — see ebay-draft-generation.ts's own "ebay_generation_degraded".
     return NextResponse.json({
       draftId,
       brand: structuredFields.brand, model: structuredFields.model, productType: structuredFields.productType,
       colours: structuredFields.colours, material: structuredFields.material, ukSize: structuredFields.ukSize, sku: structuredFields.sku,
       condition: LISTING_CONDITION_TEXT,
       generatedTitle, generatedDescription, status: "ready",
+      vintedGenerated: shouldWriteVintedContent,
       vintedAudience: finalVintedAudience, vintedAudienceSource: finalVintedAudienceSource, vintedAudienceEvidence: finalVintedAudienceEvidence,
       vintedCategoryId: categoryId, vintedCategoryPath: categoryPath, vintedCategorySource: categorySource, vintedCategoryStatus: categoryStatus,
-      ...(ebayDraft ? { ebayDraft: { title: ebayDraft.title, description: ebayDraft.description, status: ebayDraft.status, readiness: ebayDraft.readiness, validationMessages: ebayDraft.validationMessages } } : {}),
+      // Phase 3 fix — `ebayGenerated` now means the CONTENT itself is
+      // genuinely GENERATED, not merely "a row exists" (a FALLBACK row
+      // also always exists). `ebayContentState` is the authoritative
+      // signal every UI surface should read.
+      ebayGenerated: ebayDraft?.contentGeneration.state === "generated",
+      ...(ebayDraft ? {
+        ebayContentState: ebayDraft.contentGeneration.state,
+        ebayDegraded: ebayDraft.contentGeneration.state === "fallback",
+        ebayDraft: { title: ebayDraft.title, description: ebayDraft.description, status: ebayDraft.status, readiness: ebayDraft.readiness, validationMessages: ebayDraft.validationMessages },
+      } : {}),
     });
   } catch (error) { return safeApiError(error, "Could not generate this listing."); }
 }
