@@ -256,6 +256,17 @@ describe("runEbayDraftBatchProcessTick — bounded, persistent, resumable proces
     expect(createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
 
+  it("SAFETY CORRECTION — an ambiguous condition ('Used', with no explicit grade) is rejected server-side on the very first tick, before any eBay write — never optimistically upgraded and sent as USED_EXCELLENT", async () => {
+    getMarketplaceDraft.mockResolvedValue(marketplaceDraft({ conditionValue: "Used" }));
+    const db = makeFakeDb(fakeBatch(), [fakeItem()]);
+    const { runEbayDraftBatchProcessTick } = await loadModule(db);
+    await runEbayDraftBatchProcessTick("owner-1", "batch-1");
+    expect(db.items[0].status).toBe("failed");
+    expect(db.items[0].error_message).toMatch(/Choose a specific eBay condition\./);
+    expect(createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(createOffer).not.toHaveBeenCalled();
+  });
+
   it("REQUIREMENT: one item's failure never blocks another item's own progress in the same tick", async () => {
     getMarketplaceDraft.mockImplementation(async (_owner: string, productId: string) =>
       productId === "product-bad" ? marketplaceDraft({ id: "mdraft-bad", productDraftId: "product-bad", pricePence: null }) : marketplaceDraft(),

@@ -86,4 +86,26 @@ describe("evaluateEbayDraftEligibility", () => {
     expect(result.eligible).toBe(false);
     expect(result.reasons).toContain("eBay account is not connected");
   });
+
+  describe("SAFETY CORRECTION — ambiguous conditions block eligibility with a distinct, actionable reason", () => {
+    it("REQUIREMENT: the eligibility UI/route surfaces 'Choose a specific eBay condition.' for an ambiguous bare condition — the server rejects it before any eBay write is ever attempted", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput({ conditionValue: "Used" }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons).toContain("Choose a specific eBay condition.");
+    });
+
+    it("bare 'Pre-owned' and bare 'Good' are equally blocked, not just 'Used'", () => {
+      for (const conditionValue of ["Pre-owned", "Good", "Fair"]) {
+        const result = evaluateEbayDraftEligibility(fullyEligibleInput({ conditionValue }));
+        expect(result.eligible, conditionValue).toBe(false);
+        expect(result.reasons, conditionValue).toContain("Choose a specific eBay condition.");
+      }
+    });
+
+    it("REQUIREMENT: SKU 1644's real explicit condition remains eligible after the safety correction", () => {
+      const result = evaluateEbayDraftEligibility(fullyEligibleInput({ conditionValue: "Used – Very Good" }));
+      expect(result.eligible).toBe(true);
+      expect(result.reasons).toEqual([]);
+    });
+  });
 });
