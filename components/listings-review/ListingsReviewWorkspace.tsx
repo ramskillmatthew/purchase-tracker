@@ -588,6 +588,7 @@ export default function ListingsReviewWorkspace() {
         costPence,
         profitPence: ebayProfitPence,
         quantity: ebayDraft.quantity,
+        conditionValue: ebayDraft.conditionValue,
         selection: {
           fulfillmentPolicyId: ebayDraft.ebayFulfillmentPolicyId, returnPolicyId: ebayDraft.ebayReturnPolicyId,
           paymentPolicyId: ebayDraft.ebayPaymentPolicyId, merchantLocationKey: ebayDraft.ebayMerchantLocationKey,
@@ -600,6 +601,17 @@ export default function ListingsReviewWorkspace() {
         workflowStatus: ebayDraft.ebayStatus ? computeEbayDraftWorkflowStatus(ebayDraft.ebayStatus.item_status) : null,
         queuePosition: ebayDraft.ebayStatus?.queue_position ?? null,
         errorMessage: ebayDraft.ebayStatus?.error_message ?? null,
+        // Corrective pass — errorCode/itemId are NOT part of the page-load
+        // aggregate RPC (listing_studio_latest_ebay_draft_status doesn't
+        // select the item's own id — see that RPC's own comment); batchId
+        // is. The listingRows memo below fills itemId/errorCode in from
+        // the live poll result once it has run (near-immediate on a
+        // normal page load, since this batch is already in
+        // ebayVisibleBatchIds) — the "Retry failed draft" button simply
+        // doesn't render until then, never a broken/guessed id.
+        errorCode: null,
+        batchId: ebayDraft.ebayStatus?.batch_id ?? null,
+        itemId: null,
       } satisfies EbayTabData : null,
     };
   }), [drafts, photoIdsByDraftId, ebayByProductId]);
@@ -688,7 +700,13 @@ export default function ListingsReviewWorkspace() {
     const ebayQueuePosition = ebayLive ? ebayLive.item.queuePosition : row.ebay?.queuePosition ?? null;
     const ebayErrorMessage = ebayLive ? ebayLive.item.errorMessage : row.ebay?.errorMessage ?? null;
     const ebayOfferId = ebayLive?.item.ebayOfferId ?? row.ebay?.offerId ?? null;
-    const ebay = row.ebay ? { ...row.ebay, workflowStatus: ebayWorkflowStatus, queuePosition: ebayQueuePosition, errorMessage: ebayErrorMessage, offerId: ebayOfferId } : null;
+    const ebayErrorCode = ebayLive ? ebayLive.item.errorCode : row.ebay?.errorCode ?? null;
+    const ebayItemId = ebayLive?.item.itemId ?? row.ebay?.itemId ?? null;
+    const ebayBatchId = ebayLive?.batch.batchId ?? row.ebay?.batchId ?? null;
+    const ebay = row.ebay ? {
+      ...row.ebay, workflowStatus: ebayWorkflowStatus, queuePosition: ebayQueuePosition, errorMessage: ebayErrorMessage, offerId: ebayOfferId,
+      errorCode: ebayErrorCode, itemId: ebayItemId, batchId: ebayBatchId,
+    } : null;
 
     return {
       ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage,
@@ -914,6 +932,7 @@ export default function ListingsReviewWorkspace() {
         hasPhoto: row.photoIds.length > 0,
         hasSku: Boolean(row.sku),
         hasQuantity: row.ebay.quantity != null,
+        conditionValue: row.ebay.conditionValue,
         fulfillmentPolicyId: s.fulfillmentPolicyId, fulfillmentPolicyStale: isEbayPolicyStale("FULFILLMENT", s.fulfillmentPolicyId),
         returnPolicyId: s.returnPolicyId, returnPolicyStale: isEbayPolicyStale("RETURN", s.returnPolicyId),
         paymentPolicyId: s.paymentPolicyId, paymentPolicyStale: isEbayPolicyStale("PAYMENT", s.paymentPolicyId),
@@ -954,6 +973,51 @@ export default function ListingsReviewWorkspace() {
       setEbayCreateError("Network error — could not create eBay drafts. Your selection has been kept.");
     } finally {
       setEbayCreatingDrafts(false);
+    }
+  }
+
+  // CORRECTIVE PASS (failed first eBay draft) — genuine "Retry failed
+  // draft", never "Create new draft": calls the dedicated retry route
+  // (POST .../[batchId]/items/[itemId]/retry), which reconciles against
+  // eBay by SKU BEFORE touching anything locally, then requeues the SAME
+  // item through the corrected pipeline — see
+  // lib/listing-studio/ebay-draft-batches.ts's own retryFailedEbayDraftItem
+  // for the full sequence. The confirmation dialog (rendered in JSX below)
+  // states exactly that: reconcile first, reuse an existing offer if one
+  // exists, never publish, never duplicate.
+  const [ebayRetryConfirmOpen, setEbayRetryConfirmOpen] = useState(false);
+  const [ebayRetrying, setEbayRetrying] = useState(false);
+  const [ebayRetryError, setEbayRetryError] = useState("");
+  const [ebayRetryTarget, setEbayRetryTarget] = useState<{ batchId: string; itemId: string } | null>(null);
+
+  function openEbayRetryConfirm(batchId: string, itemId: string) {
+    setEbayRetryTarget({ batchId, itemId });
+    setEbayRetryError("");
+    setEbayRetryConfirmOpen(true);
+  }
+
+  async function confirmEbayRetry() {
+    if (!ebayRetryTarget || ebayRetrying) return;
+    setEbayRetrying(true);
+    setEbayRetryError("");
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-draft-batches/${ebayRetryTarget.batchId}/items/${ebayRetryTarget.itemId}/retry`, { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const reasonsNote = Array.isArray(body.reasons) && body.reasons.length > 0 ? ` (${body.reasons.join("; ")})` : "";
+        setEbayRetryError((body.error || "Could not retry this eBay draft.") + reasonsNote);
+        return;
+      }
+      // Ensures this batch is (still) tracked by the live poll loop so the
+      // retried item's fresh status/offer id shows up without a manual
+      // page reload.
+      setEbayVisibleBatchIds(current => new Set(current).add(ebayRetryTarget.batchId));
+      setEbayRetryConfirmOpen(false);
+      setEbayRetryTarget(null);
+    } catch {
+      setEbayRetryError("Network error — could not retry this eBay draft.");
+    } finally {
+      setEbayRetrying(false);
     }
   }
 
@@ -2129,6 +2193,21 @@ export default function ListingsReviewWorkspace() {
       onCancel={() => { setEbayStuckConfirmOpen(false); setEbayDismissTarget(null); }}
     />}
 
+    {/* CORRECTIVE PASS (failed first eBay draft) — genuine retry, never
+        relabelled "Create new draft". The message states, plainly, that
+        this reconciles with eBay first, reuses an existing inactive offer
+        if one is found, and never publishes or duplicates anything. */}
+    {ebayRetryConfirmOpen && ebayRetryTarget && <ConfirmDialog
+      title="Retry this failed eBay draft?"
+      message="The app will first check with eBay for this item's SKU: if an unpublished offer already exists there, it will be reused (never duplicated); if not, a corrected draft attempt will be queued. This never publishes anything — the result is always an unpublished draft or nothing at all."
+      confirmLabel="Retry failed draft"
+      confirming={ebayRetrying}
+      confirmingLabel="Retrying…"
+      error={ebayRetryError}
+      onConfirm={confirmEbayRetry}
+      onCancel={() => { if (!ebayRetrying) { setEbayRetryConfirmOpen(false); setEbayRetryTarget(null); } }}
+    />}
+
     {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
 
     {/* Two-column workspace (reference image 4's exact proportions). The
@@ -2244,6 +2323,7 @@ export default function ListingsReviewWorkspace() {
           onReassessAudience={handleReassessAudience}
           onMarkReady={handleMarkReady}
           onSellingPriceSaved={handleSellingPriceSaved}
+          onRetryEbayDraft={openEbayRetryConfirm}
           onClose={closeInspector}
           onPrevious={() => {
             if (!selectedListingPosition || selectedListingPosition.index === 0) return;

@@ -144,3 +144,43 @@ describe("STRUCTURAL — no publish-capable eBay operation was introduced by thi
     }
   });
 });
+
+describe("STRUCTURAL — Phase 6/7/8 (15-17, 25-26): genuine retry UI, never relabelled 'Create new draft'", () => {
+  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+
+  it("REQUIREMENT 15: a failed eBay item shows a 'View error' control", () => {
+    expect(panelSource).toContain('{expanded ? "Hide error" : "View error"}');
+  });
+
+  it("REQUIREMENT 16: the retry control is labelled 'Retry failed draft' — never 'Create new draft' or a bare 'Create'", () => {
+    expect(panelSource).toContain(">Retry failed draft<");
+    expect(panelSource).not.toMatch(/Create new draft/i);
+  });
+
+  it("REQUIREMENT 16: retry is only offered once both a batchId and itemId are known — never guessed/fabricated ids", () => {
+    expect(panelSource).toContain("ebay.batchId && ebay.itemId &&");
+  });
+
+  it("the retry action is gated behind a confirmation dialog stating reconciliation-first, offer reuse, and never-publish — never fired directly from the button", () => {
+    expect(workspaceSource).toContain("Retry this failed eBay draft?");
+    expect(workspaceSource).toMatch(/will first check with eBay/);
+    expect(workspaceSource).toMatch(/reused \(never duplicated\)/);
+    expect(workspaceSource).toMatch(/never publishes anything/);
+  });
+
+  it("REQUIREMENT: the retry confirm button calls the dedicated retry route, never the bulk create-drafts route", () => {
+    expect(workspaceSource).toMatch(/ebay-draft-batches\/\$\{ebayRetryTarget\.batchId\}\/items\/\$\{ebayRetryTarget\.itemId\}\/retry/);
+  });
+
+  it("shows which pipeline stage failed via a stage-label lookup — never invents detail beyond the real error codes lib/listing-studio/ebay-draft-batches.ts actually produces", () => {
+    const batchesSource = read("lib/listing-studio/ebay-draft-batches.ts");
+    for (const code of ["ebay_inventory_item_error", "ebay_offer_error", "ebay_verification_error"]) {
+      expect(batchesSource, code).toContain(`"${code}"`);
+      expect(panelSource, code).toContain(code);
+    }
+  });
+
+  it("REQUIREMENT 26: 'Drafts only — never publishes' wording is untouched by this pass", () => {
+    expect(workspaceSource).toContain("Drafts only — never publishes");
+  });
+});

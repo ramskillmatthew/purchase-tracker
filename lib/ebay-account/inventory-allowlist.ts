@@ -39,6 +39,13 @@ const ALLOWED_INVENTORY_OPERATIONS: ReadonlySet<string> = new Set([
   "getOffer",
   "getOffersForSku",
   "getInventoryLocations",
+  // Corrective pass (failed-draft diagnosis/retry) — read-only GET of one
+  // inventory item by its exact SKU, the official Inventory API operation
+  // for "does this inventory item exist on eBay's side". Never a fallback
+  // to PUT/createOrReplaceInventoryItem — see inventory-client.ts's own
+  // getInventoryItem, which hardcodes method "GET" and cannot be called
+  // any other way.
+  "getInventoryItem",
 ]);
 
 /**

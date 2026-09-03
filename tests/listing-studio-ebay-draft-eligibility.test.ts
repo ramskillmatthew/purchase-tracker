@@ -5,6 +5,7 @@ function fullyEligibleInput(overrides: Partial<EbayDraftEligibilityInput> = {}):
   return {
     hasEbayPreparation: true, accountUsable: true, alreadyHasOffer: false, contentReady: true, hasValidPrice: true,
     hasPhoto: true, hasSku: true, hasQuantity: true,
+    conditionValue: "Used – Very Good",
     fulfillmentPolicyId: "FUL-1", fulfillmentPolicyStale: false,
     returnPolicyId: "RET-1", returnPolicyStale: false,
     paymentPolicyId: "PAY-1", paymentPolicyStale: false,

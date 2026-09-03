@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}));
 const {
   getMarketplaceDraft, patchMarketplaceDraft,
   getEbayConnection, listEbayPolicies, getValidEbayAccessToken,
-  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, createSignedDownloadUrl,
+  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, createSignedDownloadUrl,
 } = vi.hoisted(() => ({
   getMarketplaceDraft: vi.fn(async (_ownerId: string, _productDraftId: string, _marketplace: "EBAY_UK") => null as unknown),
   patchMarketplaceDraft: vi.fn(async (_ownerId: string, _id: string, _patch: Record<string, unknown>) => {}),
@@ -16,11 +16,12 @@ const {
   createOffer: vi.fn(async (_accessToken: string, _payload: Record<string, unknown>) => ({ offerId: "offer-1" })),
   getOffersForSku: vi.fn(async (_accessToken: string, _sku: string) => [] as Array<{ offerId: string }>),
   getOffer: vi.fn(async (_accessToken: string, _offerId: string) => ({ offerId: "offer-1", status: "UNPUBLISHED", sku: "SKU-1" }) as unknown),
+  getInventoryItem: vi.fn(async (_accessToken: string, _sku: string) => null as unknown),
   createSignedDownloadUrl: vi.fn(async (_bucket: string, _path: string, _expiresInSeconds: number) => "https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc"),
 }));
 vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForProducts: vi.fn(async () => new Map()) }));
 vi.mock("@/lib/ebay-account/client", () => ({ getEbayConnection, listEbayPolicies, getValidEbayAccessToken }));
-vi.mock("@/lib/ebay-account/inventory-client", () => ({ createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer }));
+vi.mock("@/lib/ebay-account/inventory-client", () => ({ createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem }));
 vi.mock("@/lib/listing-studio/storage-rest", () => ({
   createSignedDownloadUrl,
   StorageBucketMissingError: class StorageBucketMissingError extends Error {},
@@ -79,6 +80,20 @@ function makeFakeDb(batch: FakeBatch, items: FakeItem[]) {
       const claimed = claim(body.p_owner_id, body.p_batch_id, body.p_limit, body.p_claimed_by);
       return new Response(JSON.stringify(claimed), { status: 200 });
     }
+    // Corrective pass (retry) — patchItemIfStatus's own conditional PATCH
+    // (id=eq.X&status=eq.Y). Genuinely conditional: only actually patches
+    // (and returns the row) when the CURRENT status matches — this is
+    // what makes the concurrency-guard tests below real, not asserted.
+    const conditionalPatchMatch = path.match(/^ebay_draft_batch_items\?id=eq\.([^&]+)&status=eq\.([^&]+)$/);
+    if (conditionalPatchMatch) {
+      const [, id, expectedStatus] = conditionalPatchMatch;
+      const item = items.find(i => i.id === id);
+      if (item && item.status === expectedStatus) {
+        Object.assign(item, JSON.parse(init!.body as string));
+        return new Response(JSON.stringify([{ id: item.id }]), { status: 200 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 }); // status didn't match — 0 rows affected, exactly like a real filtered PATCH
+    }
     const itemPatchMatch = path.match(/^ebay_draft_batch_items\?id=eq\.([^&]+)$/);
     if (itemPatchMatch) {
       const item = items.find(i => i.id === itemPatchMatch[1]);
@@ -98,6 +113,19 @@ function makeFakeDb(batch: FakeBatch, items: FakeItem[]) {
 
   const supabaseRequestAll = vi.fn(async (path: string) => {
     if (path.startsWith("ebay_draft_batch_items?batch_id=eq.")) return items.map(i => ({ status: i.status }));
+    // Corrective pass (retry) — retryFailedEbayDraftItem's own owner-scoped
+    // batch lookup and item-by-id-within-batch lookup.
+    const batchOwnerMatch = path.match(/^ebay_draft_batches\?id=eq\.([^&]+)&owner_id=eq\.([^&]+)&select=/);
+    if (batchOwnerMatch) {
+      const [, id, ownerId] = batchOwnerMatch;
+      return batch.id === id && batch.owner_id === ownerId ? [{ id: batch.id }] : [];
+    }
+    const itemByIdMatch = path.match(/^ebay_draft_batch_items\?id=eq\.([^&]+)&batch_id=eq\.([^&]+)&select=/);
+    if (itemByIdMatch) {
+      const [, id, batchId] = itemByIdMatch;
+      const item = items.find(i => i.id === id && i.batch_id === batchId);
+      return item ? [item] : [];
+    }
     if (path.startsWith("listing_drafts?id=eq.")) return [{ id: items[0]?.product_draft_id ?? "product-1", sku: "SKU-1" }];
     if (path.startsWith("listing_draft_images?draft_id=eq.")) return [{ draft_id: items[0]?.product_draft_id ?? "product-1", id: "img-1", storage_path: "owner-1/product-1/img-1-x.jpg", sort_order: 0 }];
     return [];
@@ -141,7 +169,7 @@ beforeEach(() => {
   vi.resetModules();
   getMarketplaceDraft.mockReset(); patchMarketplaceDraft.mockReset();
   getEbayConnection.mockReset(); listEbayPolicies.mockReset(); getValidEbayAccessToken.mockReset();
-  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); createSignedDownloadUrl.mockReset();
+  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); getInventoryItem.mockReset(); createSignedDownloadUrl.mockReset();
 
   // Stateful — a "creating_draft" step's own patchMarketplaceDraft(ebay_offer_id: ...)
   // call must be visible to the VERY NEXT tick's getMarketplaceDraft read
@@ -166,6 +194,7 @@ beforeEach(() => {
   createOffer.mockResolvedValue({ offerId: "offer-1" });
   getOffersForSku.mockResolvedValue([]);
   getOffer.mockResolvedValue({ offerId: "offer-1", status: "UNPUBLISHED", sku: "SKU-1" });
+  getInventoryItem.mockResolvedValue(null);
   createSignedDownloadUrl.mockResolvedValue("https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc");
   global.fetch = vi.fn(async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
 });
@@ -329,7 +358,8 @@ describe("Claiming — concurrency, lease expiry, and resume (real behavioural t
     await runEbayDraftBatchProcessTick("owner-1", "batch-1"); // creating_draft's own createOffer call is the one that fails
     expect(createOrReplaceInventoryItem).toHaveBeenCalledTimes(1); // never repeated
     expect(db.items[0].status).toBe("failed");
-    expect(db.items[0].error_code).toBe("ebay_api_error");
+    // Corrective pass — error codes are now stage-specific (ebay_inventory_item_error/ebay_offer_error/ebay_verification_error) so the UI can say WHICH operation failed, not just "ebay_api_error" for all three.
+    expect(db.items[0].error_code).toBe("ebay_offer_error");
   });
 
   it("REQUIREMENT (completed offer never recreated): an item already 'completed' can never be reclaimed by any later tick", async () => {
@@ -422,5 +452,133 @@ describe("buildAspectsPayload", () => {
       __productFacts: { value: null, confidence: "unknown", source: "none", appliedAutomatically: false, needsReview: false, userConfirmed: false, updatedAt: "x" },
     });
     expect(aspects).toEqual({ colour: ["Blue"] });
+  });
+});
+
+describe("buildInventoryItemPayload — CORRECTIVE PASS (failed first draft): the exact outgoing payload for the real SKU 1644 case", () => {
+  it("REQUIREMENT (Phase 5 developer/test-only payload preview): the real 'On Running Cloud 5' draft's condition value produces condition: \"USED_VERY_GOOD\" — never the raw label, never a fallback — never sent to eBay, only asserted here", async () => {
+    const { buildInventoryItemPayload } = await import("@/lib/listing-studio/ebay-draft-batches");
+    const payload = buildInventoryItemPayload(
+      { conditionValue: "Used – Very Good", title: "On Running Cloud 5 Womens UK 4 Light blue Grey Mesh Running Trainers Lightweight", description: "Genuine On Running Cloud 5...", dynamicData: {}, quantity: 1 },
+      ["https://signed.example/photo1.jpg"],
+    );
+    expect(payload).not.toBeNull();
+    expect(payload?.condition).toBe("USED_VERY_GOOD");
+    // No photo URL, title, or description is logged/asserted beyond this
+    // in-memory object — this test never calls fetch, never contacts eBay.
+  });
+
+  it("returns null (a real blocker, never a guessed payload) when the condition doesn't translate", async () => {
+    const { buildInventoryItemPayload } = await import("@/lib/listing-studio/ebay-draft-batches");
+    const payload = buildInventoryItemPayload(
+      { conditionValue: null, title: "x", description: "x", dynamicData: {}, quantity: 1 },
+      ["https://signed.example/photo1.jpg"],
+    );
+    expect(payload).toBeNull();
+  });
+
+  it("defaults quantity to 1 only when genuinely absent, never overrides a real quantity", async () => {
+    const { buildInventoryItemPayload } = await import("@/lib/listing-studio/ebay-draft-batches");
+    const withQuantity = buildInventoryItemPayload({ conditionValue: "New", title: "x", description: "x", dynamicData: {}, quantity: 3 }, []);
+    const withoutQuantity = buildInventoryItemPayload({ conditionValue: "New", title: "x", description: "x", dynamicData: {}, quantity: null }, []);
+    expect(withQuantity?.availability.shipToLocationAvailability.quantity).toBe(3);
+    expect(withoutQuantity?.availability.shipToLocationAvailability.quantity).toBe(1);
+  });
+});
+
+describe("retryFailedEbayDraftItem — CORRECTIVE PASS (failed first draft): genuine reconciliation-first retry, real behavioural tests", () => {
+  it("REQUIREMENT: not found for a wrong batch, wrong item, or wrong owner", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed" })]);
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+    expect((await retryFailedEbayDraftItem("owner-1", "batch-1", "no-such-item")).outcome).toBe("not_found");
+    expect((await retryFailedEbayDraftItem("owner-1", "no-such-batch", "item-1")).outcome).toBe("not_found");
+    expect((await retryFailedEbayDraftItem("someone-else", "batch-1", "item-1")).outcome).toBe("not_found");
+  });
+
+  it("REQUIREMENT: not_retryable for an item that isn't actually failed", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "queued" })]);
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+    const result = await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(result).toEqual({ outcome: "not_retryable", itemStatus: "queued" });
+  });
+
+  it("REQUIREMENT 4: recalculates eligibility fresh — an item whose condition no longer maps is blocked, never silently requeued", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed" })]);
+    getMarketplaceDraft.mockResolvedValue(marketplaceDraft({ conditionValue: "some made up condition" }));
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+    const result = await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(result.outcome).toBe("ineligible");
+    if (result.outcome === "ineligible") expect(result.reasons).toContain("Missing or unsupported eBay condition.");
+    expect(db.items[0].status).toBe("failed"); // untouched — no state change on an ineligible retry
+    expect(getOffersForSku).not.toHaveBeenCalled(); // never even reaches reconciliation
+  });
+
+  it("REQUIREMENT 5-7: an existing remote offer is reconciled and reused — createOffer is never called, and the item jumps straight to verifying_draft", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed", error_code: "ebay_inventory_item_error", error_message: "Invalid request", attempt_count: 1 })]);
+    getOffersForSku.mockResolvedValue([{ offerId: "existing-offer-99" }]);
+    getInventoryItem.mockResolvedValue({ sku: "SKU-1", condition: "USED_VERY_GOOD", hasOffers: true });
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+
+    const result = await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(result.outcome).toBe("reconciled_existing_offer");
+    if (result.outcome === "reconciled_existing_offer" || result.outcome === "requeued") {
+      expect(result.offerExists).toBe(true);
+      expect(result.inventoryItemExists).toBe(true);
+    }
+    expect(createOffer).not.toHaveBeenCalled();
+    expect(createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(patchMarketplaceDraft).toHaveBeenCalledWith("owner-1", "mdraft-1", expect.objectContaining({ ebay_offer_id: "existing-offer-99" }));
+    // error state cleared, but the ORIGINAL attempt_count is preserved (never reset to 0)
+    expect(db.items[0].error_code).toBeNull();
+    expect(db.items[0].attempt_count).toBe(1);
+  });
+
+  it("REQUIREMENT 8-9: nothing exists remotely — requeues through the corrected pipeline from the top (one tick advances it past 'queued')", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed", attempt_count: 1 })]);
+    getOffersForSku.mockResolvedValue([]);
+    getInventoryItem.mockResolvedValue(null);
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+
+    const result = await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(result.outcome).toBe("requeued");
+    if (result.outcome === "requeued") { expect(result.offerExists).toBe(false); expect(result.inventoryItemExists).toBe(false); }
+    expect(db.items[0].status).not.toBe("failed"); // the one bounded tick already advanced it past "queued"
+    expect(db.items[0].attempt_count).toBe(1); // preserved, not reset
+    expect(createOffer).not.toHaveBeenCalled(); // this tick only reaches the eligibility/photo step, not offer creation
+  });
+
+  it("REQUIREMENT 8: an inventory-item-only remote state (no offer) still requeues through the normal pipeline — the next real PUT is idempotent and will correct it", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed" })]);
+    getOffersForSku.mockResolvedValue([]);
+    getInventoryItem.mockResolvedValue({ sku: "SKU-1", condition: "USED_EXCELLENT", hasOffers: false }); // wrong condition from the earlier failed/partial attempt
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+    const result = await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(result.outcome).toBe("requeued");
+    if (result.outcome === "requeued") { expect(result.inventoryItemExists).toBe(true); expect(result.offerExists).toBe(false); }
+  });
+
+  it("REQUIREMENT 10-11/23: two concurrent retries for the SAME item — only one wins; the second reports already_in_progress, never a duplicate requeue", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "failed" })]);
+    getOffersForSku.mockResolvedValue([]);
+    getInventoryItem.mockResolvedValue(null);
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+
+    const [first, second] = await Promise.all([
+      retryFailedEbayDraftItem("owner-1", "batch-1", "item-1"),
+      retryFailedEbayDraftItem("owner-1", "batch-1", "item-1"),
+    ]);
+    const outcomes = [first.outcome, second.outcome].sort();
+    expect(outcomes).toEqual(["already_in_progress", "requeued"].sort());
+  });
+
+  it("REQUIREMENT 24: Batch 1-style audit history is preserved — the SAME item row/id is reused, never a new item created, and the batch is never deleted", async () => {
+    const db = makeFakeDb(fakeBatch({ id: "batch-1" }), [fakeItem({ id: "item-1", status: "failed" })]);
+    getOffersForSku.mockResolvedValue([]);
+    getInventoryItem.mockResolvedValue(null);
+    const { retryFailedEbayDraftItem } = await loadModule(db);
+    await retryFailedEbayDraftItem("owner-1", "batch-1", "item-1");
+    expect(db.items).toHaveLength(1);
+    expect(db.items[0].id).toBe("item-1");
+    expect(db.batch.id).toBe("batch-1");
   });
 });

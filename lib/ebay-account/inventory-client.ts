@@ -1,6 +1,7 @@
 import "server-only";
 import { ebayApiBase, ebayEnvironment } from "@/lib/ebay-account/oauth";
 import { assertAllowedInventoryOperation } from "@/lib/ebay-account/inventory-allowlist";
+import { parseEbayErrors, formatEbayErrorForUser, type SanitizedEbayError } from "@/lib/ebay-account/ebay-error";
 
 /**
  * eBay Inventory API calls (Stage 6) — the "future stage" that
@@ -44,16 +45,29 @@ async function inventoryRequest(accessToken: string, method: "GET" | "PUT" | "PO
 }
 
 /** Never surfaces eBay's raw response body upward as-is — it can echo back
- * request fields — only a safe status plus, where present, eBay's own
- * short top-level error message array reduced to plain text. */
-async function inventoryError(response: Response, fallbackMessage: string): Promise<Error & { status: number }> {
-  let detail = "";
+ * request fields — only a safe, bounded, sanitised summary.
+ *
+ * CORRECTIVE PASS (failed first draft) — previously kept only eBay's
+ * short top-level `message` field, which eBay itself documents as a
+ * generic per-category summary ("Invalid request") rather than the actual
+ * reason. Now parses the full structured error envelope via
+ * lib/ebay-account/ebay-error.ts's parseEbayErrors (errorId/domain/
+ * category/message/longMessage/parameters, every value length-bounded and
+ * scanned for secret-shaped substrings) and builds the thrown error's
+ * `.message` from the DETAILED longMessage when eBay provided one — this
+ * is what makes a future failure's persisted error_message actually
+ * diagnosable instead of a dead end. The full sanitised detail is also
+ * attached as `.ebayErrors` for any caller that wants the structured form
+ * (e.g. to log a machine-readable errorId) without re-parsing text. */
+async function inventoryError(response: Response, fallbackMessage: string): Promise<Error & { status: number; ebayErrors: SanitizedEbayError[] }> {
+  let ebayErrors: SanitizedEbayError[] = [];
   try {
-    const body = await response.json() as { errors?: Array<{ message?: string }> };
-    detail = (body.errors ?? []).map(e => e.message).filter(Boolean).join(" ");
+    const body: unknown = await response.json();
+    ebayErrors = parseEbayErrors(body);
   } catch { /* non-JSON or empty body — fall back to the generic message */ }
-  const error = new Error(detail || fallbackMessage) as Error & { status: number };
+  const error = new Error(formatEbayErrorForUser(ebayErrors, fallbackMessage)) as Error & { status: number; ebayErrors: SanitizedEbayError[] };
   error.status = response.status;
+  error.ebayErrors = ebayErrors;
   return error;
 }
 
@@ -189,6 +203,35 @@ export async function getOffer(accessToken: string, offerId: string): Promise<Eb
   if (!response.ok) throw await inventoryError(response, "eBay offer could not be read.");
   const body = await response.json() as { offerId: string; status: string; sku: string };
   return { offerId: body.offerId, status: body.status, sku: body.sku };
+}
+
+export type EbayInventoryItemReadResult = {
+  sku: string;
+  condition: string | null;
+  hasOffers: boolean;
+} | null;
+
+/** Read-only — the official Inventory API operation for "does this
+ * inventory item exist, and what does it currently look like". Used ONLY
+ * for reconciliation after a failed/uncertain attempt, never as a
+ * precondition for a write. Hardcodes method "GET" and a fixed path
+ * template — there is no parameter or code path here that could ever
+ * become a PUT/POST, unlike createOrReplaceInventoryItem above, which is a
+ * deliberately separate function. Returns null (never throws) for a
+ * genuine 404 — "this SKU has no inventory item yet" is an expected,
+ * handled outcome, not a fault. Any OTHER non-2xx response (auth failure,
+ * rate limit, 5xx) throws via inventoryError, exactly like every other
+ * read here — it must never be silently treated as "does not exist".
+ * Returns only the few fields reconciliation actually needs — never the
+ * full remote body, never image URLs, never aspects. */
+export async function getInventoryItem(accessToken: string, sku: string): Promise<EbayInventoryItemReadResult> {
+  assertAllowedInventoryOperation("getInventoryItem");
+  if (!sku || !/^[A-Za-z0-9._-]{1,50}$/.test(sku)) throw new Error("Invalid eBay inventory SKU.");
+  const response = await inventoryRequest(accessToken, "GET", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw await inventoryError(response, "eBay inventory item could not be read.");
+  const body = await response.json() as { sku?: string; condition?: string; offers?: unknown[] };
+  return { sku: body.sku ?? sku, condition: body.condition ?? null, hasOffers: Array.isArray(body.offers) && body.offers.length > 0 };
 }
 
 /** Never used for a real network call — exists purely so a test (or a

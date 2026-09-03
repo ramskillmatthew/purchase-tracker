@@ -3,11 +3,12 @@ import { randomUUID } from "node:crypto";
 import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForProducts } from "@/lib/listing-studio/marketplace-drafts";
 import { getEbayConnection, listEbayPolicies, getValidEbayAccessToken } from "@/lib/ebay-account/client";
-import { createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer } from "@/lib/ebay-account/inventory-client";
+import { createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, type EbayInventoryItemPayload } from "@/lib/ebay-account/inventory-client";
 import { evaluateEbayDraftEligibility } from "@/lib/listing-studio/ebay-draft-eligibility";
+import { toEbayInventoryCondition, type EbayInventoryConditionEnum } from "@/lib/listing-studio/ebay-condition";
 import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import { createSignedDownloadUrl, StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
-import type { MarketplaceDynamicData } from "@/lib/listing-studio/marketplace-types";
+import type { MarketplaceDynamicData, MarketplaceDraft } from "@/lib/listing-studio/marketplace-types";
 import type { EbayDraftItemStatus, EbayDraftBatchStatus } from "@/lib/listing-studio/ebay-workflow-status";
 
 /**
@@ -207,6 +208,7 @@ export async function resolveEbayDraftEligibilityForProducts(ownerId: string, pr
       hasPhoto: (photoCountByProduct.get(productDraftId) ?? 0) > 0,
       hasSku: Boolean(skuByProduct.get(productDraftId)),
       hasQuantity: ebayDraft.quantity != null,
+      conditionValue: ebayDraft.conditionValue,
       fulfillmentPolicyId: ebayDraft.ebayFulfillmentPolicyId, fulfillmentPolicyStale: isStale("FULFILLMENT", ebayDraft.ebayFulfillmentPolicyId),
       returnPolicyId: ebayDraft.ebayReturnPolicyId, returnPolicyStale: isStale("RETURN", ebayDraft.ebayReturnPolicyId),
       paymentPolicyId: ebayDraft.ebayPaymentPolicyId, paymentPolicyStale: isStale("PAYMENT", ebayDraft.ebayPaymentPolicyId),
@@ -359,6 +361,29 @@ export function buildAspectsPayload(dynamicData: MarketplaceDynamicData): Record
   return aspects;
 }
 
+/**
+ * Corrective pass (failed first draft) — pure, DB/network-free payload
+ * builder, extracted from the "creating_inventory_item" pipeline step so
+ * the exact outgoing shape can be asserted in a test without calling
+ * eBay. Uses toEbayInventoryCondition (never the raw display label) for
+ * `condition` — the one field the first real draft attempt failed on.
+ * Returns `null` (never a payload with a guessed condition) when the
+ * translation fails closed; the caller must treat that as a real blocker,
+ * exactly like every other eligibility failure.
+ */
+export function buildInventoryItemPayload(
+  draft: Pick<MarketplaceDraft, "conditionValue" | "title" | "description" | "dynamicData" | "quantity">,
+  imageUrls: string[],
+): { condition: EbayInventoryConditionEnum; product: EbayInventoryItemPayload["product"]; availability: EbayInventoryItemPayload["availability"] } | null {
+  const condition = toEbayInventoryCondition(draft.conditionValue);
+  if (!condition.ok) return null;
+  return {
+    condition: condition.enumValue,
+    product: { title: draft.title ?? "", description: draft.description ?? "", aspects: buildAspectsPayload(draft.dynamicData), imageUrls },
+    availability: { shipToLocationAvailability: { quantity: draft.quantity ?? 1 } },
+  };
+}
+
 async function markItemFailed(itemId: string, ownerId: string, marketplaceDraftId: string, code: string, message: string): Promise<void> {
   await patchItem(itemId, { status: "failed", error_code: code, error_message: message, completed_at: new Date().toISOString(), claimed_at: null, lease_expires_at: null, claimed_by: null });
   await patchMarketplaceDraft(ownerId, marketplaceDraftId, { ebay_last_draft_error: message }).catch(() => {});
@@ -398,6 +423,7 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
         hasPhoto: imageRows.length > 0,
         hasSku: Boolean(sku),
         hasQuantity: draft.quantity != null,
+        conditionValue: draft.conditionValue,
         fulfillmentPolicyId: draft.ebayFulfillmentPolicyId, fulfillmentPolicyStale: isStale("FULFILLMENT", draft.ebayFulfillmentPolicyId),
         returnPolicyId: draft.ebayReturnPolicyId, returnPolicyStale: isStale("RETURN", draft.ebayReturnPolicyId),
         paymentPolicyId: draft.ebayPaymentPolicyId, paymentPolicyStale: isStale("PAYMENT", draft.ebayPaymentPolicyId),
@@ -430,18 +456,33 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
       try {
         const { imageUrls } = await preparePhotos(ownerId, item.product_draft_id);
         if (imageUrls.length === 0) { await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "no_reachable_photos", "No photo could be verified as reachable."); return; }
+        // CORRECTIVE PASS (failed first draft, root cause) — the dangerous
+        // `draft.conditionValue ?? "USED_EXCELLENT"` fallback is gone. That
+        // line sent a UI-facing display label ("Used – Very Good") straight
+        // into eBay's Inventory API `condition` field, which requires an
+        // exact ConditionEnum token ("USED_VERY_GOOD"), and silently
+        // substituted an unrelated enum whenever conditionValue was merely
+        // absent — never a safe assumption about an item's actual
+        // condition. buildInventoryItemPayload (above) uses
+        // toEbayInventoryCondition, the SAME translator every eligibility
+        // check already ran before this item was ever allowed into a
+        // batch — this null case is not expected in the normal path, but
+        // is a real, fail-closed blocker if it ever happens, never a
+        // guessed payload.
+        const payload = buildInventoryItemPayload(draft, imageUrls);
+        if (!payload) {
+          const condition = toEbayInventoryCondition(draft.conditionValue);
+          await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "not_eligible", condition.ok ? "Missing or unsupported eBay condition." : condition.reason);
+          return;
+        }
         const { accessToken } = await getValidEbayAccessToken(ownerId);
         await patchItem(item.item_id, { attempt_count: item.attempt_count + 1 });
         // A PUT keyed by SKU — safe to repeat on retry (idempotent).
-        await createOrReplaceInventoryItem(accessToken, sku, {
-          condition: draft.conditionValue ?? "USED_EXCELLENT",
-          product: { title: draft.title ?? "", description: draft.description ?? "", aspects: buildAspectsPayload(draft.dynamicData), imageUrls },
-          availability: { shipToLocationAvailability: { quantity: draft.quantity ?? 1 } },
-        });
+        await createOrReplaceInventoryItem(accessToken, sku, payload);
         await patchItem(item.item_id, { status: "creating_draft" });
         await releaseClaim(item.item_id);
       } catch (error) {
-        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_api_error", error instanceof Error ? error.message : "This eBay inventory item could not be created.");
+        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_inventory_item_error", error instanceof Error ? error.message : "This eBay inventory item could not be created.");
       }
       return;
     }
@@ -475,7 +516,7 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
         await patchItem(item.item_id, { status: "verifying_draft", ebay_offer_id: offer.offerId });
         await releaseClaim(item.item_id);
       } catch (error) {
-        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_api_error", error instanceof Error ? error.message : "This eBay offer could not be created.");
+        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_offer_error", error instanceof Error ? error.message : "This eBay offer could not be created.");
       }
       return;
     }
@@ -489,7 +530,7 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
         await patchMarketplaceDraft(ownerId, draft.id, { ebay_inventory_synced_at: new Date().toISOString() });
         await patchItem(item.item_id, { status: "completed", completed_at: new Date().toISOString(), claimed_at: null, lease_expires_at: null, claimed_by: null });
       } catch (error) {
-        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_api_error", error instanceof Error ? error.message : "This eBay offer could not be verified.");
+        await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "ebay_verification_error", error instanceof Error ? error.message : "This eBay offer could not be verified.");
       }
       return;
     }
@@ -543,4 +584,134 @@ export async function runEbayDraftBatchProcessTick(ownerId: string, batchId: str
   }
 
   return { claimedCount: claimed.length, batchStatus, hasMoreWork: !allTerminal };
+}
+
+// ---------------------------------------------------------------------
+// Corrective pass (failed first draft) — genuine failed-draft retry.
+//
+// Deliberately NOT "click Create eBay drafts again": that path would
+// re-verify eligibility (now correctly, with the condition-mapping fix)
+// and re-attempt from scratch with no memory of the earlier failure or
+// any reconciliation with what eBay itself already has for this SKU. A
+// retry instead: (1) recalculates eligibility fresh with the SAME
+// authoritative function every other call site uses, (2) reconciles
+// against eBay by SKU BEFORE touching anything locally — an existing
+// remote offer is reused, never recreated, and a remote-only inventory
+// item is left to the pipeline's own idempotent PUT — (3) only then
+// requeues the ORIGINAL item (never a new item/row — attempt_count and
+// the batch's own history are preserved) and runs one bounded tick,
+// exactly like every other forward-progress step in this file.
+
+export type RetryEbayDraftItemResult =
+  | { outcome: "not_found" }
+  | { outcome: "not_retryable"; itemStatus: EbayDraftItemStatus }
+  | { outcome: "ineligible"; reasons: string[] }
+  // Tripped only when two retry requests raced — the conditional PATCH
+  // below (`status=eq.failed`) is the actual concurrency guard; this is
+  // just how its failure is reported back.
+  | { outcome: "already_in_progress" }
+  | { outcome: "reconciled_existing_offer" | "requeued"; inventoryItemExists: boolean; offerExists: boolean; tick: ProcessTickResult };
+
+/** Conditional PATCH — succeeds (and returns true) only if the row's
+ * status still matches `expectedStatus` at the moment of the write, using
+ * the exact same "PATCH with a status=eq.X filter, check whether any row
+ * came back" pattern this codebase already uses for the Vinted extension
+ * batch dismiss/cancel routes. This IS the concurrency guard: two
+ * concurrent retry requests for the same item can both pass every earlier
+ * check, but only the first PATCH here actually changes a `failed` row —
+ * the second's WHERE clause matches zero rows once the first has already
+ * moved it to `queued`/`verifying_draft`, so `Prefer: return=representation`
+ * comes back empty and this returns false. Never relies on the caller
+ * having any lock — the database's own row visibility is the guarantee. */
+async function patchItemIfStatus(itemId: string, expectedStatus: EbayDraftItemStatus, patch: Record<string, unknown>): Promise<boolean> {
+  const response = await supabaseRequest(`ebay_draft_batch_items?id=eq.${itemId}&status=eq.${expectedStatus}`, {
+    method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(patch),
+  });
+  const rows = await response.json().catch(() => []) as unknown[];
+  return rows.length > 0;
+}
+
+export async function retryFailedEbayDraftItem(ownerId: string, batchId: string, itemId: string): Promise<RetryEbayDraftItemResult> {
+  const batches = await supabaseRequestAll<{ id: string }>(`ebay_draft_batches?id=eq.${batchId}&owner_id=eq.${ownerId}&select=id`);
+  if (!batches[0]) return { outcome: "not_found" };
+
+  const items = await supabaseRequestAll<ItemRow>(`ebay_draft_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}&select=${ITEM_SELECT}`);
+  const item = items[0];
+  if (!item) return { outcome: "not_found" };
+  if (item.status !== "failed") return { outcome: "not_retryable", itemStatus: item.status };
+
+  const draft = await getMarketplaceDraft(ownerId, item.product_draft_id, "EBAY_UK");
+  if (!draft) return { outcome: "not_found" };
+
+  const connection = await getEbayConnection(ownerId);
+  const [productRows, policies, imageRows] = await Promise.all([
+    supabaseRequestAll<ProductDraftRow>(`listing_drafts?id=eq.${item.product_draft_id}&owner_id=eq.${ownerId}&select=id,sku`),
+    connection ? listEbayPolicies(connection.id) : Promise.resolve([]),
+    supabaseRequestAll<{ draft_id: string }>(`listing_draft_images?draft_id=eq.${item.product_draft_id}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=draft_id`),
+  ]);
+  const sku = productRows[0]?.sku ?? null;
+  const isStale = (type: "FULFILLMENT" | "RETURN" | "PAYMENT", id: string | null) =>
+    id !== null && !policies.some(p => p.policyType === type && p.ebayPolicyId === id && p.available);
+
+  // Requirement 4 (recalculate eligibility fresh) — the SAME authoritative
+  // function the client button, the batch-creation route, and the queued
+  // pipeline step all use. alreadyHasOffer is deliberately checked against
+  // the LOCAL draft.ebayOfferId only here — the remote reconciliation
+  // below is a separate, later step that can still find and reuse a
+  // remote offer this local field doesn't yet know about.
+  const eligibility = evaluateEbayDraftEligibility({
+    hasEbayPreparation: true,
+    accountUsable: connection?.connectionStatus === "connected",
+    alreadyHasOffer: draft.ebayOfferId !== null,
+    contentReady: draft.readiness.ready,
+    hasValidPrice: draft.pricePence != null && draft.pricePence > 0,
+    hasPhoto: imageRows.length > 0,
+    hasSku: Boolean(sku),
+    hasQuantity: draft.quantity != null,
+    conditionValue: draft.conditionValue,
+    fulfillmentPolicyId: draft.ebayFulfillmentPolicyId, fulfillmentPolicyStale: isStale("FULFILLMENT", draft.ebayFulfillmentPolicyId),
+    returnPolicyId: draft.ebayReturnPolicyId, returnPolicyStale: isStale("RETURN", draft.ebayReturnPolicyId),
+    paymentPolicyId: draft.ebayPaymentPolicyId, paymentPolicyStale: isStale("PAYMENT", draft.ebayPaymentPolicyId),
+    merchantLocationKey: draft.ebayMerchantLocationKey,
+  });
+  if (!eligibility.eligible) return { outcome: "ineligible", reasons: eligibility.reasons };
+  if (!sku) return { outcome: "ineligible", reasons: ["Missing SKU"] };
+
+  // Requirements 5-6 — reconcile against eBay by SKU BEFORE any local
+  // state change: getOffersForSku (already scoped to this SKU + EBAY_GB,
+  // so any result is inherently for the right SKU/marketplace — no
+  // further validation needed) and the new read-only getInventoryItem.
+  // Both are GET-only; neither can create, replace, or publish anything.
+  const { accessToken } = await getValidEbayAccessToken(ownerId);
+  const [offers, inventoryItem] = await Promise.all([
+    getOffersForSku(accessToken, sku, "EBAY_GB"),
+    getInventoryItem(accessToken, sku),
+  ]);
+  const offerExists = offers.length > 0;
+  const inventoryItemExists = inventoryItem !== null || offerExists; // an offer can only exist if its inventory item does
+
+  const resetFields = { error_code: null, error_message: null, claimed_at: null, lease_expires_at: null, claimed_by: null, completed_at: null };
+  if (offerExists) {
+    // Requirement 7 — an offer already exists remotely: reconcile and
+    // persist its id locally, never call createOffer again for this SKU.
+    // Jumps straight to verifying_draft — the inventory item and offer
+    // creation steps are both skipped, exactly because they're already
+    // done.
+    const offer = offers[0];
+    await patchMarketplaceDraft(ownerId, draft.id, { ebay_offer_id: offer.offerId, ebay_last_draft_error: null });
+    const patched = await patchItemIfStatus(itemId, "failed", { ...resetFields, status: "verifying_draft", ebay_offer_id: offer.offerId });
+    if (!patched) return { outcome: "already_in_progress" };
+    const tick = await runEbayDraftBatchProcessTick(ownerId, batchId);
+    return { outcome: "reconciled_existing_offer", inventoryItemExists, offerExists, tick };
+  }
+
+  // Requirements 8-9 — no remote offer (whether or not an inventory item
+  // exists): requeue through the normal, now-corrected pipeline from the
+  // top. createOrReplaceInventoryItem is an idempotent PUT, so this is
+  // always safe to repeat whether or not eBay already has this SKU's
+  // inventory item — the corrected payload is what gets written either way.
+  const patched = await patchItemIfStatus(itemId, "failed", { ...resetFields, status: "queued" });
+  if (!patched) return { outcome: "already_in_progress" };
+  const tick = await runEbayDraftBatchProcessTick(ownerId, batchId);
+  return { outcome: "requeued", inventoryItemExists, offerExists, tick };
 }

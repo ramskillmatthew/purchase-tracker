@@ -63,7 +63,7 @@ describe("Draft-only safety — no publish-capable call exists anywhere in this 
   it("REQUIREMENT (Stage 6): every write/read call in inventory-client.ts is gated by assertAllowedInventoryOperation with a hardcoded literal — never a variable, never client input", () => {
     const source = read("lib/ebay-account/inventory-client.ts");
     const gates = [...source.matchAll(/assertAllowedInventoryOperation\((["'])([a-zA-Z]+)\1\)/g)].map(m => m[2]);
-    expect(gates.sort()).toEqual(["createOffer", "createOrReplaceInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku"].sort());
+    expect(gates.sort()).toEqual(["createOffer", "createOrReplaceInventoryItem", "getInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku"].sort());
   });
 
   it("REQUIREMENT (Stage 6): lib/listing-studio/ebay-draft-batches.ts (the batch-processing orchestrator) references no publish-capable operation and calls no eBay endpoint directly — it only ever goes through inventory-client.ts's own gated functions", () => {
@@ -116,9 +116,9 @@ describe("lib/ebay-account/inventory-allowlist.ts — assertAllowedInventoryOper
     }
   });
 
-  it("REQUIREMENT (Stage 6, corrective pass): exactly the five draft-only operations are allowed — every other operation, including plausible-sounding ones, is still rejected", async () => {
+  it("REQUIREMENT (Stage 6, corrective pass): exactly the six draft-only operations are allowed — every other operation, including plausible-sounding ones, is still rejected", async () => {
     const { assertAllowedInventoryOperation } = await import("@/lib/ebay-account/inventory-allowlist");
-    for (const op of ["createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations"]) {
+    for (const op of ["createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations", "getInventoryItem"]) {
       expect(() => assertAllowedInventoryOperation(op)).not.toThrow();
     }
     for (const op of ["updateOffer", "deleteOffer", "createInventoryLocation", "updateInventoryLocation", "deleteInventoryLocation", "anythingAtAll"]) {

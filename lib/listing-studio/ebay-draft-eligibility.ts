@@ -27,7 +27,16 @@
  * is proven NOT required for. Blocking draft creation on it would enforce a
  * publish-time eBay requirement this app never reaches. See
  * eligibilityNotes below for the non-blocking signal surfaced instead.
+ *
+ * CORRECTIVE PASS (failed first draft) — also now requires the listing's
+ * condition to translate to a real eBay ConditionEnum value via
+ * lib/listing-studio/ebay-condition.ts's toEbayInventoryCondition, the
+ * SAME function the batch processor uses to build the final payload (see
+ * that file's own header for the full root-cause story). The UI must
+ * never say "Ready" for a listing whose condition eBay will reject.
  */
+
+import { toEbayInventoryCondition } from "@/lib/listing-studio/ebay-condition";
 
 export type EbayDraftEligibilityInput = {
   hasEbayPreparation: boolean;
@@ -38,6 +47,7 @@ export type EbayDraftEligibilityInput = {
   hasPhoto: boolean;
   hasSku: boolean;
   hasQuantity: boolean;
+  conditionValue: string | null;
   fulfillmentPolicyId: string | null;
   fulfillmentPolicyStale: boolean;
   returnPolicyId: string | null;
@@ -74,6 +84,8 @@ export function evaluateEbayDraftEligibility(input: EbayDraftEligibilityInput): 
   if (!input.hasPhoto) reasons.push("No uploaded photos");
   if (!input.hasSku) reasons.push("Missing SKU");
   if (!input.hasQuantity) reasons.push("Missing quantity");
+  const condition = toEbayInventoryCondition(input.conditionValue);
+  if (!condition.ok) reasons.push(condition.reason);
   if (!input.fulfillmentPolicyId) reasons.push("Missing shipping policy");
   else if (input.fulfillmentPolicyStale) reasons.push("Shipping policy is no longer available — choose another");
   if (!input.returnPolicyId) reasons.push("Missing return policy");

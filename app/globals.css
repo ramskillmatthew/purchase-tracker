@@ -1920,6 +1920,13 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-inspector-thumb-active { border-color: var(--lr-violet); }
 .lr-inspector-warnings { display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; list-style: none; }
 .lr-inspector-warning { padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); border-radius: 7px; color: var(--lr-red); background: color-mix(in srgb, var(--lr-red) 10%, transparent); font-size: 10.5px; font-weight: 650; }
+/* Corrective pass (failed first eBay draft) — View error / Retry failed
+   draft, directly beneath the eBay workflow status pill. */
+.lr-ebay-failed-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.lr-ebay-failed-buttons { display: flex; gap: 8px; }
+.lr-ebay-failed-detail { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); border-radius: 8px; background: color-mix(in srgb, var(--lr-red) 8%, transparent); }
+.lr-ebay-failed-stage { margin: 0 0 4px; color: var(--lr-text); font-size: 10.5px; font-weight: 700; }
+.lr-ebay-failed-message { margin: 0; color: var(--lr-text); font-size: 11px; line-height: 1.4; word-break: break-word; }
 /* Capped at 2 lines — a long generated title must never grow to 3-4 lines
    and push the rest of the compact card down. */
 .lr-inspector-title { overflow: hidden; display: -webkit-box; margin: 0; color: var(--lr-text); font-size: 14px; font-weight: 700; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
