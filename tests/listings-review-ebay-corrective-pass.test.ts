@@ -22,24 +22,25 @@ const cssSource = read("app/globals.css");
  * tests exist to catch a REGRESSION in the exact mechanism that produced
  * that verified behaviour, not to reprove the behaviour itself.
  */
-describe("STRUCTURAL — Defect 2/5: one authoritative eligibility calculation, not a duplicate", () => {
-  it("the bulk eligibility count is computed by calling the SAME evaluateEbayDraftEligibility function the server uses — never a separate hand-rolled boolean check", () => {
-    expect(workspaceSource).toContain('import { evaluateEbayDraftEligibility, type EbayDraftEligibilityResult } from "@/lib/listing-studio/ebay-draft-eligibility"');
-    expect(workspaceSource).toContain("evaluateEbayDraftEligibility({");
+describe("STRUCTURAL — Defect 2/5: one authoritative eligibility calculation, not a duplicate (PHASE 4 update — now the Sell Feed API pipeline's own function)", () => {
+  it("the bulk eligibility count is computed by calling the SAME evaluateEbayFeedDraftEligibility function the server uses — never a separate hand-rolled boolean check", () => {
+    expect(workspaceSource).toContain('import { evaluateEbayFeedDraftEligibility, type EbayFeedDraftEligibilityResult } from "@/lib/listing-studio/ebay-feed/feed-draft-eligibility"');
+    expect(workspaceSource).toContain("evaluateEbayFeedDraftEligibility({");
   });
 
-  it("REGRESSION GUARD: the client no longer has its own duplicate boolean eligibility expression requiring merchantLocationKey directly", () => {
+  it("REGRESSION GUARD: the client has no duplicate boolean eligibility expression requiring policy/location fields directly (the Feed template has no column for either — see feed-draft-eligibility.ts's own header)", () => {
     expect(workspaceSource).not.toMatch(/Boolean\(s\.merchantLocationKey\)/);
+    expect(workspaceSource).not.toMatch(/fulfillmentPolicyStale|returnPolicyStale|paymentPolicyStale/);
   });
 
   it("never shows an unexplained 'Create 0' — a distinct, deduplicated blocking-reason list renders whenever the selection is non-empty and nothing is eligible", () => {
     expect(workspaceSource).toContain("ebayIneligibleBlockingReasons");
-    expect(workspaceSource).toContain("isn't ready for an eBay draft yet");
+    expect(workspaceSource).toContain("isn't ready for a Seller Hub draft yet");
   });
 
-  it("the client-side eligibility inputs mirror every field resolveEbayDraftEligibilityForProducts passes server-side (lib/listing-studio/ebay-draft-batches.ts), so the two can never silently diverge", () => {
-    const serverSource = read("lib/listing-studio/ebay-draft-batches.ts");
-    for (const field of ["hasEbayPreparation", "accountUsable", "alreadyHasOffer", "contentReady", "hasValidPrice", "hasPhoto", "hasSku", "hasQuantity", "fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId", "merchantLocationKey"]) {
+  it("the client-side eligibility inputs mirror every field resolveEbayFeedDraftEligibilityForProducts passes server-side (lib/listing-studio/ebay-feed/feed-batches.ts), so the two can never silently diverge", () => {
+    const serverSource = read("lib/listing-studio/ebay-feed/feed-batches.ts");
+    for (const field of ["hasEbayPreparation", "accountUsable", "alreadyHasFeedDraft", "contentReady", "hasValidPrice", "hasPhoto", "hasSku", "hasQuantity", "hasCategoryId"]) {
       expect(serverSource, `server input field: ${field}`).toContain(field);
       expect(workspaceSource, `client input field: ${field}`).toContain(field);
     }
@@ -145,42 +146,16 @@ describe("STRUCTURAL — no publish-capable eBay operation was introduced by thi
   });
 });
 
-describe("STRUCTURAL — Phase 6/7/8 (15-17, 25-26): genuine retry UI, never relabelled 'Create new draft'", () => {
-  const panelSource = read("components/listings-review/ListingDetailsPanel.tsx");
-
-  it("REQUIREMENT 15: a failed eBay item shows a 'View error' control", () => {
-    expect(panelSource).toContain('{expanded ? "Hide error" : "View error"}');
-  });
-
-  it("REQUIREMENT 16: the retry control is labelled 'Retry failed draft' — never 'Create new draft' or a bare 'Create'", () => {
-    expect(panelSource).toContain(">Retry failed draft<");
-    expect(panelSource).not.toMatch(/Create new draft/i);
-  });
-
-  it("REQUIREMENT 16: retry is only offered once both a batchId and itemId are known — never guessed/fabricated ids", () => {
-    expect(panelSource).toContain("ebay.batchId && ebay.itemId &&");
-  });
-
-  it("the retry action is gated behind a confirmation dialog stating reconciliation-first, offer reuse, and never-publish — never fired directly from the button", () => {
-    expect(workspaceSource).toContain("Retry this failed eBay draft?");
-    expect(workspaceSource).toMatch(/will first check with eBay/);
-    expect(workspaceSource).toMatch(/reused \(never duplicated\)/);
-    expect(workspaceSource).toMatch(/never publishes anything/);
-  });
-
-  it("REQUIREMENT: the retry confirm button calls the dedicated retry route, never the bulk create-drafts route", () => {
-    expect(workspaceSource).toMatch(/ebay-draft-batches\/\$\{ebayRetryTarget\.batchId\}\/items\/\$\{ebayRetryTarget\.itemId\}\/retry/);
-  });
-
-  it("shows which pipeline stage failed via a stage-label lookup — never invents detail beyond the real error codes lib/listing-studio/ebay-draft-batches.ts actually produces", () => {
-    const batchesSource = read("lib/listing-studio/ebay-draft-batches.ts");
-    for (const code of ["ebay_inventory_item_error", "ebay_offer_error", "ebay_verification_error"]) {
-      expect(batchesSource, code).toContain(`"${code}"`);
-      expect(panelSource, code).toContain(code);
-    }
-  });
-
-  it("REQUIREMENT 26: 'Drafts only — never publishes' wording is untouched by this pass", () => {
+// PHASE 3 (hard-retire legacy Inventory API writes) — the "genuine retry
+// UI" describe block that used to live here is REMOVED, not merely
+// updated: it tested the per-item "Retry failed draft" flow, which this
+// task retires entirely (see
+// components/listings-review/ListingDetailsPanel.tsx's own
+// EbayFailedDraftActions corrective-pass comment, and
+// tests/ebay-feed-listings-review-wiring.test.ts's own "retry is
+// genuinely gone from the UI" proof, which replaces this coverage).
+describe("STRUCTURAL — 'Drafts only — never publishes' wording is untouched by this pass", () => {
+  it("still present", () => {
     expect(workspaceSource).toContain("Drafts only — never publishes");
   });
 });

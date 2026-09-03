@@ -250,7 +250,7 @@ describe("GET /api/listing-studio/listings-review — Business-rule follow-up co
   it("REGRESSION: this is a read-time-only display correction — the route calls supabaseRequest ONLY for read-only status RPCs (see the dedicated 'is read-time-only' test below), never a table write, so it structurally cannot write anything back to the database", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
     const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
-    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status"]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status", "rpc/listing_studio_latest_ebay_feed_status"]);
   });
 
   it("REGRESSION: 'boys'/'girls' on a non-footwear product type is displayed completely unchanged", async () => {
@@ -323,7 +323,7 @@ describe("GET /api/listing-studio/listings-review — business-rule follow-up co
   it("is read-time-only — every supabaseRequest call it makes is a read-only RPC (rpc/listing_studio_latest_extension_status and, since Stage 6, rpc/listing_studio_latest_ebay_draft_status — both language sql stable), never a table write", async () => {
     const routeSource = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/listings-review/route.ts", "utf8"));
     const supabaseRequestCallSites = [...routeSource.matchAll(/supabaseRequest\((["'`])([^"'`]*)\1/g)].map(match => match[2]);
-    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status"]);
+    expect(supabaseRequestCallSites).toEqual(["rpc/listing_studio_latest_extension_status", "rpc/listing_studio_latest_ebay_draft_status", "rpc/listing_studio_latest_ebay_feed_status"]);
   });
 
   it("degrades gracefully when the extension-status RPC isn't available yet (e.g. before its SQL migration has been run) — the page still loads, every listing just falls back to no known workflow status, rather than the whole route failing", async () => {

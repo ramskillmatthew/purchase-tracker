@@ -58,4 +58,30 @@ describe("parseFeedResultCsv — fail-closed, disclosed-uncertainty result parsi
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].sku).toBe("1644");
   });
+
+  describe("PHASE 7 — duplicate SKU detection (ambiguous correlation fails closed)", () => {
+    it("a SKU appearing twice in the result file is treated as a failure for BOTH occurrences, never 'last one wins'", () => {
+      const csv = 'Custom label (SKU),Status\r\n1644,Success\r\n1644,Error\r\n';
+      const result = parseFeedResultCsv(csv);
+      expect(result.duplicateSkus).toEqual(["1644"]);
+      expect(result.rows).toHaveLength(2);
+      for (const row of result.rows) {
+        expect(row.ok).toBe(false);
+        expect(row.message).toContain("listed this SKU 2 times");
+      }
+    });
+
+    it("a duplicate SKU is reported even when every occurrence individually looked like a success", () => {
+      const csv = 'Custom label (SKU),Status\r\n1644,Success\r\n1644,Success\r\n';
+      const result = parseFeedResultCsv(csv);
+      expect(result.rows.every(r => r.ok === false)).toBe(true);
+    });
+
+    it("a genuinely unique SKU set reports no duplicates", () => {
+      const csv = 'Custom label (SKU),Status\r\n1,Success\r\n2,Success\r\n3,Error\r\n';
+      const result = parseFeedResultCsv(csv);
+      expect(result.duplicateSkus).toEqual([]);
+      expect(result.rows.filter(r => r.ok).map(r => r.sku)).toEqual(["1", "2"]);
+    });
+  });
 });

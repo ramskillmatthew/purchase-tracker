@@ -24,6 +24,19 @@ export type BatchBoxViewModel = {
   pairingCode: string | null;
   expiresAt: string | null;
   codeCopied: boolean;
+  // PHASE 5 (Listings Review UI wiring, eBay Seller Hub drafts) — this
+  // component's default `isTerminal`/`terminalSummary` logic below is
+  // Vinted-extension-specific (its own status vocabulary, and the
+  // corrective-pass bug this fixes: the default terminal summary
+  // literally said "saved to Vinted drafts", which was simply wrong for
+  // an eBay batch reusing this same presentational component). A caller
+  // for a DIFFERENT pipeline (this pipeline's own status vocabulary
+  // includes "completed_with_errors", which isBatchStatusTerminal below
+  // doesn't recognise) supplies both overrides so this component never
+  // has to guess at a status vocabulary it wasn't built for.
+  isTerminalOverride?: boolean;
+  terminalSummaryOverride?: string;
+  isInProgressOverride?: boolean;
 };
 
 function pluralize(count: number, noun: string): string {
@@ -58,8 +71,8 @@ function BatchBox({ box, onCancel, onDismissBox, onCopyCode }: {
   onCopyCode: (batchId: string) => void;
 }) {
   const isPending = box.status === "pending";
-  const isTerminal = !isPending && isBatchStatusTerminal(box.status);
-  const isClaimed = !isPending && (box.status === "claimed" || box.status === "in_progress");
+  const isTerminal = box.isTerminalOverride ?? (!isPending && isBatchStatusTerminal(box.status));
+  const isClaimed = box.isInProgressOverride ?? (!isPending && (box.status === "claimed" || box.status === "in_progress"));
   const isWaitingForPairing = !isPending && box.status === "pending_claim";
   const processedCount = box.completedCount + box.failedCount;
 
@@ -95,7 +108,7 @@ function BatchBox({ box, onCancel, onDismissBox, onCopyCode }: {
       <button type="button" className="button-secondary lr-batch-box-cancel" onClick={() => onCancel(box.batchId)}>Cancel batch</button>
     </div>}
 
-    {isTerminal && <p className="lr-batch-box-status">{terminalSummary(box)}</p>}
+    {isTerminal && <p className="lr-batch-box-status">{box.terminalSummaryOverride ?? terminalSummary(box)}</p>}
   </div>;
 }
 

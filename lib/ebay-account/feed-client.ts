@@ -196,7 +196,46 @@ export async function getFeedTasks(accessToken: string, limit = 20): Promise<Fee
 }
 
 const MAX_RESULT_FILE_BYTES = 20 * 1024 * 1024; // 20MB decompressed cap — defensive bound against a corrupt or hostile response, not a real expected size for a handful of draft rows.
+// CORRECTIVE PASS (audit point 8) — the raw, POSSIBLY-COMPRESSED download
+// itself must also be bounded, independently of MAX_RESULT_FILE_BYTES
+// (which only bounds the DECOMPRESSED output). Before this fix,
+// `response.arrayBuffer()` fully buffered the entire response body into
+// memory with no size limit at all, before this function had any chance to
+// even check whether it was gzipped — a corrupt or hostile response of
+// unbounded size would be read to completion regardless. Slightly larger
+// than the decompressed cap (compressed data is normally smaller than its
+// decompressed form for real CSV-shaped content).
+const MAX_RAW_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
+
+/** Reads a Response body as a Buffer, aborting as soon as more than
+ * `maxBytes` have been received rather than buffering an unbounded amount
+ * first. Falls back to the simpler `arrayBuffer()` path only if the
+ * runtime genuinely has no streaming body (defensive; every real fetch
+ * Response in Node/edge does). */
+async function readBoundedBuffer(response: Response, maxBytes: number): Promise<Buffer> {
+  const body = response.body;
+  if (!body) return Buffer.from(await response.arrayBuffer());
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new Error(`eBay's Feed result file exceeded the ${maxBytes}-byte safety limit and was not fully downloaded.`);
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map(c => Buffer.from(c)));
+}
 
 /**
  * Downloads and returns the task's result file as plain text. eBay
@@ -207,15 +246,17 @@ const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
  * result files this session, so this function detects gzip by its actual
  * magic bytes (0x1f 0x8b) rather than trusting a header, and decompresses
  * only when those bytes are present; a genuinely plain-text CSV response
- * passes through unchanged either way. Bounded to MAX_RESULT_FILE_BYTES
- * decompressed to guard against a corrupt or oversized response.
+ * passes through unchanged either way. Bounded TWICE: the raw download
+ * itself (MAX_RAW_DOWNLOAD_BYTES, streamed rather than buffered
+ * unbounded) and the decompressed output (MAX_RESULT_FILE_BYTES) — see
+ * readBoundedBuffer's own comment for why both bounds are needed.
  */
 export async function getFeedResultFile(accessToken: string, taskId: string): Promise<string> {
   assertAllowedFeedOperation("getFeedResultFile");
   if (!taskId || !/^[A-Za-z0-9-]{1,64}$/.test(taskId)) throw new Error("Invalid eBay Feed task ID.");
   const response = await feedRequest(accessToken, "GET", `/sell/feed/v1/task/${encodeURIComponent(taskId)}/download_result_file`);
   if (!response.ok) throw await feedError(response, "eBay Feed result file could not be downloaded.");
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readBoundedBuffer(response, MAX_RAW_DOWNLOAD_BYTES);
   const isGzip = buffer.length >= 2 && buffer.subarray(0, 2).equals(GZIP_MAGIC);
   if (!isGzip) return buffer.toString("utf-8");
   let decompressed: Buffer;
@@ -227,6 +268,28 @@ export async function getFeedResultFile(accessToken: string, taskId: string): Pr
     throw error;
   }
   return decompressed.toString("utf-8");
+}
+
+/** Read-only existence check for a task's already-uploaded input file —
+ * the authoritative way to know "has a file already been uploaded to this
+ * task" without re-uploading, used by the "uploading" pipeline stage to
+ * avoid ever sending a second file to a task that already has one (audit
+ * point 13: a crash between a successful upload and this app persisting
+ * that fact must never cause a duplicate upload on retry). Returns true
+ * for a 200 (a file exists), false for a 404 (no file uploaded yet); any
+ * other non-2xx response is a real error, never silently treated as
+ * either answer. */
+export async function feedTaskHasInputFile(accessToken: string, taskId: string): Promise<boolean> {
+  assertAllowedFeedOperation("getFeedInputFile");
+  if (!taskId || !/^[A-Za-z0-9-]{1,64}$/.test(taskId)) throw new Error("Invalid eBay Feed task ID.");
+  const response = await feedRequest(accessToken, "GET", `/sell/feed/v1/task/${encodeURIComponent(taskId)}/download_input_file`);
+  if (response.status === 404) return false;
+  if (!response.ok) throw await feedError(response, "Could not check whether this eBay draft file was already uploaded.");
+  // The body itself is never needed here — only whether one exists — but
+  // it must still be drained (bounded) so the connection is released
+  // cleanly rather than left half-read.
+  await readBoundedBuffer(response, MAX_RAW_DOWNLOAD_BYTES).catch(() => {});
+  return true;
 }
 
 /** Never used for a real network call — exists purely so a test can assert

@@ -16,6 +16,17 @@ describe("app/api/listing-studio/listings-review/route.ts — Milestone 5: read-
     expect(source).not.toContain("export async function DELETE");
   });
 
+  it("PHASE 4 — fetches the Sell Feed API pipeline's own status (rpc/listing_studio_latest_ebay_feed_status), independent of the legacy Inventory API status RPC, and exposes it as a separate ebayFeedStatus field, never merged into or overwriting the legacy ebayStatus field", () => {
+    expect(source).toContain("rpc/listing_studio_latest_ebay_feed_status");
+    expect(source).toContain("ebayFeedStatus:");
+    expect(source).toContain("ebayStatus:");
+    // Both degrade gracefully — a missing not-yet-applied migration for
+    // EITHER pipeline never fails the whole page.
+    const feedRpcIndex = source.lastIndexOf("rpc/listing_studio_latest_ebay_feed_status");
+    const feedBlock = source.slice(feedRpcIndex, feedRpcIndex + 300);
+    expect(feedBlock).toContain(".catch(() => [] as LatestEbayFeedStatusRow[])");
+  });
+
   it("excludes Unsorted and archived groups outright; a group with neither Vinted content NOR an eBay marketplace draft is excluded too, but ONE OF THE TWO is now enough (corrective pass — see tests/listings-review-purchase-lookup-route.test.ts's own 'canonical unified row model' describe block for the full behavioural proof)", () => {
     expect(source).toContain("status=neq.archived");
     expect(source).toContain("title=neq.${encodeURIComponent(UNSORTED_TITLE)}");

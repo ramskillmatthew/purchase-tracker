@@ -6,10 +6,15 @@ import {
   WORKFLOW_STATUS_LABELS, WORKFLOW_STATUS_TONE, READINESS_TONE_READY, READINESS_TONE_NEEDS_REVIEW,
   computeWorkflowSecondaryLine, type ExtensionWorkflowStatus,
 } from "@/lib/listing-studio/extension-workflow-status";
+// PHASE 4 (Listings Review UI wiring) — the eBay workflow column now
+// reflects the Sell Feed API pipeline (the one that creates a genuine
+// Seller Hub draft), never the retired Inventory API pipeline's own
+// vocabulary (lib/listing-studio/ebay-workflow-status.ts, kept only for
+// that retired pipeline's own historical batch display elsewhere).
 import {
-  EBAY_WORKFLOW_STATUS_LABELS, EBAY_WORKFLOW_STATUS_TONE, computeEbayWorkflowSecondaryLine, isEbayWorkflowInProgress,
-  type EbayWorkflowStatus,
-} from "@/lib/listing-studio/ebay-workflow-status";
+  EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
+  type EbayFeedItemStatus,
+} from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu, { type OverflowMenuItem } from "@/components/listing-studio/OverflowMenu";
@@ -46,7 +51,7 @@ export type ListingTableRow = {
   // spec's own "Visibility rules" for the workflow toggle).
   hasEbayPreparation: boolean;
   ebayContentReady: boolean;
-  ebayWorkflowStatus: EbayWorkflowStatus | null;
+  ebayWorkflowStatus: EbayFeedItemStatus | null;
   ebayQueuePosition: number | null;
   ebayErrorMessage: string | null;
   ebaySellingPricePence: number | null;
@@ -88,11 +93,11 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
   if (!row.hasEbayPreparation) {
     return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence };
   }
-  const label = row.ebayWorkflowStatus ? EBAY_WORKFLOW_STATUS_LABELS[row.ebayWorkflowStatus] : (row.ebayContentReady ? "Ready" : "Needs review");
-  const tone = row.ebayWorkflowStatus ? EBAY_WORKFLOW_STATUS_TONE[row.ebayWorkflowStatus] : (row.ebayContentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
+  const label = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[row.ebayWorkflowStatus] : (row.ebayContentReady ? "Ready" : "Needs review");
+  const tone = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[row.ebayWorkflowStatus] : (row.ebayContentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
   return {
-    label, tone, pulse: isEbayWorkflowInProgress(row.ebayWorkflowStatus),
-    secondaryLine: computeEbayWorkflowSecondaryLine({ workflowStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: row.ebayErrorMessage }),
+    label, tone, pulse: isEbayFeedItemInProgress(row.ebayWorkflowStatus),
+    secondaryLine: computeEbayFeedWorkflowSecondaryLine({ itemStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: row.ebayErrorMessage }),
     pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
   };
 }

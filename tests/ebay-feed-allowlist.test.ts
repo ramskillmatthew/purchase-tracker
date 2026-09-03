@@ -9,7 +9,7 @@ import {
 
 describe("assertAllowedFeedOperation — Feed API HTTP operation allowlist", () => {
   it("permits exactly the operations this feature needs", () => {
-    for (const op of ["createFeedTask", "uploadFeedFile", "getFeedTask", "getFeedTasks", "getFeedResultFile"]) {
+    for (const op of ["createFeedTask", "uploadFeedFile", "getFeedTask", "getFeedTasks", "getFeedResultFile", "getFeedInputFile"]) {
       expect(() => assertAllowedFeedOperation(op)).not.toThrow();
     }
   });

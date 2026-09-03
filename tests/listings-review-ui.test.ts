@@ -61,7 +61,7 @@ describe("components/listings-review/ListingsReviewWorkspace.tsx — Milestone 5
       expect(source).toContain('if (topTab === "needs_review") {');
       expect(source).toContain('if (topTab === "drafted") {');
       expect(source).toContain('workflowMarketplaceView === "VINTED" ? (!row.hasVintedPreparation || row.status === "needs_review") : (!row.hasEbayPreparation || !row.ebayContentReady)');
-      expect(source).toContain('workflowMarketplaceView === "VINTED" ? row.workflowStatus !== "drafted" : row.ebayWorkflowStatus !== "completed"');
+      expect(source).toContain('workflowMarketplaceView === "VINTED" ? row.workflowStatus !== "drafted" : row.ebayWorkflowStatus !== "succeeded"');
       expect(source).toContain("for (const filter of activeQuickFilters) if (!matchesQuickFilter(row, filter)) return false;");
     });
 
@@ -909,12 +909,12 @@ describe("Visual-accuracy redesign — 4 real KPI cards, canonical (no duplicate
   it("draftsCount/sentCount come from workflow status (Vinted: via the shared WORKFLOW_STATUS_TAB_GROUPS; eBay: via the equivalent eBay draft-batch stages) — never re-implemented ad hoc for either channel", () => {
     expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.drafts as string[]).includes(row.workflowStatus)");
     expect(source).toContain("WORKFLOW_STATUS_TAB_GROUPS.sent as string[]).includes(row.workflowStatus)");
-    expect(source).toContain('row.ebayWorkflowStatus === "completed"');
+    expect(source).toContain('row.ebayWorkflowStatus === "succeeded"');
     expect(source).toContain("EBAY_IN_PROGRESS_STATUSES as string[]).includes(row.ebayWorkflowStatus)");
   });
 
   it("draftingCount — the 4th KPI card — comes from real, persisted extension-item (or eBay draft-batch-item) state, never a client-only guess, and is marketplace-aware", () => {
-    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.workflowStatus === "in_progress" : isEbayWorkflowInProgress\(row\.ebayWorkflowStatus\)/);
+    expect(source).toMatch(/workflowMarketplaceView === "VINTED" \? row\.workflowStatus === "in_progress" : isEbayFeedItemInProgress\(row\.ebayWorkflowStatus\)/);
   });
 
   it("failedCount is computed and exposed to the Filters control — a failed listing is always visible somewhere, never hidden — and is marketplace-aware", () => {
@@ -1382,9 +1382,9 @@ describe("Multi-batch support — batch box grid replaces the old single compact
   // would be left showing a dead pairing code indefinitely instead of
   // collapsing to its terminal summary + × state.
   it("REGRESSION: a box's terminal branch is independent of (checked ahead of) its pairing/claimed branches, so a batch cancelled pre-claim still renders its terminal summary, not a dead pairing code", () => {
-    expect(gridSource).toContain("const isTerminal = !isPending && isBatchStatusTerminal(box.status);");
+    expect(gridSource).toContain("const isTerminal = box.isTerminalOverride ?? (!isPending && isBatchStatusTerminal(box.status));");
     const bodyIndex = gridSource.indexOf("return <div className={`lr-batch-box");
-    const isTerminalJsxIndex = gridSource.indexOf("{isTerminal && <p className=\"lr-batch-box-status\">{terminalSummary(box)}</p>}");
+    const isTerminalJsxIndex = gridSource.indexOf("{isTerminal && <p className=\"lr-batch-box-status\">{box.terminalSummaryOverride ?? terminalSummary(box)}</p>}");
     expect(bodyIndex).toBeGreaterThan(-1);
     expect(isTerminalJsxIndex).toBeGreaterThan(bodyIndex);
   });

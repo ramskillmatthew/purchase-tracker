@@ -23,6 +23,18 @@ export type EbayFeedBatchStatus = typeof EBAY_FEED_BATCH_STATUSES[number];
 export const EBAY_FEED_ITEM_STATUSES = ["queued", "uploaded", "awaiting_result", "succeeded", "failed", "cancelled"] as const;
 export type EbayFeedItemStatus = typeof EBAY_FEED_ITEM_STATUSES[number];
 
+// The status actually displayed for a row — everything except "cancelled"
+// (a cancelled item falls back to null/readiness display), mirroring
+// ebay-workflow-status.ts's own EbayWorkflowStatus/computeEbayDraftWorkflowStatus
+// exactly.
+export type EbayFeedWorkflowStatus = Exclude<EbayFeedItemStatus, "cancelled">;
+
+export function computeEbayFeedItemWorkflowStatus(itemStatus: EbayFeedItemStatus | string | null | undefined): EbayFeedWorkflowStatus | null {
+  if (!itemStatus || itemStatus === "cancelled") return null;
+  if ((EBAY_FEED_ITEM_STATUSES as readonly string[]).includes(itemStatus)) return itemStatus as EbayFeedWorkflowStatus;
+  return null;
+}
+
 export function isEbayFeedBatchStatusTerminal(status: string): boolean {
   return status === "completed" || status === "completed_with_errors" || status === "failed" || status === "cancelled";
 }
@@ -72,6 +84,45 @@ const IN_PROGRESS_BATCH_STATUSES: readonly EbayFeedBatchStatus[] = [
 ];
 export function isEbayFeedBatchInProgress(status: EbayFeedBatchStatus | string): boolean {
   return (IN_PROGRESS_BATCH_STATUSES as string[]).includes(status);
+}
+
+// PHASE 4 (Listings Review UI wiring) — the per-ITEM equivalents of the
+// batch-level maps above, for the single-listing "workflow" chip
+// (ListingsTable's own eBay column, ListingDetailsPanel's own eBay tab) —
+// mirrors ebay-workflow-status.ts's own EBAY_WORKFLOW_STATUS_TONE /
+// isEbayWorkflowInProgress / computeEbayWorkflowSecondaryLine exactly, for
+// this pipeline's own item-status vocabulary.
+export const EBAY_FEED_ITEM_STATUS_TONE: Record<EbayFeedItemStatus, string> = {
+  queued: "#8B7CFF",
+  uploaded: "#3F8CFF",
+  awaiting_result: "#3F8CFF",
+  succeeded: "#2FCB75",
+  failed: "#FF4D57",
+  cancelled: "#8A8F98",
+};
+
+const IN_PROGRESS_ITEM_STATUSES: readonly EbayFeedItemStatus[] = ["queued", "uploaded", "awaiting_result"];
+export function isEbayFeedItemInProgress(status: EbayFeedItemStatus | null): boolean {
+  return status !== null && (IN_PROGRESS_ITEM_STATUSES as string[]).includes(status);
+}
+
+/** The one place a truthful secondary line under a per-listing eBay Feed
+ * workflow status is ever built — mirrors
+ * ebay-workflow-status.ts's own computeEbayWorkflowSecondaryLine exactly.
+ * Every value shown is real, already-persisted data. */
+export function computeEbayFeedWorkflowSecondaryLine(input: {
+  itemStatus: EbayFeedItemStatus | null;
+  queuePosition: number | null;
+  errorMessage: string | null;
+}): string | null {
+  switch (input.itemStatus) {
+    case "queued":
+      return input.queuePosition !== null ? `Position ${input.queuePosition + 1}` : null;
+    case "failed":
+      return input.errorMessage || null;
+    default:
+      return null;
+  }
 }
 
 /** The link every "completed" surface (batch card, activity row, per-item

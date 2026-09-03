@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}));
 const {
   getMarketplaceDraft, patchMarketplaceDraft,
   getEbayConnection, getValidEbayAccessToken,
-  createFeedTask, uploadFeedFile, getFeedTask, getFeedResultFile,
+  createFeedTask, uploadFeedFile, getFeedTask, getFeedResultFile, feedTaskHasInputFile,
   createSignedDownloadUrl,
 } = vi.hoisted(() => ({
   getMarketplaceDraft: vi.fn(async (_ownerId: string, _productDraftId: string, _marketplace: "EBAY_UK") => null as unknown),
@@ -16,11 +16,12 @@ const {
   uploadFeedFile: vi.fn(async (_accessToken: string, _taskId: string, _csv: string) => {}),
   getFeedTask: vi.fn(async (_accessToken: string, _taskId: string) => ({ taskId: "task-1", feedType: "FX_LISTING", status: "COMPLETED", creationDate: null, completionDate: null })),
   getFeedResultFile: vi.fn(async (_accessToken: string, _taskId: string) => 'Custom label (SKU),Status\r\n1644,Success\r\n'),
+  feedTaskHasInputFile: vi.fn(async (_accessToken: string, _taskId: string) => false),
   createSignedDownloadUrl: vi.fn(async (_bucket: string, _path: string, _expiresInSeconds: number) => "https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc"),
 }));
 vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForProducts: vi.fn(async () => new Map()) }));
 vi.mock("@/lib/ebay-account/client", () => ({ getEbayConnection, getValidEbayAccessToken }));
-vi.mock("@/lib/ebay-account/feed-client", () => ({ createFeedTask, uploadFeedFile, getFeedTask, getFeedResultFile }));
+vi.mock("@/lib/ebay-account/feed-client", () => ({ createFeedTask, uploadFeedFile, getFeedTask, getFeedResultFile, feedTaskHasInputFile }));
 vi.mock("@/lib/listing-studio/storage-rest", () => ({
   createSignedDownloadUrl,
   StorageBucketMissingError: class StorageBucketMissingError extends Error {},
@@ -178,7 +179,7 @@ beforeEach(() => {
   vi.resetModules();
   getMarketplaceDraft.mockReset(); patchMarketplaceDraft.mockReset();
   getEbayConnection.mockReset(); getValidEbayAccessToken.mockReset();
-  createFeedTask.mockReset(); uploadFeedFile.mockReset(); getFeedTask.mockReset(); getFeedResultFile.mockReset();
+  createFeedTask.mockReset(); uploadFeedFile.mockReset(); getFeedTask.mockReset(); getFeedResultFile.mockReset(); feedTaskHasInputFile.mockReset();
   createSignedDownloadUrl.mockReset();
 
   getMarketplaceDraft.mockResolvedValue(marketplaceDraft());
@@ -188,6 +189,7 @@ beforeEach(() => {
   uploadFeedFile.mockResolvedValue(undefined);
   getFeedTask.mockResolvedValue({ taskId: "task-1", feedType: "FX_LISTING", status: "COMPLETED", creationDate: null, completionDate: null });
   getFeedResultFile.mockResolvedValue('Custom label (SKU),Status\r\n1644,Success\r\n');
+  feedTaskHasInputFile.mockResolvedValue(false);
   createSignedDownloadUrl.mockResolvedValue("https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc");
 });
 
@@ -233,8 +235,58 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
     await withFakeDb(batch, items, async () => {
       const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(feedTaskHasInputFile).toHaveBeenCalledWith("token-1", "task-1");
       expect(uploadFeedFile).toHaveBeenCalledWith("token-1", "task-1", expect.any(String));
       expect(createFeedTask).not.toHaveBeenCalled();
+      expect(batch.status).toBe("processing");
+    });
+  });
+
+  it("AUDIT POINT 13: if eBay already has an input file for this task (a crash after a previous successful upload but before local persistence), never uploads a second time — just advances", async () => {
+    feedTaskHasInputFile.mockResolvedValue(true);
+    const batch = fakeBatch({ status: "uploading", ebay_task_id: "task-1" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(feedTaskHasInputFile).toHaveBeenCalledWith("token-1", "task-1");
+      expect(uploadFeedFile).not.toHaveBeenCalled();
+      expect(batch.status).toBe("processing");
+      expect(items[0].status).toBe("uploaded");
+    });
+  });
+
+  it("AUDIT POINT 13: if the check for an existing input file itself fails, the batch fails closed rather than guessing whether to upload", async () => {
+    feedTaskHasInputFile.mockRejectedValue(new Error("network error"));
+    const batch = fakeBatch({ status: "uploading", ebay_task_id: "task-1" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(uploadFeedFile).not.toHaveBeenCalled();
+      expect(batch.status).toBe("failed");
+    });
+  });
+
+  it("AUDIT POINT 12: a batch that keeps failing the same fast stage is stopped after a bounded number of attempts, never retried forever", async () => {
+    const batch = fakeBatch({ status: "creating_task", attempt_count: 20 });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(batch.status).toBe("failed");
+      expect(batch.error_message).toContain("21 attempts"); // 20 pre-existing + 1 from this tick's own claim
+      expect(createFeedTask).not.toHaveBeenCalled();
+    });
+  });
+
+  it("AUDIT POINT 12: the attempt cap does NOT apply to 'processing' — a batch legitimately polling many times is never wrongly killed", async () => {
+    getFeedTask.mockResolvedValue({ taskId: "task-1", feedType: "FX_LISTING", status: "IN_PROCESS", creationDate: null, completionDate: null });
+    const batch = fakeBatch({ status: "processing", ebay_task_id: "task-1", attempt_count: 40 });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
       expect(batch.status).toBe("processing");
     });
   });
@@ -277,6 +329,35 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
     });
   });
 
+  it("PHASE 9.23: a local item with NO matching row at all in eBay's result file fails closed, never silently assumed successful", async () => {
+    getFeedResultFile.mockResolvedValue('Custom label (SKU),Status\r\n9999,Success\r\n'); // 1644 (our real item) is simply absent
+    const batch = fakeBatch({ status: "parsing_result", ebay_task_id: "task-1" });
+    const items = [fakeItem({ sku: "1644" })];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(items[0].status).toBe("failed");
+      expect(items[0].error_message).toContain("did not report a result");
+      expect(patchMarketplaceDraft).not.toHaveBeenCalledWith("owner-1", "mdraft-1", expect.objectContaining({ ebay_feed_draft_created_at: expect.anything() }));
+    });
+  });
+
+  it("PHASE 9.27: a failed item's underlying listing is never marked as already having a Seller Hub draft — it stays eligible for a fresh batch", async () => {
+    getFeedResultFile.mockResolvedValue('Custom label (SKU),Status,Errors\r\n1644,Error,Category ID is invalid\r\n');
+    const batch = fakeBatch({ status: "parsing_result", ebay_task_id: "task-1" });
+    const items = [fakeItem({ sku: "1644" })];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(items[0].status).toBe("failed");
+      // The only patchMarketplaceDraft calls for this failed item must
+      // never set ebay_feed_draft_created_at — that field is the ONE
+      // signal eligibility uses to exclude an already-drafted listing.
+      const calls = (patchMarketplaceDraft as ReturnType<typeof vi.fn>).mock.calls.filter(c => c[1] === "mdraft-1");
+      for (const call of calls) expect(call[2]).not.toHaveProperty("ebay_feed_draft_created_at");
+    });
+  });
+
   it("marks the marketplace draft's ebay_feed_draft_created_at only for a genuinely succeeded row, never for a failed one", async () => {
     getFeedResultFile.mockResolvedValue('Custom label (SKU),Status\r\n1644,Success\r\n');
     const batch = fakeBatch({ status: "parsing_result", ebay_task_id: "task-1" });
@@ -293,6 +374,30 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
     expect(source).not.toMatch(/from "@\/lib\/ebay-account\/inventory-client"/);
     expect(source).not.toContain("createOrReplaceInventoryItem");
     expect(source).not.toContain("createOffer(");
+  });
+
+  it("PHASE 6 (respect Retry-After): a 429 with a Retry-After hint never permanently fails the batch — it re-advances to the SAME status so the next tick retries fresh", async () => {
+    const rateLimitError = Object.assign(new Error("rate limited"), { status: 429, retryAfterSeconds: 5 });
+    createFeedTask.mockRejectedValue(rateLimitError);
+    const batch = fakeBatch({ status: "creating_task" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(batch.status).toBe("creating_task"); // unchanged, never "failed"
+      expect(batch.error_code).toBeNull();
+    });
+  });
+
+  it("PHASE 6: a non-429 error still fails the batch normally, even with an unrelated retryAfterSeconds-shaped property absent", async () => {
+    createFeedTask.mockRejectedValue(new Error("genuine failure, not rate limited"));
+    const batch = fakeBatch({ status: "creating_task" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(batch.status).toBe("failed");
+    });
   });
 
   it("an eligibility failure at the 'queued' stage marks the whole batch failed, with the offending SKU named", async () => {
@@ -338,6 +443,84 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
       const result = await runEbayFeedBatchProcessTick("owner-1", "batch-1");
       expect(result.claimedCount).toBe(0);
       expect(result.hasMoreWork).toBe(false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------
+// PHASE 2/4 — pre-submission preview. Lightweight fake DB (no batch RPCs
+// involved), separate from the batch-processing harness above.
+async function withPreviewFakeDb<T>(fn: () => Promise<T>, opts: { photoCount?: number } = {}): Promise<T> {
+  const photoCount = opts.photoCount ?? 1;
+  const supabaseRequestAll = vi.fn(async (path: string) => {
+    if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
+    if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) return photoCount > 0 ? [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }] : [];
+    if (path.startsWith("listing_draft_images?draft_id=eq.")) return Array.from({ length: photoCount }, (_, i) => ({ id: `img-${i}` }));
+    return [];
+  });
+  const supabaseRequest = vi.fn(async () => new Response(null, { status: 204 }));
+  vi.doMock("@/lib/supabase", () => ({ supabaseRequest, supabaseRequestAll }));
+  vi.resetModules();
+  return fn();
+}
+
+describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields transfer vs must be completed in Seller Hub", () => {
+  it("REQUIREMENT: reports the real, honest values that will transfer", async () => {
+    await withPreviewFakeDb(async () => {
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview, got: " + result.error);
+      expect(result.fields.Title).toBe("On Running Cloud 5");
+      expect(result.fields["Custom label (SKU)"]).toBe("1644");
+      expect(result.fields["Category ID"]).toBe("95672");
+    });
+  });
+
+  it("REQUIREMENT: business policies and inventory location are ALWAYS listed as completed-in-Seller-Hub — the real template has no column for either, for every draft", async () => {
+    await withPreviewFakeDb(async () => {
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview");
+      expect(result.completeInSellerHub.some(s => /policies/i.test(s))).toBe(true);
+      expect(result.completeInSellerHub.some(s => /location/i.test(s))).toBe(true);
+    });
+  });
+
+  it("REQUIREMENT: multiple uploaded photos are honestly disclosed — only the main one transfers", async () => {
+    await withPreviewFakeDb(async () => {
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview");
+      expect(result.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(true);
+    }, { photoCount: 4 });
+  });
+
+  it("a single photo does not spuriously claim additional photos need completing", async () => {
+    await withPreviewFakeDb(async () => {
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview");
+      expect(result.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(false);
+    }, { photoCount: 1 });
+  });
+
+  it("REQUIREMENT: a multi-value aspect is honestly disclosed — only the first value transfers", async () => {
+    await withPreviewFakeDb(async () => {
+      const { getMarketplaceDraft } = await import("@/lib/listing-studio/marketplace-drafts");
+      (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce(marketplaceDraft({ dynamicData: { Colour: { value: ["Red", "Blue"], source: "manual", confidence: "high", needsReview: false, userConfirmed: true, updatedAt: "x" } } }));
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview");
+      expect(result.completeInSellerHub.some(s => s.includes("Colour"))).toBe(true);
+    });
+  });
+
+  it("no signed photo URL token ever leaks into the preview", async () => {
+    await withPreviewFakeDb(async () => {
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      if ("error" in result) throw new Error("expected a preview");
+      expect(JSON.stringify(result)).not.toContain("token=abc");
     });
   });
 });

@@ -2,6 +2,6 @@
   "crons": [
     { "path": "/api/cron/yahoo-index", "schedule": "0 3 * * *" },
     { "path": "/api/cron/investments-refresh", "schedule": "0 6 * * *" },
-    { "path": "/api/cron/ebay-draft-processing", "schedule": "*/5 * * * *" }
+    { "path": "/api/cron/ebay-feed-processing", "schedule": "30 4 * * *" }
   ]
 }

@@ -28,7 +28,7 @@ import Papa from "papaparse";
  */
 
 export type FeedResultRow = { sku: string; ok: boolean; message: string | null; rawStatus: string | null };
-export type ParsedFeedResult = { rows: FeedResultRow[]; recognisedStatusColumn: boolean };
+export type ParsedFeedResult = { rows: FeedResultRow[]; recognisedStatusColumn: boolean; duplicateSkus: string[] };
 
 const SKU_COLUMN_CANDIDATES = ["custom label (sku)", "custom label", "sku"];
 const STATUS_COLUMN_CANDIDATES = ["status", "action status", "actionstatus", "result", "errors"];
@@ -65,9 +65,11 @@ export function parseFeedResultCsv(csv: string): ParsedFeedResult {
   const messageColumn = findColumn(headers, MESSAGE_COLUMN_CANDIDATES);
 
   const rows: FeedResultRow[] = [];
+  const skuOccurrences = new Map<string, number>();
   for (const record of parsed.data) {
     const sku = record[skuColumn]?.trim();
     if (!sku) continue;
+    skuOccurrences.set(sku, (skuOccurrences.get(sku) ?? 0) + 1);
     const rawStatus = statusColumn ? (record[statusColumn]?.trim() || null) : null;
     const rawMessage = messageColumn ? (record[messageColumn]?.trim() || null) : null;
     const statusLower = (rawStatus ?? "").toLowerCase();
@@ -85,5 +87,23 @@ export function parseFeedResultCsv(csv: string): ParsedFeedResult {
     });
   }
 
-  return { rows, recognisedStatusColumn: statusColumn !== null };
+  // PHASE 7 (result-parser hardening) — a SKU appearing more than once in
+  // eBay's own result file is an ambiguous correlation this application
+  // cannot safely resolve (which occurrence is the real outcome for that
+  // row?) — every occurrence is downgraded to a failure requiring review,
+  // never picking one arbitrarily (e.g. "last one wins", which the naive
+  // `new Map(rows.map(r => [r.sku, r]))` a caller might build would
+  // otherwise silently do).
+  const duplicateSkus = [...skuOccurrences.entries()].filter(([, count]) => count > 1).map(([sku]) => sku);
+  if (duplicateSkus.length > 0) {
+    const duplicateSet = new Set(duplicateSkus);
+    for (const row of rows) {
+      if (duplicateSet.has(row.sku)) {
+        row.ok = false;
+        row.message = `eBay's result file listed this SKU ${skuOccurrences.get(row.sku)} times — ambiguous, treated as a failure requiring manual review in Seller Hub.`;
+      }
+    }
+  }
+
+  return { rows, recognisedStatusColumn: statusColumn !== null, duplicateSkus };
 }

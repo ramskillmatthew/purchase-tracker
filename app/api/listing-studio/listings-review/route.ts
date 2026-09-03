@@ -20,6 +20,16 @@ export type LatestEbayDraftStatusRow = {
   started_at: string | null; completed_at: string | null;
 };
 
+// The Sell Feed API pipeline's own equivalent, from
+// rpc/listing_studio_latest_ebay_feed_status (supabase-ebay-feed-drafts.sql)
+// — wholly independent of LatestEbayDraftStatusRow above, which describes
+// the retired Inventory API pipeline's own, different objects.
+export type LatestEbayFeedStatusRow = {
+  marketplace_draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
+  ebay_task_id: string | null; error_code: string | null; error_message: string | null;
+  started_at: string | null; completed_at: string | null;
+};
+
 // Listings Review redesign — one row per draft, the most recent extension
 // batch-item status across EVERY batch the owner has ever sent (see
 // rpc/listing_studio_latest_extension_status in supabase-listing-studio.sql).
@@ -118,7 +128,7 @@ export async function GET() {
     // the whole purchases table. Empty when no listing has a SKU, in
     // which case zero purchase requests are made at all.
     const purchaseQueries = buildPurchaseSkuLookupQueries(drafts.map(draft => draft.sku));
-    const [images, categoriesById, purchaseRecordChunks, extensionStatusRows, ebayDraftsByProduct, ebayStatusRows] = await Promise.all([
+    const [images, categoriesById, purchaseRecordChunks, extensionStatusRows, ebayDraftsByProduct, ebayStatusRows, ebayFeedStatusRows] = await Promise.all([
       supabaseRequestAll<ImageRow>(
         `listing_draft_images?draft_id=in.(${draftIds.join(",")})&owner_id=eq.${user.id}&upload_state=eq.uploaded&select=id,draft_id,sort_order&order=sort_order.asc`,
       ),
@@ -179,13 +189,24 @@ export async function GET() {
       supabaseRequest("rpc/listing_studio_latest_ebay_draft_status", {
         method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
       }).then(response => response.json() as Promise<LatestEbayDraftStatusRow[]>).catch(() => [] as LatestEbayDraftStatusRow[]),
+      // The Sell Feed API pipeline's own status — same degrade-gracefully
+      // pattern (a missing not-yet-applied migration never fails this
+      // whole page).
+      supabaseRequest("rpc/listing_studio_latest_ebay_feed_status", {
+        method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
+      }).then(response => response.json() as Promise<LatestEbayFeedStatusRow[]>).catch(() => [] as LatestEbayFeedStatusRow[]),
     ]);
 
     const purchaseIndex = buildPurchaseMatchIndex(purchaseRecordChunks.flat());
     const extensionStatusByDraftId = new Map(extensionStatusRows.map(row => [row.draft_id, row]));
     const ebayDrafts = draftIds.flatMap(id => (ebayDraftsByProduct.get(id) ?? []).filter(d => d.marketplace === "EBAY_UK"));
     const ebayStatusByMarketplaceDraftId = new Map(ebayStatusRows.map(row => [row.marketplace_draft_id, row]));
-    const ebayDraftsWithStatus = ebayDrafts.map(d => ({ ...d, ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null }));
+    const ebayFeedStatusByMarketplaceDraftId = new Map(ebayFeedStatusRows.map(row => [row.marketplace_draft_id, row]));
+    const ebayDraftsWithStatus = ebayDrafts.map(d => ({
+      ...d,
+      ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null,
+      ebayFeedStatus: ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null,
+    }));
 
     const draftsWithCategoryValidity = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);

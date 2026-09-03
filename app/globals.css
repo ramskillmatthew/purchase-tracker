@@ -1927,6 +1927,30 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-ebay-failed-detail { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); border-radius: 8px; background: color-mix(in srgb, var(--lr-red) 8%, transparent); }
 .lr-ebay-failed-stage { margin: 0 0 4px; color: var(--lr-text); font-size: 10.5px; font-weight: 700; }
 .lr-ebay-failed-message { margin: 0; color: var(--lr-text); font-size: 11px; line-height: 1.4; word-break: break-word; }
+.lr-ebay-failed-hint { margin: 6px 0 0; color: var(--lr-muted); font-size: 10.5px; }
+/* PHASE 4/5 (Seller Hub draft pipeline) — the eBay tab's own success link
+   and legacy-offer note, and the batch-level "Open Seller Hub Drafts"
+   summary beneath the box grid. */
+.lr-ebay-seller-hub-link { display: inline-block; margin-top: 4px; color: var(--lr-violet); font-size: 11px; font-weight: 700; text-decoration: none; }
+.lr-ebay-seller-hub-link:hover { text-decoration: underline; }
+.lr-ebay-legacy-note { margin: 4px 0 0; color: var(--lr-muted); font-size: 10px; font-style: italic; }
+.lr-ebay-seller-hub-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid color-mix(in srgb, var(--lr-green) 25%, var(--lr-border)); border-radius: 10px; background: color-mix(in srgb, var(--lr-green) 8%, transparent); }
+.lr-ebay-seller-hub-summary p { margin: 0; color: var(--lr-text); font-size: 11px; line-height: 1.4; }
+/* Pre-submission preview dialog — a wider variant of .confirm-dialog with
+   a scrollable per-listing list, since it shows real field-by-field data
+   rather than a single message. */
+.lr-ebay-preview-dialog { width: min(560px, 92vw); text-align: left; }
+.lr-ebay-preview-list { display: flex; flex-direction: column; gap: 10px; max-height: 42vh; overflow-y: auto; margin: 10px 0; padding-right: 4px; }
+.lr-ebay-preview-row { padding: 10px 12px; border: 1px solid var(--lr-border); border-radius: 8px; background: var(--surface-2); }
+.lr-ebay-preview-row-error { border-color: color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); background: color-mix(in srgb, var(--lr-red) 8%, transparent); }
+.lr-ebay-preview-title { margin: 0 0 6px; color: var(--lr-text); font-size: 12px; font-weight: 700; }
+.lr-ebay-preview-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; margin: 0; }
+.lr-ebay-preview-fields div { display: flex; justify-content: space-between; gap: 6px; }
+.lr-ebay-preview-fields dt { color: var(--lr-muted); font-size: 10px; }
+.lr-ebay-preview-fields dd { margin: 0; color: var(--lr-text); font-size: 10.5px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lr-ebay-preview-description { margin: 6px 0 0; color: var(--lr-muted); font-size: 10.5px; line-height: 1.4; }
+.lr-ebay-preview-complete-note { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--lr-border); color: var(--lr-muted); font-size: 10px; }
+.lr-ebay-preview-complete-note ul { margin: 4px 0 0; padding-left: 16px; list-style: disc; }
 /* Capped at 2 lines — a long generated title must never grow to 3-4 lines
    and push the rest of the compact card down. */
 .lr-inspector-title { overflow: hidden; display: -webkit-box; margin: 0; color: var(--lr-text); font-size: 14px; font-weight: 700; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

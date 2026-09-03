@@ -10,10 +10,13 @@ import {
   WORKFLOW_STATUS_LABELS, WORKFLOW_STATUS_TONE, READINESS_TONE_READY, READINESS_TONE_NEEDS_REVIEW,
   computeWorkflowSecondaryLine, type ExtensionWorkflowStatus,
 } from "@/lib/listing-studio/extension-workflow-status";
+// PHASE 4 (Listings Review UI wiring) — the eBay tab now reflects the Sell
+// Feed API pipeline (the one that creates a genuine Seller Hub draft),
+// never the retired Inventory API pipeline's own vocabulary.
 import {
-  EBAY_WORKFLOW_STATUS_LABELS, EBAY_WORKFLOW_STATUS_TONE, computeEbayWorkflowSecondaryLine, isEbayWorkflowInProgress,
-  type EbayWorkflowStatus,
-} from "@/lib/listing-studio/ebay-workflow-status";
+  EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
+  SELLER_HUB_DRAFTS_URL, type EbayFeedItemStatus,
+} from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
 import SellingPriceField from "./SellingPriceField";
@@ -34,51 +37,45 @@ const READINESS_TONE: Record<ListingReviewStatus, string> = { ready: READINESS_T
  * details for. "Content ready"/"Needs review" (content readiness, before
  * any draft attempt) reuses the same green/amber readiness tones. */
 function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
-  const label = ebay.workflowStatus ? EBAY_WORKFLOW_STATUS_LABELS[ebay.workflowStatus] : (ebay.contentReady ? "Content ready" : "Needs review");
-  const tone = ebay.workflowStatus ? EBAY_WORKFLOW_STATUS_TONE[ebay.workflowStatus] : (ebay.contentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
+  const label = ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[ebay.workflowStatus] : (ebay.contentReady ? "Content ready" : "Needs review");
+  const tone = ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[ebay.workflowStatus] : (ebay.contentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
   const secondaryLine = ebay.workflowStatus
-    ? computeEbayWorkflowSecondaryLine({ workflowStatus: ebay.workflowStatus, queuePosition: ebay.queuePosition, errorMessage: ebay.errorMessage })
+    ? computeEbayFeedWorkflowSecondaryLine({ itemStatus: ebay.workflowStatus, queuePosition: ebay.queuePosition, errorMessage: ebay.errorMessage })
     : (ebay.contentReady ? "All required information is complete." : null);
-  return <WorkflowStatus label={label} tone={tone} pulse={isEbayWorkflowInProgress(ebay.workflowStatus)} secondaryLine={secondaryLine} />;
+  return <>
+    <WorkflowStatus label={label} tone={tone} pulse={isEbayFeedItemInProgress(ebay.workflowStatus)} secondaryLine={secondaryLine} />
+    {ebay.workflowStatus === "succeeded" && (
+      <a className="lr-ebay-seller-hub-link" href={SELLER_HUB_DRAFTS_URL} target="_blank" rel="noreferrer">Open Seller Hub Drafts ↗</a>
+    )}
+    {ebay.legacyOfferId && (
+      <p className="lr-ebay-legacy-note">Legacy unpublished API offer — not visible in Seller Hub</p>
+    )}
+  </>;
 }
 
-/** Maps a batch-item error_code (lib/listing-studio/ebay-draft-batches.ts's
- * own stage-specific codes) to a short, honest label for WHICH pipeline
- * step failed — never a guess, never invented detail beyond what the code
- * itself already distinguishes. */
-const EBAY_ERROR_CODE_STAGE_LABELS: Record<string, string> = {
-  photo_error: "Photo preparation", no_reachable_photos: "Photo preparation",
-  ebay_inventory_item_error: "Inventory item creation",
-  ebay_offer_error: "Offer creation",
-  ebay_verification_error: "Draft verification", verification_failed: "Draft verification",
-  not_eligible: "Local eligibility check", draft_missing: "Local persistence",
-  unexpected_error: "Local processing",
-};
-
 /**
- * Corrective pass (failed first eBay draft) — "View error" (expands the
- * full, already-sanitised error_message — never truncated further here)
- * and "Retry failed draft" (opens the parent's reconciliation-first retry
- * confirmation). Rendered ONLY when this listing's eBay item is genuinely
- * `failed` AND a batchId/itemId are both known (see EbayTabData's own
- * comment on why itemId can briefly be null right after page load).
+ * PHASE 4 (Listings Review UI wiring) — "View error" only. The retired
+ * per-item "Retry failed draft" button is gone: this pipeline's unit of
+ * work is a whole batch/CSV upload, not one row, so there is no
+ * "resubmit just this row" operation (see
+ * lib/listing-studio/ebay-feed/feed-batches.ts's own header on why). A
+ * failed listing simply stays eligible — it never got a Seller Hub draft,
+ * so re-selecting it and clicking "Create Seller Hub draft" again picks
+ * it up fresh, through the exact same, already-tested pipeline as any
+ * other first attempt.
  */
-function EbayFailedDraftActions({ ebay, onRetryEbayDraft }: { ebay: EbayTabData; onRetryEbayDraft: (batchId: string, itemId: string) => void }) {
+function EbayFailedDraftActions({ ebay }: { ebay: EbayTabData }) {
   const [expanded, setExpanded] = useState(false);
   if (ebay.workflowStatus !== "failed") return null;
-  const stageLabel = ebay.errorCode ? EBAY_ERROR_CODE_STAGE_LABELS[ebay.errorCode] ?? null : null;
   return <div className="lr-ebay-failed-actions">
     <div className="lr-ebay-failed-buttons">
       <button type="button" className="button-secondary" onClick={() => setExpanded(current => !current)} aria-expanded={expanded}>
         {expanded ? "Hide error" : "View error"}
       </button>
-      {ebay.batchId && ebay.itemId && (
-        <button type="button" className="button" onClick={() => onRetryEbayDraft(ebay.batchId!, ebay.itemId!)}>Retry failed draft</button>
-      )}
     </div>
     {expanded && <div className="lr-ebay-failed-detail">
-      {stageLabel && <p className="lr-ebay-failed-stage">Failed at: {stageLabel}</p>}
       <p className="lr-ebay-failed-message">{ebay.errorMessage || "No further detail was recorded for this failure."}</p>
+      <p className="lr-ebay-failed-hint">Select this listing again and click &quot;Create Seller Hub draft&quot; to try again.</p>
     </div>}
   </div>;
 }
@@ -141,6 +138,7 @@ export type ListingDetails = {
 
 export type EbayTabData = {
   marketplaceDraftId: string;
+  categoryId: string | null;
   contentReady: boolean;
   sellingPricePence: number | null;
   costPence: number | null;
@@ -148,19 +146,19 @@ export type EbayTabData = {
   quantity: number | null;
   conditionValue: string | null;
   selection: EbayPolicySelection;
-  offerId: string | null;
-  workflowStatus: EbayWorkflowStatus | null;
+  // PHASE 3/4 — the RETIRED Inventory API pipeline's own offer id, kept
+  // ONLY as a historical, read-only fact (never displayed as if it were a
+  // Seller Hub draft) — see lib/listing-studio/ebay-workflow-status.ts's
+  // own corrective-pass comment. Wholly independent of workflowStatus
+  // below, which describes the ACTIVE Sell Feed API pipeline.
+  legacyOfferId: string | null;
+  // Set once the Sell Feed API pipeline has genuinely confirmed a Seller
+  // Hub draft exists for this listing — see
+  // supabase-ebay-feed-drafts.sql's own column comment.
+  feedDraftCreatedAt: string | null;
+  workflowStatus: EbayFeedItemStatus | null;
   queuePosition: number | null;
   errorMessage: string | null;
-  // Corrective pass (failed first draft retry) — which specific pipeline
-  // stage failed (see lib/listing-studio/ebay-draft-batches.ts's own
-  // stage-specific error codes: ebay_inventory_item_error/ebay_offer_error/
-  // ebay_verification_error/photo_error/not_eligible/etc), and the exact
-  // batch/item identifiers a retry needs. Both null whenever there is no
-  // live batch-item state at all (e.g. content-ready but never attempted).
-  errorCode: string | null;
-  batchId: string | null;
-  itemId: string | null;
 };
 
 /**
@@ -181,7 +179,7 @@ function ListingDetailsPanel({
   listing, position, markingReady, assigningCategory, reassessingAudience,
   onOpenCarousel, onPreview, onEditFields, onAssignCategory, onReassessAudience, onMarkReady, onSellingPriceSaved,
   onClose, onPrevious, onNext, onSendToExtension,
-  ebayPolicies, ebayLocations, onEbaySettingsSaved, activeWorkflowChannel, onRetryEbayDraft,
+  ebayPolicies, ebayLocations, onEbaySettingsSaved, activeWorkflowChannel,
 }: {
   listing: ListingDetails | null;
   // null when nothing is selected, OR when the selected listing has been
@@ -214,11 +212,6 @@ function ListingDetailsPanel({
   // switching this later never forces the inspector's own tab to jump
   // out from under the user (see the effect below's own comment).
   activeWorkflowChannel: "VINTED" | "EBAY_UK";
-  // Corrective pass (failed first eBay draft) — opens the parent
-  // workspace's own retry confirmation dialog for one failed batch item.
-  // Never called directly here; this component has no knowledge of what
-  // "safe to retry" means, only whether a batchId/itemId is available.
-  onRetryEbayDraft: (batchId: string, itemId: string) => void;
 }) {
   // The thumbnail strip's own "which photo is the main image right now"
   // state — reset whenever the selected listing itself changes, never
@@ -364,7 +357,7 @@ function ListingDetailsPanel({
     {resolvedTab === "VINTED"
       ? <WorkflowStatus label={displayLabel} tone={displayTone} pulse={listing.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
       : listing.ebay && <EbayWorkflowStatusBlock ebay={listing.ebay} />}
-    {resolvedTab === "EBAY_UK" && listing.ebay && <EbayFailedDraftActions ebay={listing.ebay} onRetryEbayDraft={onRetryEbayDraft} />}
+    {resolvedTab === "EBAY_UK" && listing.ebay && <EbayFailedDraftActions ebay={listing.ebay} />}
 
     <div className="lr-inspector-money">
       <span><span className="lr-inspector-money-label">Cost</span>{(resolvedTab === "VINTED" ? listing.costPence : listing.ebay?.costPence ?? null) !== null ? formatPenceAsGBP((resolvedTab === "VINTED" ? listing.costPence : listing.ebay!.costPence)!) : "—"}</span>

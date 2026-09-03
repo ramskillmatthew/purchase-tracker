@@ -66,13 +66,11 @@ describe("generateFeedDraftCsv — real behavioural tests against the locked tem
     expect(parsed.data[1][9]).toBe("Café münchën £5 discount 🎉");
   });
 
-  it("REQUIREMENT 10: CSV/formula injection — a title/description starting with =, +, -, or @ is neutralised, not executed", () => {
-    for (const dangerous of ["=SUM(A1:A9)", "+1+1", "-1+1", "@SUM(1+1)"]) {
-      const { csv } = generateFeedDraftCsv([row({ title: `${dangerous} safe title`, sku: dangerous.slice(0, 3) + Math.random() })]);
+  it("CORRECTIVE PASS (audit point 9): a title/description starting with =, +, -, or @ is sent to eBay EXACTLY as given — no leading quote is ever prepended, because that would corrupt real eBay data (this pipeline never opens the file in a spreadsheet — see csv-generator.ts's own corrective-pass comment)", () => {
+    for (const legitimate of ["-50% off retail, tags attached", "+VAT included", "=EQ Sneakers UK 9", "@Home fitness kit"]) {
+      const { csv } = generateFeedDraftCsv([row({ title: legitimate, sku: `sku-${Math.random()}` })]);
       const parsed = Papa.parse<string[]>(csv);
-      const titleCell = parsed.data[1][3];
-      expect(titleCell.startsWith("'")).toBe(true);
-      expect(titleCell).toContain(dangerous);
+      expect(parsed.data[1][3]).toBe(legitimate);
     }
   });
 
@@ -80,6 +78,19 @@ describe("generateFeedDraftCsv — real behavioural tests against the locked tem
     const { csv } = generateFeedDraftCsv([row({ title: "Normal Title" })]);
     const parsed = Papa.parse<string[]>(csv);
     expect(parsed.data[1][3]).toBe("Normal Title");
+  });
+
+  it("REQUIREMENT: a description starting with a dangerous-looking character round-trips unchanged too", () => {
+    const { csv } = generateFeedDraftCsv([row({ description: "-1 previous owner, excellent condition" })]);
+    const parsed = Papa.parse<string[]>(csv);
+    expect(parsed.data[1][9]).toBe("-1 previous owner, excellent condition");
+  });
+
+  it("REQUIREMENT: an aspect value starting with a dangerous-looking character round-trips unchanged too", () => {
+    const { csv, headers } = generateFeedDraftCsv([row({ aspects: { Size: "=42" } })], ["Size"]);
+    expect(headers).toContain("C:Size");
+    const parsed = Papa.parse<Record<string, string>>(csv, { header: true });
+    expect(parsed.data[0]["C:Size"]).toBe("=42");
   });
 
   it("REQUIREMENT 13: price converts correctly from integer pence to a GBP decimal string", () => {

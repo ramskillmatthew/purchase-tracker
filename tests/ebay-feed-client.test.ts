@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 vi.mock("server-only", () => ({}));
 
 import {
-  createFeedTask, uploadFeedFile, getFeedTask, getFeedTasks, getFeedResultFile,
+  createFeedTask, uploadFeedFile, getFeedTask, getFeedTasks, getFeedResultFile, feedTaskHasInputFile,
   feedApiHost, FEED_TASK_TERMINAL_STATUSES,
 } from "@/lib/ebay-account/feed-client";
 
@@ -159,12 +159,54 @@ describe("getFeedResultFile — plain text and gzip-detected-by-magic-bytes", ()
     fetchMock.mockResolvedValue(new Response(corrupted, { status: 200 }));
     await expect(getFeedResultFile("token", "abc-123")).rejects.toThrow(/could not be decompressed/);
   });
+
+  it("AUDIT POINT 8: the raw download itself is bounded — an oversized plain-text response is rejected before being fully buffered, never silently read to completion", async () => {
+    const huge = "x".repeat(30 * 1024 * 1024); // 30MB, over the 25MB raw cap
+    fetchMock.mockResolvedValue(new Response(huge, { status: 200 }));
+    await expect(getFeedResultFile("token", "abc-123")).rejects.toThrow(/safety limit/);
+  });
+
+  it("a response right at a reasonable size still succeeds (the bound isn't so tight it breaks a real small result file)", async () => {
+    const csv = "Action,SKU\r\n" + "Draft,1644\r\n".repeat(1000);
+    fetchMock.mockResolvedValue(new Response(csv, { status: 200 }));
+    expect(await getFeedResultFile("token", "abc-123")).toBe(csv);
+  });
+});
+
+describe("feedTaskHasInputFile — AUDIT POINT 13: authoritative existing-upload check", () => {
+  it("returns true for a 200 (a file already exists)", async () => {
+    fetchMock.mockResolvedValue(new Response("some file content", { status: 200 }));
+    expect(await feedTaskHasInputFile("token", "abc-123")).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/sell/feed/v1/task/abc-123/download_input_file");
+    expect(init.method).toBe("GET");
+  });
+
+  it("returns false for a 404 (nothing uploaded yet) — never throws for this expected, handled outcome", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 404 }));
+    expect(await feedTaskHasInputFile("token", "abc-123")).toBe(false);
+  });
+
+  it("a genuine error (401/500) is a real thrown error, never silently treated as either true or false", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ errors: [{ message: "Invalid access token" }] }, 401));
+    await expect(feedTaskHasInputFile("token", "abc-123")).rejects.toThrow();
+  });
+
+  it("rejects an invalid task ID before ever calling fetch", async () => {
+    await expect(feedTaskHasInputFile("token", "has spaces")).rejects.toThrow("Invalid eBay Feed task ID.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("is gated by the Feed operation allowlist", () => {
+    const source = require("node:fs").readFileSync("lib/ebay-account/feed-client.ts", "utf8") as string;
+    expect(source).toContain('assertAllowedFeedOperation("getFeedInputFile")');
+  });
 });
 
 describe("STRUCTURAL — every exported function is gated and no publish-capable function exists", () => {
   it("every exported function calls assertAllowedFeedOperation with a hardcoded literal, before constructing a request", () => {
     const source = require("node:fs").readFileSync("lib/ebay-account/feed-client.ts", "utf8") as string;
-    for (const op of ["createFeedTask", "uploadFeedFile", "getFeedTask", "getFeedTasks", "getFeedResultFile"]) {
+    for (const op of ["createFeedTask", "uploadFeedFile", "getFeedTask", "getFeedTasks", "getFeedResultFile", "getFeedInputFile"]) {
       expect(source).toContain(`assertAllowedFeedOperation("${op}")`);
     }
   });

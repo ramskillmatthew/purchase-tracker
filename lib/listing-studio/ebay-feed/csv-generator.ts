@@ -24,19 +24,57 @@ export type FeedDraftRowInput = {
   title: string;
   pricePence: number;
   quantity: number;
-  /** Primary/cover photo only for this version — see this file's own
-   * note on why multi-photo support is deliberately not implemented yet
-   * (the real multi-URL separator for this exact column was not
-   * confirmed against authoritative documentation this session; guessing
-   * one risks corrupting the file rather than merely omitting a feature). */
+  /**
+   * Primary/cover photo only — deliberately, disclosed, NOT guessed.
+   *
+   * RESEARCH TRAIL (Phase 2, this pass): searched for the exact multi-URL
+   * separator for this column against eBay's own official documentation.
+   * Found: (1) eBay Developer KB (developer.ebay.com/support/kb-article?
+   * KBid=1240, fetched via its edp.ebay.com mirror since developer.ebay.com
+   * itself 403s) officially confirms a max of 24 photos per non-variation
+   * listing — but only describes the Trading API's XML
+   * PictureDetails.PictureURL element, not this CSV column. (2) Multiple
+   * independent eBay Community forum threads (e.g.
+   * community.ebay.com/t5/Selling/Multiple-Image-URLs-In-EXCEL-Spreadsheet
+   * -Draft-Listings/td-p/32767524) report a DOUBLE pipe "||" separator for
+   * this exact "Item photo URL" column in a Draft-listings CSV — but this
+   * is one seller's own forum-reported experience, not eBay's own
+   * documentation. (3) Other, more numerous community/third-party sources
+   * (File Exchange PDFs, 3Dsellers' own help docs) describe a SINGLE pipe
+   * "|" separator — but for the older, DIFFERENT "File Exchange"/LMS
+   * bulk-listing system, not confirmed to be the same mechanism as the
+   * modern Sell-Feed-API-driven "Create Drafts" template this pipeline
+   * actually uses. No source found meets this app's own bar of
+   * "authoritative eBay documentation for THIS exact template" — two
+   * different separators are each reported by different, non-official
+   * sources, which is itself evidence this is genuinely unresolved rather
+   * than merely under-researched. Guessing between "|" and "||" risks
+   * silently corrupting the photo column (a wrong separator could become
+   * part of a literal, malformed image URL) rather than merely omitting a
+   * feature — so this remains single-photo-only, disclosed explicitly to
+   * the user in the pre-submission preview (see
+   * lib/listing-studio/ebay-feed/feed-batches.ts's own
+   * buildFeedDraftPreview), never silently claimed as full photo transfer.
+   */
   primaryPhotoUrl: string;
   conditionValue: string | null;
   description: string;
-  /** Category-specific item specifics, each becoming its own "C:Name"
-   * column — confirmed supported for Draft rows via eBay seller-community
-   * evidence gathered this session (real templates with 80+ C: columns
-   * successfully used for drafts). Genuinely optional: a draft is allowed
-   * to be incomplete — see this module's own eligibility comment. */
+  /**
+   * Category-specific item specifics, each becoming its own "C:Name"
+   * column — the column-header convention itself (C:Name) is well
+   * corroborated (eBay Community threads describing real templates with
+   * 80+ C: columns successfully used for Draft rows). The MULTI-VALUE
+   * separator for a single aspect that itself has multiple values (e.g.
+   * Colour: Red AND Blue) is, like the photo separator above, NOT
+   * confirmed against official eBay documentation this pass — a
+   * third-party seller-tool vendor's own help docs (3Dsellers) describe a
+   * comma separator with quoting, but that is that vendor's own
+   * documentation of their own product, not eBay's. Only the FIRST value
+   * of a multi-value aspect is therefore sent — see
+   * feed-batches.ts's own flattenAspectsForFeedRow — disclosed in preview,
+   * never guessed. Genuinely optional either way: a draft is allowed to be
+   * incomplete — see this module's own eligibility comment.
+   */
   aspects?: Record<string, string>;
 };
 
@@ -67,19 +105,38 @@ export function validateFeedDraftRow(input: FeedDraftRowInput): FeedDraftRowVali
   return { ok: true };
 }
 
-/** OWASP-recommended CSV/formula-injection neutralisation: a cell whose
- * first character is one a spreadsheet application would interpret as
- * the start of a formula (=, +, -, @) or a control character (tab, CR)
- * is prefixed with a single quote, which forces "treat as text" in
- * Excel/Sheets/Numbers without altering the underlying data eBay itself
- * receives (eBay's own CSV parser reads the literal cell value, not a
- * spreadsheet formula). Applied to every free-text field this
- * application writes (title, description, aspect values) — never to
- * fields this module itself controls the shape of (SKU, category ID,
- * price, quantity, condition, Action). */
-function neutralizeFormulaInjection(value: string): string {
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-}
+/**
+ * CORRECTIVE PASS (audit point 9) — this file previously prefixed a cell
+ * starting with =, +, -, @, tab, or CR with a single quote, following the
+ * standard OWASP CSV-injection mitigation. REMOVED, because that mitigation
+ * does not apply to this pipeline and was actively corrupting legitimate
+ * data:
+ *
+ * The OWASP mitigation exists to protect an INNOCENT, DIFFERENT VIEWER who
+ * later opens an exported CSV in a spreadsheet application from a MALICIOUS
+ * THIRD PARTY's data (e.g. a support-ticket export where an attacker's
+ * ticket subject line is itself a formula that exfiltrates data when a
+ * support agent opens the export in Excel). That threat model requires two
+ * distinct parties: an untrusted data source, and a separate, less-trusted
+ * viewer. Neither applies here: this CSV is generated from the SELLER's OWN
+ * listing content (their own title/description, or content this app
+ * generated from their own photos) and is uploaded directly,
+ * programmatically, server-side, straight to eBay's Feed API — it is never
+ * opened in a spreadsheet by anyone, let alone a different, less-trusted
+ * party. eBay's own CSV parser reads a cell's literal text — it has no
+ * Excel-style formula-injection convention — so a leading quote character
+ * was not "neutralising a formula" from eBay's point of view, it was
+ * simply prepending a stray `'` onto the actual title/description/aspect
+ * value eBay would receive. A real listing legitimately titled e.g.
+ * "-50% off retail, tags attached" would have been uploaded to eBay as
+ * "'-50% off retail, tags attached" — visibly wrong on the resulting
+ * draft. Removing this was a strict correctness improvement, not a safety
+ * regression: every field is now sent to eBay exactly as the seller/this
+ * app's own generation produced it, which is what "Custom label (SKU)"
+ * matching, category IDs, and drafting SPECIFICALLY require to work
+ * correctly, and what previewFeedDraftRow's whole reason for existing
+ * (showing the user the real, honest value before submission) depends on.
+ */
 
 function penceToDecimalGbp(pence: number): string {
   return (pence / 100).toFixed(2);
@@ -98,18 +155,18 @@ function buildRowCells(input: FeedDraftRowInput, aspectColumns: string[]): strin
   if (!condition.ok) throw new Error(condition.reason);
   const base = [
     ONLY_ALLOWED_ACTION,
-    neutralizeFormulaInjection(input.sku),
+    input.sku,
     input.categoryId,
-    neutralizeFormulaInjection(input.title),
+    input.title,
     "", // UPC — left empty, matching the real template's own sample row; no authoritative "does not apply" placeholder was confirmed this session
     penceToDecimalGbp(input.pricePence),
     String(input.quantity),
     input.primaryPhotoUrl,
     condition.enumValue,
-    neutralizeFormulaInjection(input.description),
+    input.description,
     "FixedPrice",
   ];
-  const aspectCells = aspectColumns.map(name => neutralizeFormulaInjection(input.aspects?.[name] ?? ""));
+  const aspectCells = aspectColumns.map(name => input.aspects?.[name] ?? "");
   return [...base, ...aspectCells];
 }
 

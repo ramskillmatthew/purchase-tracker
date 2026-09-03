@@ -79,6 +79,64 @@ describe("Retirement proof — the new Feed pipeline never reaches the retired I
   });
 });
 
+describe("PHASE 3 PROOF — no reachable active UI/API/cron route can initiate an Inventory API write, project-wide", () => {
+  const ALL_ROUTE_FILES = globSync("app/api/**/route.ts");
+
+  it("sanity: this really does scan every route file in the project", () => {
+    expect(ALL_ROUTE_FILES.length).toBeGreaterThan(20);
+  });
+
+  it("no route file anywhere in the project calls createOrReplaceInventoryItem or createOffer directly — these are only ever reachable through lib/listing-studio/ebay-draft-batches.ts's own gated orchestration, which is itself now unreachable from every route (see the tests below)", () => {
+    for (const route of ALL_ROUTE_FILES) {
+      const source = read(route);
+      expect(source, route).not.toMatch(/createOrReplaceInventoryItem\(|createOffer\(/);
+    }
+  });
+
+  it("every legacy Inventory-API-writing route (create/process/retry) returns the shared 410 retirement response and never imports the writing orchestrator's mutating entry points", () => {
+    const retiredRoutes = [
+      "app/api/listing-studio/ebay-draft-batches/route.ts",
+      "app/api/listing-studio/ebay-draft-batches/[batchId]/process/route.ts",
+      "app/api/listing-studio/ebay-draft-batches/[batchId]/items/[itemId]/retry/route.ts",
+    ];
+    for (const route of retiredRoutes) {
+      const source = read(route);
+      expect(source, route).toContain('from "@/lib/ebay-account/retired-inventory-route"');
+      expect(source, route).not.toContain("createEbayDraftBatch(");
+      expect(source, route).not.toContain("runEbayDraftBatchProcessTick(");
+      expect(source, route).not.toContain("retryFailedEbayDraftItem(");
+    }
+  });
+
+  it("the legacy cron sweep is neutralised — no import of the processing pipeline or Supabase at all", () => {
+    const source = read("app/api/cron/ebay-draft-processing/route.ts");
+    expect(source).not.toMatch(/from ["']@\/lib\/listing-studio\/ebay-draft-batches["']/);
+    expect(source).not.toMatch(/from ["']@\/lib\/supabase["']/);
+    expect(source).toContain("retired: true");
+  });
+
+  it("vercel.json no longer schedules the legacy cron sweep", () => {
+    const config = JSON.parse(read("vercel.json")) as { crons: Array<{ path: string }> };
+    expect(config.crons.map(c => c.path)).not.toContain("/api/cron/ebay-draft-processing");
+  });
+
+  it("the read-only reconciliation functions (getInventoryItem, getOffer, getOffersForSku) are preserved, not deleted — this task's own explicit requirement", () => {
+    const source = read("lib/ebay-account/inventory-client.ts");
+    expect(source).toContain("export async function getInventoryItem(");
+    expect(source).toContain("export async function getOffer(");
+    expect(source).toContain("export async function getOffersForSku(");
+  });
+
+  it("SKU 1644's existing offer is never modified or deleted by any retired route — no updateOffer/deleteOffer/withdrawOffer exists anywhere in this codebase", () => {
+    for (const route of [...ALL_ROUTE_FILES]) {
+      const source = read(route);
+      expect(source, route).not.toMatch(/updateOffer\(|deleteOffer\(|withdrawOffer\(/);
+    }
+    const clientSource = read("lib/ebay-account/inventory-client.ts");
+    expect(clientSource).not.toMatch(/export async function (updateOffer|deleteOffer|withdrawOffer)/);
+  });
+});
+
 describe("Retirement proof — the legacy pipeline's own files are untouched in shape (still exist, still gated, never deleted)", () => {
   it("lib/ebay-account/inventory-client.ts and lib/listing-studio/ebay-draft-batches.ts still exist — retirement means 'no longer used by new work', never 'deleted'", () => {
     expect(() => read("lib/ebay-account/inventory-client.ts")).not.toThrow();

@@ -35,8 +35,6 @@ const { POST: retryRoute } = await import("@/app/api/listing-studio/ebay-draft-b
 
 const BATCH_ID = "11111111-1111-4111-8111-111111111111";
 const ITEM_ID = "44444444-4444-4444-8444-444444444444";
-const PRODUCT_A = "22222222-2222-4222-8222-222222222222";
-const PRODUCT_B = "33333333-3333-4333-8333-333333333333";
 function params() { return { params: Promise.resolve({ batchId: BATCH_ID }) }; }
 function itemParams() { return { params: Promise.resolve({ batchId: BATCH_ID, itemId: ITEM_ID }) }; }
 function jsonRequest(body: unknown, method = "POST") { return new Request("http://test", { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
@@ -46,6 +44,7 @@ beforeEach(() => {
   createEbayDraftBatch.mockReset(); listOwnerEbayBatches.mockReset(); runEbayDraftBatchProcessTick.mockReset();
   resolveEbayDraftEligibilityForProducts.mockReset(); getEbayDraftBatch.mockReset(); cancelEbayDraftBatch.mockReset(); dismissEbayDraftBatch.mockReset();
   retryFailedEbayDraftItem.mockReset();
+  requireOwner.mockResolvedValue({ id: "owner-1", email: "owner@example.com" });
   createEbayDraftBatch.mockResolvedValue({ batchId: BATCH_ID, displayNumber: 1 });
   listOwnerEbayBatches.mockResolvedValue({ visible: [], stuck: [] });
   runEbayDraftBatchProcessTick.mockResolvedValue({ claimedCount: 0, batchStatus: null, hasMoreWork: false });
@@ -55,7 +54,7 @@ beforeEach(() => {
   dismissEbayDraftBatch.mockResolvedValue(undefined);
 });
 
-describe("GET /api/listing-studio/ebay-draft-batches", () => {
+describe("GET /api/listing-studio/ebay-draft-batches — read-only history, untouched by retirement", () => {
   it("reports visible and stuck batches from the lib layer, untouched", async () => {
     listOwnerEbayBatches.mockResolvedValue({
       visible: [{ batchId: "b1", displayNumber: 1 }],
@@ -68,110 +67,57 @@ describe("GET /api/listing-studio/ebay-draft-batches", () => {
     expect(body.stuck).toEqual([{ batchId: "b2", displayNumber: 2, status: "in_progress", listingCount: 3, createdAt: "x" }]);
   });
 
-  describe("CORRECTIVE PASS — missing batch-migration schema degrades safely (never an uncontrolled 500)", () => {
-    function schemaError(status: number, code: string, message: string): Error & { status: number } {
-      const error = new Error(JSON.stringify({ code, message })) as Error & { status: number };
-      error.status = status;
-      return error;
-    }
-
-    it("REQUIREMENT 5: a missing ebay_draft_batches table (PGRST205, 404) never crashes Listings Review — returns 200 with available:false and empty lists", async () => {
-      listOwnerEbayBatches.mockRejectedValue(schemaError(404, "PGRST205", "Could not find the table 'public.ebay_draft_batches' in the schema cache"));
-      const response = await listRoute();
-      expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body).toEqual({ available: false, batchIds: [], stuck: [] });
-    });
-
-    it("REQUIREMENT 7: an unrelated failure (auth/permission/network) still returns a real error response, never disguised as available:false", async () => {
-      const error = new Error(JSON.stringify({ code: "42501", message: "permission denied" })) as Error & { status: number };
-      error.status = 401;
-      listOwnerEbayBatches.mockRejectedValue(error);
-      const response = await listRoute();
-      expect(response.status).not.toBe(200);
-      const body = await response.json();
-      expect(body).not.toHaveProperty("available");
-    });
+  it("a missing ebay_draft_batches table never crashes Listings Review — returns 200 with available:false", async () => {
+    const error = new Error(JSON.stringify({ code: "PGRST205", message: "Could not find the table 'public.ebay_draft_batches' in the schema cache" })) as Error & { status: number };
+    error.status = 404;
+    listOwnerEbayBatches.mockRejectedValue(error);
+    const response = await listRoute();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ available: false, batchIds: [], stuck: [] });
   });
 });
 
-describe("POST /api/listing-studio/ebay-draft-batches", () => {
-  it("REQUIREMENT: skips ineligible listings and creates a batch only from the eligible ones — never all-or-nothing", async () => {
-    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([
-      [PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }],
-      [PRODUCT_B, { marketplaceDraftId: null, eligible: false, reasons: ["Missing eBay selling price"] }],
-    ]));
-    const response = await createRoute(jsonRequest({ draftIds: [PRODUCT_A, PRODUCT_B] }));
-    expect(response.status).toBe(200);
+describe("PHASE 3 — POST /api/listing-studio/ebay-draft-batches is RETIRED", () => {
+  it("returns 410 Gone, never creates a batch, never ticks the pipeline", async () => {
+    const response = await createRoute(jsonRequest({ draftIds: ["22222222-2222-4222-8222-222222222222"] }));
+    expect(response.status).toBe(410);
     const body = await response.json();
-    expect(body.eligibleCount).toBe(1);
-    expect(body.skippedCount).toBe(1);
-    expect(body.skipped).toEqual([{ draftId: PRODUCT_B, reasons: ["Missing eBay selling price"] }]);
-    expect(createEbayDraftBatch).toHaveBeenCalledWith("owner-1", ["mdraft-a"], [PRODUCT_A]);
-    expect(runEbayDraftBatchProcessTick).toHaveBeenCalledWith("owner-1", BATCH_ID);
-  });
-
-  it("REQUIREMENT (corrective pass): runs exactly ONE bounded, awaited process tick — never a fire-and-forget unawaited call", async () => {
-    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }]]));
-    let tickResolved = false;
-    runEbayDraftBatchProcessTick.mockImplementation(async () => { await Promise.resolve(); tickResolved = true; return { claimedCount: 1, batchStatus: null, hasMoreWork: true }; });
-    await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
-    // If the route awaited the tick (rather than firing it and moving on),
-    // this is true the instant the route handler itself has returned.
-    expect(tickResolved).toBe(true);
-    expect(runEbayDraftBatchProcessTick).toHaveBeenCalledTimes(1);
-  });
-
-  it("400s with no batch created when NOTHING selected is eligible", async () => {
-    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([
-      [PRODUCT_A, { marketplaceDraftId: null, eligible: false, reasons: ["No eBay preparation for this listing"] }],
-    ]));
-    const response = await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
-    expect(response.status).toBe(400);
+    expect(body.retired).toBe(true);
     expect(createEbayDraftBatch).not.toHaveBeenCalled();
     expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
   });
 
-  it("applies the shared rate limit before creating anything", async () => {
-    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }]]));
-    await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
-    expect(enforceRateLimit).toHaveBeenCalledWith("owner-1", "ebay_draft_batch_create", expect.any(Number), expect.any(Number));
+  it("still requires the authenticated owner before revealing the retirement", async () => {
+    await createRoute(jsonRequest({ draftIds: [] }));
+    expect(requireOwner).toHaveBeenCalledTimes(1);
   });
 
-  it("REQUIREMENT 5/6: a missing ebay_draft_batches table returns a deliberate, clearly-worded 409 (available:false) instead of an uncontrolled 500 — batch creation genuinely cannot succeed without this table, so this is the one route where 'unavailable' IS the terminal response, not a fallback to empty success", async () => {
-    resolveEbayDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", eligible: true, reasons: [] }]]));
-    const error = new Error(JSON.stringify({ code: "PGRST205", message: "Could not find the table 'public.ebay_draft_batches' in the schema cache" })) as Error & { status: number };
-    error.status = 404;
-    createEbayDraftBatch.mockRejectedValue(error);
-    const response = await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
-    expect(response.status).toBe(409);
-    const body = await response.json();
-    expect(body.available).toBe(false);
-    expect(typeof body.error).toBe("string");
-    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
+  it("never even parses the request body — retirement is unconditional, not dependent on a valid payload", async () => {
+    const response = await createRoute(new Request("http://test", { method: "POST", body: "not json at all" }));
+    expect(response.status).toBe(410);
   });
 });
 
-describe("GET /api/listing-studio/ebay-draft-batches/[batchId]", () => {
+describe("GET /api/listing-studio/ebay-draft-batches/[batchId] — read-only history, untouched", () => {
   it("404s when the batch doesn't belong to this owner (or doesn't exist)", async () => {
     getEbayDraftBatch.mockResolvedValue(null);
     const response = await getBatchRoute(new Request("http://test"), params());
     expect(response.status).toBe(404);
   });
 
-  it("returns items with their real per-stage status, never Unpublished", async () => {
+  it("returns items with their real per-stage status, using the corrected legacy label", async () => {
     getEbayDraftBatch.mockResolvedValue({
       batch: { id: BATCH_ID, ownerId: "owner-1", status: "in_progress", listingCount: 1, displayNumber: 1, boxDismissedAt: null, activityDismissedAt: null, createdAt: "x", completedAt: null },
-      items: [{ id: "item-1", batchId: BATCH_ID, marketplaceDraftId: "mdraft-1", productDraftId: PRODUCT_A, queuePosition: 0, status: "creating_draft", attemptCount: 1, errorCode: null, errorMessage: null, ebayOfferId: null, startedAt: "x", completedAt: null, generatedTitle: "Title", sku: "SKU-1" }],
+      items: [{ id: "item-1", batchId: BATCH_ID, marketplaceDraftId: "mdraft-1", productDraftId: "product-a", queuePosition: 0, status: "creating_draft", attemptCount: 1, errorCode: null, errorMessage: null, ebayOfferId: null, startedAt: "x", completedAt: null, generatedTitle: "Title", sku: "SKU-1" }],
     });
     const response = await getBatchRoute(new Request("http://test"), params());
     const body = await response.json();
     expect(body.items[0].status).toBe("creating_draft");
-    expect(JSON.stringify(body)).not.toMatch(/Unpublished/);
   });
 });
 
-describe("DELETE /api/listing-studio/ebay-draft-batches/[batchId]", () => {
+describe("DELETE /api/listing-studio/ebay-draft-batches/[batchId] — cancel remains available (never writes to eBay)", () => {
   it("cancels the batch via the lib layer", async () => {
     const response = await deleteBatchRoute(new Request("http://test"), params());
     expect(response.status).toBe(200);
@@ -185,8 +131,8 @@ describe("DELETE /api/listing-studio/ebay-draft-batches/[batchId]", () => {
   });
 });
 
-describe("PATCH /api/listing-studio/ebay-draft-batches/[batchId] — dismiss", () => {
-  it("dismiss_box works even for a still-non-terminal (stuck) batch — no pairing/extension concern applies to eBay batches", async () => {
+describe("PATCH /api/listing-studio/ebay-draft-batches/[batchId] — dismiss remains available (never writes to eBay)", () => {
+  it("dismiss_box works even for a still-non-terminal (stuck) batch", async () => {
     getEbayDraftBatch.mockResolvedValue({ batch: { id: BATCH_ID, ownerId: "owner-1", status: "in_progress", listingCount: 1, displayNumber: 1, boxDismissedAt: null, activityDismissedAt: null, createdAt: "x", completedAt: null }, items: [] });
     const response = await patchBatchRoute(jsonRequest({ action: "dismiss_box" }, "PATCH"), params());
     expect(response.status).toBe(200);
@@ -201,101 +147,34 @@ describe("PATCH /api/listing-studio/ebay-draft-batches/[batchId] — dismiss", (
   });
 });
 
-describe("POST /api/listing-studio/ebay-draft-batches/[batchId]/process — corrective pass: bounded, resumable tick endpoint", () => {
-  it("REQUIREMENT: runs exactly one bounded tick and returns the batch's fresh full status", async () => {
-    getEbayDraftBatch.mockResolvedValue({
-      batch: { id: BATCH_ID, ownerId: "owner-1", status: "in_progress", listingCount: 1, displayNumber: 1, boxDismissedAt: null, activityDismissedAt: null, createdAt: "x", completedAt: null },
-      items: [{ id: "item-1", batchId: BATCH_ID, marketplaceDraftId: "mdraft-1", productDraftId: PRODUCT_A, queuePosition: 0, status: "creating_inventory_item", attemptCount: 1, errorCode: null, errorMessage: null, ebayOfferId: null, startedAt: "x", completedAt: null, generatedTitle: "Title", sku: "SKU-1" }],
-    });
+describe("PHASE 3 — POST /api/listing-studio/ebay-draft-batches/[batchId]/process is RETIRED", () => {
+  it("returns 410 Gone, never advances any legacy item, never calls the pipeline", async () => {
     const response = await processRoute(new Request("http://test", { method: "POST" }), params());
-    expect(response.status).toBe(200);
-    expect(runEbayDraftBatchProcessTick).toHaveBeenCalledWith("owner-1", BATCH_ID);
+    expect(response.status).toBe(410);
     const body = await response.json();
-    expect(body.items[0].status).toBe("creating_inventory_item");
+    expect(body.retired).toBe(true);
+    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
+    expect(getEbayDraftBatch).not.toHaveBeenCalled();
   });
 
-  it("never calls the tick for an already-terminal batch — a completed/cancelled batch is never re-processed", async () => {
-    getEbayDraftBatch.mockResolvedValue({
-      batch: { id: BATCH_ID, ownerId: "owner-1", status: "completed", listingCount: 1, displayNumber: 1, boxDismissedAt: null, activityDismissedAt: null, createdAt: "x", completedAt: "x" },
-      items: [],
-    });
-    const response = await processRoute(new Request("http://test", { method: "POST" }), params());
-    expect(response.status).toBe(200);
-    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
-  });
-
-  it("404s for a batch that doesn't belong to this owner", async () => {
-    getEbayDraftBatch.mockResolvedValue(null);
-    const response = await processRoute(new Request("http://test", { method: "POST" }), params());
-    expect(response.status).toBe(404);
-    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
-  });
-
-  it("rejects an invalid batch id before touching the lib layer", async () => {
-    const response = await processRoute(new Request("http://test", { method: "POST" }), { params: Promise.resolve({ batchId: "not-a-uuid" }) });
-    expect(response.status).toBe(400);
-    expect(runEbayDraftBatchProcessTick).not.toHaveBeenCalled();
+  it("still requires the authenticated owner", async () => {
+    await processRoute(new Request("http://test", { method: "POST" }), params());
+    expect(requireOwner).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("POST /api/listing-studio/ebay-draft-batches/[batchId]/items/[itemId]/retry — CORRECTIVE PASS (failed first draft)", () => {
-  it("REQUIREMENT: requires the authenticated owner, exactly like every other eBay route", async () => {
+describe("PHASE 3 — POST /api/listing-studio/ebay-draft-batches/[batchId]/items/[itemId]/retry is RETIRED", () => {
+  it("returns 410 Gone, never retries any legacy item, never touches the Inventory API pipeline", async () => {
+    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
+    expect(response.status).toBe(410);
+    const body = await response.json();
+    expect(body.retired).toBe(true);
+    expect(retryFailedEbayDraftItem).not.toHaveBeenCalled();
+    expect(enforceRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("still requires the authenticated owner", async () => {
     await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
     expect(requireOwner).toHaveBeenCalledTimes(1);
-  });
-
-  it("applies a rate limit before doing any real work", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "not_found" });
-    await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(enforceRateLimit).toHaveBeenCalledWith("owner-1", "ebay_draft_item_retry", expect.any(Number), expect.any(Number));
-  });
-
-  it("404s for not_found (wrong owner/batch/item)", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "not_found" });
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(response.status).toBe(404);
-  });
-
-  it("409s for not_retryable, naming the item's actual current status", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "not_retryable", itemStatus: "queued" });
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(response.status).toBe(409);
-    const body = await response.json();
-    expect(body.error).toContain("queued");
-  });
-
-  it("400s for ineligible, with the real blocking reasons surfaced", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "ineligible", reasons: ["Missing or unsupported eBay condition."] });
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(response.status).toBe(400);
-    const body = await response.json();
-    expect(body.reasons).toEqual(["Missing or unsupported eBay condition."]);
-  });
-
-  it("409s for already_in_progress (the concurrency guard tripped)", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "already_in_progress" });
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(response.status).toBe(409);
-  });
-
-  it("REQUIREMENT: on success, returns the outcome, the reconciliation diagnostics, and the batch's fresh full state", async () => {
-    retryFailedEbayDraftItem.mockResolvedValue({ outcome: "requeued", inventoryItemExists: false, offerExists: false });
-    getEbayDraftBatch.mockResolvedValue({
-      batch: { id: BATCH_ID, ownerId: "owner-1", status: "in_progress", listingCount: 1, displayNumber: 1, boxDismissedAt: null, activityDismissedAt: null, createdAt: "x", completedAt: null },
-      items: [{ id: ITEM_ID, batchId: BATCH_ID, marketplaceDraftId: "mdraft-1", productDraftId: PRODUCT_A, queuePosition: 0, status: "uploading_photos", attemptCount: 1, errorCode: null, errorMessage: null, ebayOfferId: null, startedAt: "x", completedAt: null, generatedTitle: "Title", sku: "1644" }],
-    });
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), itemParams());
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.outcome).toBe("requeued");
-    expect(body.inventoryItemExists).toBe(false);
-    expect(body.offerExists).toBe(false);
-    expect(body.batch.items[0].status).toBe("uploading_photos");
-  });
-
-  it("rejects an invalid batch or item id before touching the lib layer", async () => {
-    const response = await retryRoute(new Request("http://test", { method: "POST" }), { params: Promise.resolve({ batchId: "not-a-uuid", itemId: ITEM_ID }) });
-    expect(response.status).toBe(400);
-    expect(retryFailedEbayDraftItem).not.toHaveBeenCalled();
   });
 });

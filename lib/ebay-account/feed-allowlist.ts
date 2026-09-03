@@ -28,6 +28,10 @@ const ALLOWED_FEED_OPERATIONS: ReadonlySet<string> = new Set([
   "getFeedTask",
   "getFeedTasks",
   "getFeedResultFile",
+  // Read-only existence check for an already-uploaded input file — added
+  // to prevent a duplicate upload on retry (audit point 13). See
+  // lib/ebay-account/feed-client.ts's own feedTaskHasInputFile.
+  "getFeedInputFile",
 ]);
 
 /** Feed API operations that could touch order/fulfilment data or other

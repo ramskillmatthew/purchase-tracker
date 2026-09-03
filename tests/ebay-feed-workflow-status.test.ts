@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   EBAY_FEED_BATCH_STATUSES, EBAY_FEED_ITEM_STATUSES,
-  EBAY_FEED_BATCH_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_LABELS,
-  isEbayFeedBatchStatusTerminal, isEbayFeedBatchInProgress, SELLER_HUB_DRAFTS_URL,
+  EBAY_FEED_BATCH_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE,
+  isEbayFeedBatchStatusTerminal, isEbayFeedBatchInProgress, isEbayFeedItemInProgress,
+  computeEbayFeedWorkflowSecondaryLine, computeEbayFeedItemWorkflowStatus, SELLER_HUB_DRAFTS_URL,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 
 describe("eBay Feed workflow terminology — never implies auto-publish or reuses the retired Inventory API pipeline's vocabulary", () => {
@@ -48,5 +49,36 @@ describe("eBay Feed workflow terminology — never implies auto-publish or reuse
 
   it("the Seller Hub drafts URL is exactly the real, confirmed one", () => {
     expect(SELLER_HUB_DRAFTS_URL).toBe("https://www.ebay.co.uk/sh/lst/drafts");
+  });
+});
+
+describe("PHASE 4 — per-item helpers for the single-listing workflow chip", () => {
+  it("every item status has a real hex tone", () => {
+    for (const status of EBAY_FEED_ITEM_STATUSES) expect(EBAY_FEED_ITEM_STATUS_TONE[status]).toMatch(/^#[0-9A-Fa-f]{6}$/);
+  });
+
+  it("only queued/uploaded/awaiting_result pulse as in-progress", () => {
+    expect(isEbayFeedItemInProgress("queued")).toBe(true);
+    expect(isEbayFeedItemInProgress("uploaded")).toBe(true);
+    expect(isEbayFeedItemInProgress("awaiting_result")).toBe(true);
+    expect(isEbayFeedItemInProgress("succeeded")).toBe(false);
+    expect(isEbayFeedItemInProgress("failed")).toBe(false);
+    expect(isEbayFeedItemInProgress("cancelled")).toBe(false);
+    expect(isEbayFeedItemInProgress(null)).toBe(false);
+  });
+
+  it("computeEbayFeedItemWorkflowStatus maps every real status through except cancelled/null/unrecognised", () => {
+    expect(computeEbayFeedItemWorkflowStatus("queued")).toBe("queued");
+    expect(computeEbayFeedItemWorkflowStatus("succeeded")).toBe("succeeded");
+    expect(computeEbayFeedItemWorkflowStatus("cancelled")).toBeNull();
+    expect(computeEbayFeedItemWorkflowStatus(null)).toBeNull();
+    expect(computeEbayFeedItemWorkflowStatus("something_unexpected")).toBeNull();
+  });
+
+  it("secondary line shows queue position while queued, the real error while failed, nothing otherwise", () => {
+    expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: "queued", queuePosition: 2, errorMessage: null })).toBe("Position 3");
+    expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: "failed", queuePosition: null, errorMessage: "Category ID is invalid" })).toBe("Category ID is invalid");
+    expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: "succeeded", queuePosition: null, errorMessage: null })).toBeNull();
+    expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: null, queuePosition: null, errorMessage: null })).toBeNull();
   });
 });
