@@ -235,6 +235,27 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
     });
   });
 
+  // CORRECTIVE PASS (third real-submission audit) — REQUIREMENT (test 2):
+  // a child under a failed parent must never remain claimable. A failed
+  // batch is structurally unclaimable at the BATCH level (this pipeline
+  // only ever claims whole batches, never individual items — see this
+  // file's own header), so its stale 'queued' child is never touched by
+  // any subsequent claim/tick, exactly like Batch #1's own real behaviour
+  // (attempt_count frozen, item frozen) confirmed by live read-only
+  // diagnosis this corrective pass performed.
+  it("REQUIREMENT (test 2): a 'failed' batch's stale queued child is never claimed or advanced by a later process tick", async () => {
+    const batch = fakeBatch({ status: "failed", attempt_count: 3, error_code: "ebay_task_error", error_message: "The X-EBAY-C-MARKETPLACE-ID header is missing or invalid." });
+    const items = [fakeItem({ status: "queued" })];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(result.claimedCount).toBe(0);
+      expect(batch.status).toBe("failed");
+      expect(batch.attempt_count).toBe(3);
+      expect(items[0].status).toBe("queued");
+    });
+  });
+
   it("persists the real eBay task ID as soon as createFeedTask succeeds, before any upload is attempted", async () => {
     const batch = fakeBatch({ status: "creating_task" });
     const items = [fakeItem()];

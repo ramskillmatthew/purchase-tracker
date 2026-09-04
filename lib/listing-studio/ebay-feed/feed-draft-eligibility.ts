@@ -58,6 +58,12 @@ export function evaluateEbayFeedDraftEligibility(input: EbayFeedDraftEligibility
   if (input.alreadyHasFeedDraft) return { eligible: false, reasons: ["A Seller Hub draft already exists for this listing"] };
 
   const feedBatchState = input.feedBatchState ?? { kind: "none" as const };
+  // CORRECTIVE PASS (third real-submission audit) — checked BEFORE
+  // "active": a stale, inconsistent row must never be reported as if it
+  // were still genuinely working.
+  if (feedBatchState.kind === "needs_reconciliation") {
+    return { eligible: false, reasons: [`Seller Hub Batch #${feedBatchState.displayNumber}'s local record for this listing is inconsistent and needs reconciliation before it can be retried`] };
+  }
   if (feedBatchState.kind === "active") {
     return { eligible: false, reasons: [`Already in Seller Hub Batch #${feedBatchState.displayNumber}`] };
   }

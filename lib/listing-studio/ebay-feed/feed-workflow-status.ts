@@ -158,21 +158,55 @@ export type EbayFeedBatchBlockingState =
    * brand-new "Create" again (Phase 6's explicit requirement); the UI
    * offers a deliberate "Retry Seller Hub draft" action for this case
    * instead. */
-  | { kind: "failed"; batchId: string; displayNumber: number };
+  | { kind: "failed"; batchId: string; displayNumber: number }
+  /** CORRECTIVE PASS (third real-submission audit — the live Batch #1/
+   * SKU 1644 inconsistency) — the parent batch has already reached a
+   * TERMINAL status, but this item's own row was never updated to match
+   * (it is still queued/uploaded/awaiting_result). This is a genuine data
+   * inconsistency, never a still-active submission: it can only exist for
+   * a batch that failed BEFORE markBatchFailed's own item-cascade fix
+   * existed (see feed-batches.ts's own markBatchFailed comment), or from
+   * some other bug that left the same shape. Deliberately distinct from
+   * both "active" (which would wrongly claim this is still genuinely
+   * working) and "failed" (which would offer a Retry that first needs
+   * this inconsistency resolved) — the UI must require an explicit
+   * reconciliation step (see feed-batches.ts's own
+   * reconcileInconsistentFailedFeedBatchItems) before Retry is ever
+   * offered for this listing. */
+  | { kind: "needs_reconciliation"; batchId: string; displayNumber: number };
+
+/** Shared, byte-identical copy for the "needs_reconciliation" state —
+ * defined once here so the table row, the inspector panel, and the
+ * blocking-reason text can never drift apart on wording. */
+export const NEEDS_RECONCILIATION_LABEL = "Failed — local batch state needs reconciliation";
+export const NEEDS_RECONCILIATION_SECONDARY_LINE = "This attempt failed before eBay was ever contacted, but its local record wasn't fully updated. Nothing reached eBay — reconcile it before retrying.";
 
 /** Pure function over already-fetched status fields — never fetches
  * anything itself. `displayNumberByBatchId` may be a Map (server-internal
  * use) or a plain object (safe to build directly from a JSON API
- * response, which can never carry a Map). */
+ * response, which can never carry a Map). `batch_status`/`ebay_task_id`
+ * are optional ONLY for backward compatibility with call sites that
+ * predate this corrective pass and cannot supply them (they simply never
+ * see "needs_reconciliation" — every real call site now supplies both). */
 export function computeEbayFeedBatchBlockingState(
-  status: { batch_id: string; item_status: string } | null,
+  status: { batch_id: string; item_status: string; batch_status?: string; ebay_task_id?: string | null } | null,
   displayNumberByBatchId: Map<string, number> | Record<string, number>,
 ): EbayFeedBatchBlockingState {
   if (!status) return { kind: "none" };
   const displayNumber = displayNumberByBatchId instanceof Map
     ? (displayNumberByBatchId.get(status.batch_id) ?? 0)
     : (displayNumberByBatchId[status.batch_id] ?? 0);
-  if (isEbayFeedItemInProgress(status.item_status as EbayFeedItemStatus)) {
+  const itemInProgress = isEbayFeedItemInProgress(status.item_status as EbayFeedItemStatus);
+  if (itemInProgress && status.batch_status !== undefined && isEbayFeedBatchStatusTerminal(status.batch_status)) {
+    // The parent already reached a terminal outcome (failed, completed,
+    // completed_with_errors, or cancelled) but this item still looks
+    // in-progress — a stale, inconsistent local row, never a genuinely
+    // still-active submission. Checked BEFORE the ordinary "active"
+    // branch below specifically so a stale row can never be misreported
+    // as "still working".
+    return { kind: "needs_reconciliation", batchId: status.batch_id, displayNumber };
+  }
+  if (itemInProgress) {
     return { kind: "active", batchId: status.batch_id, displayNumber };
   }
   if (status.item_status === "failed") {

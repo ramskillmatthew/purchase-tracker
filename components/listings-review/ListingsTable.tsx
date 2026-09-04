@@ -13,7 +13,8 @@ import {
 // that retired pipeline's own historical batch display elsewhere).
 import {
   EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
-  type EbayFeedItemStatus,
+  NEEDS_RECONCILIATION_LABEL, NEEDS_RECONCILIATION_SECONDARY_LINE,
+  type EbayFeedItemStatus, type EbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";
 import { WorkflowStatus } from "./WorkflowStatus";
@@ -56,6 +57,9 @@ export type ListingTableRow = {
   ebayErrorMessage: string | null;
   ebaySellingPricePence: number | null;
   ebayProfitPence: number | null;
+  // CORRECTIVE PASS (third real-submission audit) — see
+  // ListingsReviewWorkspace.tsx's own comment on this field.
+  ebayFeedBatchState: EbayFeedBatchBlockingState;
 };
 
 // Readiness reuses the same emerald/amber the workflow statuses use for
@@ -92,6 +96,17 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
   }
   if (!row.hasEbayPreparation) {
     return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence };
+  }
+  // CORRECTIVE PASS (third real-submission audit) — a stale, inconsistent
+  // item (parent already terminal-failed, this row never updated to
+  // match) must never display as ordinary "Queued"/"Uploaded"/etc, which
+  // would falsely suggest the submission is still genuinely working.
+  // Checked BEFORE the ordinary ebayWorkflowStatus-derived label below.
+  if (row.ebayFeedBatchState.kind === "needs_reconciliation") {
+    return {
+      label: NEEDS_RECONCILIATION_LABEL, tone: EBAY_FEED_ITEM_STATUS_TONE.failed, pulse: false,
+      secondaryLine: NEEDS_RECONCILIATION_SECONDARY_LINE, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
+    };
   }
   const label = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[row.ebayWorkflowStatus] : (row.ebayContentReady ? "Ready" : "Needs review");
   const tone = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[row.ebayWorkflowStatus] : (row.ebayContentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);

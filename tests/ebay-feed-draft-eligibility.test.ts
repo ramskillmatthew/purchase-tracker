@@ -88,5 +88,27 @@ describe("evaluateEbayFeedDraftEligibility", () => {
     it("{ kind: \"none\" } explicitly passed behaves identically to omitting it", () => {
       expect(evaluateEbayFeedDraftEligibility(baseInput({ feedBatchState: { kind: "none" } }))).toEqual({ eligible: true, reasons: [] });
     });
+
+    // CORRECTIVE PASS (third real-submission audit) — REQUIREMENT (test
+    // 14): normal Create remains unavailable while an unresolved
+    // inconsistent attempt exists, with its own distinct reason text.
+    it("'needs_reconciliation' blocks with a reconciliation-oriented reason, never the 'active' or plain 'failed' wording", () => {
+      const result = evaluateEbayFeedDraftEligibility(baseInput({ feedBatchState: { kind: "needs_reconciliation", batchId: "b1", displayNumber: 1 } }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons[0]).toContain("Seller Hub Batch #1");
+      expect(result.reasons[0]).toMatch(/inconsistent/);
+      expect(result.reasons[0]).toMatch(/reconciliation/);
+      expect(result.reasons[0]).not.toContain("Already in Seller Hub Batch");
+      expect(result.reasons[0]).not.toMatch(/Retry Seller Hub draft/);
+    });
+
+    it("'needs_reconciliation' is checked before 'active' — never misreported as still genuinely working", () => {
+      const result = evaluateEbayFeedDraftEligibility(baseInput({
+        feedBatchState: { kind: "needs_reconciliation", batchId: "b1", displayNumber: 1 },
+        hasValidPrice: false,
+      }));
+      expect(result.reasons).toHaveLength(1);
+      expect(result.reasons[0]).toMatch(/inconsistent/);
+    });
   });
 });

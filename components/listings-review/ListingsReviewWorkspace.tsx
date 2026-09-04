@@ -190,6 +190,12 @@ type ListingRow = ListingDetails & ReviewableListing & {
   ebayErrorMessage: string | null;
   ebaySellingPricePence: number | null;
   ebayProfitPence: number | null;
+  // CORRECTIVE PASS (third real-submission audit) — mirrors row.ebay's own
+  // feedBatchState, flattened to the same top level as the other ebay*
+  // fields above so ListingsTable's own workflow column (which reads only
+  // the flat fields, never the nested .ebay object) can detect a stale,
+  // inconsistent row and refuse to display a misleading "Queued".
+  ebayFeedBatchState: EbayFeedBatchBlockingState;
 };
 
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
@@ -294,6 +300,14 @@ export default function ListingsReviewWorkspace() {
   const [retryConfirmBatchId, setRetryConfirmBatchId] = useState<string | null>(null);
   const [retryingBatchId, setRetryingBatchId] = useState<string | null>(null);
   const [retryError, setRetryError] = useState("");
+  // CORRECTIVE PASS (third real-submission audit) — Reconcile is a
+  // genuinely separate action from Retry (never combined without its own
+  // confirmation boundary — Phase 5's explicit requirement): it makes no
+  // eBay call at all, ever, and only ever flips a stale local item row to
+  // 'failed' so Retry can subsequently become available.
+  const [reconcileConfirmBatchId, setReconcileConfirmBatchId] = useState<string | null>(null);
+  const [reconcilingBatchId, setReconcilingBatchId] = useState<string | null>(null);
+  const [reconcileError, setReconcileError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
   // Listings Review redesign — the 5 top tabs (All/Ready/Needs review/
@@ -750,6 +764,7 @@ export default function ListingsReviewWorkspace() {
     return {
       ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage,
       ebayWorkflowStatus, ebayQueuePosition, ebayErrorMessage, ebay,
+      ebayFeedBatchState: row.ebay?.feedBatchState ?? { kind: "none" as const },
     };
   }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId]);
 
@@ -987,6 +1002,30 @@ export default function ListingsReviewWorkspace() {
     return [...reasons];
   }, [ebayEligibilityById, eligibleEbayCount]);
 
+  // CORRECTIVE PASS (third real-submission audit) — a DURABLE entry point
+  // for "Reconcile failed batch" / "Retry Seller Hub draft", always
+  // reachable on any fresh page load (computed straight from this row's
+  // already-fetched feedBatchState), unlike Live Activity's own
+  // View-error/Retry controls (DraftActivityPanel.tsx's own
+  // retryableBatchId), which only ever appear for a transition observed
+  // LIVE within the current browser session — a real gap this audit
+  // found: a batch that failed in an EARLIER session (like the real
+  // Batch #1) never gets a Live Activity entry on a fresh reload, so
+  // that surface alone is not sufficient. Scoped to exactly one selected
+  // listing (bulkCount === 1) to stay unambiguous — with several
+  // listings selected across different blocking batches, only the
+  // reasons list is shown, exactly as before.
+  const ebayBlockingBatchAction = useMemo(() => {
+    // Deliberately reads bulkSelectedIds.size directly, never the later-
+    // declared `bulkCount` alias — this memo runs before that const's own
+    // declaration during render.
+    if (bulkSelectedIds.size !== 1) return null;
+    const id = [...bulkSelectedIds][0];
+    const state = listingsById.get(id)?.ebay?.feedBatchState;
+    if (!state || state.kind === "none" || state.kind === "active") return null;
+    return state;
+  }, [bulkSelectedIds, listingsById]);
+
   // CORRECTIVE PASS — step 1: opens the preview dialog for every currently
   // ELIGIBLE selected listing (never the ineligible ones — nothing to
   // preview for a listing that won't be included). Purely read-only: no
@@ -1141,12 +1180,48 @@ export default function ListingsReviewWorkspace() {
         ...current,
       ]);
       setRetryConfirmBatchId(null);
+      // CORRECTIVE PASS (third real-submission audit) — row.ebay.feedBatchState
+      // (the field eligibility/ebayBlockingBatchAction actually reads) comes
+      // from a SEPARATE fetch (listings-review), never from
+      // ebayBatchStatusById above — without this reload, the blocking
+      // reason/action shown for this listing would stay stale until the
+      // page's own next full data refresh.
+      await loadListings();
     } catch {
       setRetryError("Could not reach the server to retry this Seller Hub draft.");
     } finally {
       setRetryingBatchId(null);
     }
-  }, [retryConfirmBatchId]);
+  }, [retryConfirmBatchId, loadListings]);
+
+  // CORRECTIVE PASS (third real-submission audit) — "Reconcile failed
+  // batch": a genuinely SEPARATE action from Retry (own confirmation
+  // boundary), makes NO eBay call at all — it only ever repairs a stale
+  // local child row via reconcileInconsistentFailedFeedBatchItems.
+  const handleOpenReconcileConfirm = useCallback((batchId: string) => { setReconcileError(""); setReconcileConfirmBatchId(batchId); }, []);
+
+  const handleConfirmReconcileEbayBatch = useCallback(async () => {
+    if (!reconcileConfirmBatchId) return;
+    const batchId = reconcileConfirmBatchId;
+    setReconcilingBatchId(batchId);
+    setReconcileError("");
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-feed-batches/${batchId}/reconcile`, { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setReconcileError(body?.error || "Could not reconcile this Seller Hub draft batch."); return; }
+      setEbayBatchStatusById(current => new Map(current).set(batchId, body as EbayBatchStatus));
+      setReconcileConfirmBatchId(null);
+      // Refreshes row.ebay.feedBatchState fresh from the server — once
+      // reconciled, the item's own status is now genuinely 'failed', so
+      // this listing's blocking state becomes "failed" (Retry available)
+      // rather than "needs_reconciliation".
+      await loadListings();
+    } catch {
+      setReconcileError("Could not reach the server to reconcile this Seller Hub draft batch.");
+    } finally {
+      setReconcilingBatchId(null);
+    }
+  }, [reconcileConfirmBatchId, loadListings]);
 
   // Stuck-batch dismissal (product spec requirement) — a small × on each
   // stuck eBay batch row opens a real confirmation dialog (never a browser
@@ -2526,6 +2601,16 @@ export default function ListingsReviewWorkspace() {
                 <ul className="lr-bulk-ebay-blockers">
                   {ebayIneligibleBlockingReasons.map(reason => <li key={reason}>{reason}</li>)}
                 </ul>
+                {/* CORRECTIVE PASS (third real-submission audit) — a
+                    DURABLE Reconcile/Retry entry point, always reachable
+                    here regardless of Live Activity's own session-only
+                    visibility (see ebayBlockingBatchAction's own comment). */}
+                {ebayBlockingBatchAction?.kind === "needs_reconciliation" && (
+                  <button type="button" className="button-secondary" onClick={() => handleOpenReconcileConfirm(ebayBlockingBatchAction.batchId)}>Reconcile failed batch</button>
+                )}
+                {ebayBlockingBatchAction?.kind === "failed" && (
+                  <button type="button" className="button-secondary" onClick={() => handleOpenRetryConfirm(ebayBlockingBatchAction.batchId)}>Retry Seller Hub draft</button>
+                )}
               </div>
             )}
           </div>
@@ -2607,15 +2692,27 @@ export default function ListingsReviewWorkspace() {
         requirement. The actual retry is never triggered merely by opening
         this dialog. */}
     {retryConfirmBatchId && (() => {
+      // CORRECTIVE PASS (third real-submission audit) — ebayBatchStatusById
+      // is only ever populated by Live Activity's own session-scoped
+      // polling (see this file's own header on that gap); when this
+      // dialog was opened from the DURABLE blocking-reasons panel instead
+      // (e.g. Batch #1, whose box was dismissed in an earlier session),
+      // that map has nothing for this batchId — fall back to the
+      // currently-selected row's own already-fetched feedBatchState/
+      // errorMessage, which is always fresh regardless of session history.
       const status = ebayBatchStatusById.get(retryConfirmBatchId);
+      const selectedRow = bulkSelectedIds.size === 1 ? listingsById.get([...bulkSelectedIds][0]) : undefined;
+      const fallbackState = selectedRow?.ebay?.feedBatchState;
+      const displayNumber = status?.displayNumber ?? (fallbackState && fallbackState.kind !== "none" && fallbackState.batchId === retryConfirmBatchId ? fallbackState.displayNumber : undefined);
+      const errorMessage = status?.errorMessage ?? selectedRow?.ebay?.errorMessage ?? null;
       const retrying = retryingBatchId === retryConfirmBatchId;
       return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !retrying) setRetryConfirmBatchId(null); }}>
         <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="retry-title" aria-describedby="retry-body">
           <button className="dialog-close" type="button" onClick={() => setRetryConfirmBatchId(null)} aria-label="Close" disabled={retrying}>×</button>
           <div className="dialog-copy">
-            <h2 id="retry-title">Retry Seller Hub Batch {status?.displayNumber ?? "?"}?</h2>
+            <h2 id="retry-title">Retry Seller Hub Batch {displayNumber ?? "?"}?</h2>
             <p id="retry-body">
-              Batch {status?.displayNumber ?? "?"} previously failed{status?.errorMessage ? `: ${status.errorMessage}` : "."} Retrying will first check
+              Batch {displayNumber ?? "?"} previously failed{errorMessage ? `: ${errorMessage}` : "."} Retrying will first check
               whether eBay already has a record of this attempt, so it never creates a duplicate upload — it will not publish anything, and it will not
               create a new task if one already accepted this batch&apos;s file.
             </p>
@@ -2624,6 +2721,35 @@ export default function ListingsReviewWorkspace() {
           <div className="dialog-actions">
             <button type="button" className="dialog-cancel" onClick={() => setRetryConfirmBatchId(null)} disabled={retrying}>Cancel</button>
             <button type="button" className="dialog-confirm" onClick={handleConfirmRetryEbayBatch} disabled={retrying}>{retrying ? "Retrying…" : "Retry Seller Hub draft"}</button>
+          </div>
+        </div>
+      </div>;
+    })()}
+
+    {/* CORRECTIVE PASS (third real-submission audit — Phase 4/5) —
+        "Reconcile failed batch": a genuinely separate confirmation
+        boundary from Retry. Explicitly states this makes NO eBay call. */}
+    {reconcileConfirmBatchId && (() => {
+      const status = ebayBatchStatusById.get(reconcileConfirmBatchId);
+      const selectedRow = bulkSelectedIds.size === 1 ? listingsById.get([...bulkSelectedIds][0]) : undefined;
+      const fallbackState = selectedRow?.ebay?.feedBatchState;
+      const displayNumber = status?.displayNumber ?? (fallbackState && fallbackState.kind !== "none" && fallbackState.batchId === reconcileConfirmBatchId ? fallbackState.displayNumber : undefined);
+      const reconciling = reconcilingBatchId === reconcileConfirmBatchId;
+      return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !reconciling) setReconcileConfirmBatchId(null); }}>
+        <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reconcile-title" aria-describedby="reconcile-body">
+          <button className="dialog-close" type="button" onClick={() => setReconcileConfirmBatchId(null)} aria-label="Close" disabled={reconciling}>×</button>
+          <div className="dialog-copy">
+            <h2 id="reconcile-title">Reconcile Seller Hub Batch {displayNumber ?? "?"}?</h2>
+            <p id="reconcile-body">
+              Batch {displayNumber ?? "?"} already failed, but this listing&apos;s own local record was never fully updated to match. This step makes{" "}
+              <strong>no request to eBay at all</strong> — it only corrects this application&apos;s own local record. Once reconciled, a separate,
+              explicit &quot;Retry Seller Hub draft&quot; action becomes available if you want to try again.
+            </p>
+          </div>
+          {reconcileError && <p className="import-select-error" role="alert">{reconcileError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setReconcileConfirmBatchId(null)} disabled={reconciling}>Cancel</button>
+            <button type="button" className="dialog-confirm" onClick={handleConfirmReconcileEbayBatch} disabled={reconciling}>{reconciling ? "Reconciling…" : "Reconcile failed batch"}</button>
           </div>
         </div>
       </div>;

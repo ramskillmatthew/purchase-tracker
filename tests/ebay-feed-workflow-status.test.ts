@@ -115,4 +115,47 @@ describe("computeEbayFeedBatchBlockingState — CORRECTIVE PASS (duplicate-submi
   it("an unknown batch id falls back to display number 0 rather than throwing", () => {
     expect(computeEbayFeedBatchBlockingState({ batch_id: "unknown-batch", item_status: "failed" }, new Map())).toEqual({ kind: "failed", batchId: "unknown-batch", displayNumber: 0 });
   });
+
+  // CORRECTIVE PASS (third real-submission audit — the live Batch #1/SKU
+  // 1644 inconsistency: a 'failed' parent with a still-'queued' child).
+  describe("REQUIREMENT (test 1): 'needs_reconciliation' — a terminal parent whose child row was never updated to match", () => {
+    it("a FAILED parent with a still-queued/uploaded/awaiting_result child is 'needs_reconciliation', never 'active'", () => {
+      const map = new Map([["batch-1", 1]]);
+      for (const itemStatus of ["queued", "uploaded", "awaiting_result"]) {
+        expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: itemStatus, batch_status: "failed" }, map))
+          .toEqual({ kind: "needs_reconciliation", batchId: "batch-1", displayNumber: 1 });
+      }
+    });
+
+    it("this exact real production shape is detected correctly", () => {
+      // The live Batch #1 / SKU 1644 row shape, verified via a read-only
+      // Supabase check this corrective pass's own diagnosis performed.
+      expect(computeEbayFeedBatchBlockingState(
+        { batch_id: "70c2920d-2be9-489d-be5d-395c5bebbbf8", item_status: "queued", batch_status: "failed", ebay_task_id: null },
+        new Map([["70c2920d-2be9-489d-be5d-395c5bebbbf8", 1]]),
+      )).toEqual({ kind: "needs_reconciliation", batchId: "70c2920d-2be9-489d-be5d-395c5bebbbf8", displayNumber: 1 });
+    });
+
+    it("a NON-terminal batch_status ('processing') with an in-progress item is still ordinary 'active', not 'needs_reconciliation'", () => {
+      expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "queued", batch_status: "processing" }, new Map([["batch-1", 1]])))
+        .toEqual({ kind: "active", batchId: "batch-1", displayNumber: 1 });
+    });
+
+    it("omitting batch_status entirely (older call sites) never produces 'needs_reconciliation' — falls back to ordinary 'active', exactly as before this corrective pass", () => {
+      expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "queued" }, new Map([["batch-1", 1]])))
+        .toEqual({ kind: "active", batchId: "batch-1", displayNumber: 1 });
+    });
+
+    it("a terminal batch_status with a 'failed' item is ordinary 'failed', never 'needs_reconciliation' (the item already correctly matches its parent)", () => {
+      expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "failed", batch_status: "failed" }, new Map([["batch-1", 1]])))
+        .toEqual({ kind: "failed", batchId: "batch-1", displayNumber: 1 });
+    });
+
+    it("every terminal batch status ('completed', 'completed_with_errors', 'cancelled') is also recognised, not just 'failed' — general safety net", () => {
+      for (const batchStatus of ["completed", "completed_with_errors", "cancelled"]) {
+        expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "queued", batch_status: batchStatus }, new Map([["batch-1", 1]])))
+          .toEqual({ kind: "needs_reconciliation", batchId: "batch-1", displayNumber: 1 });
+      }
+    });
+  });
 });

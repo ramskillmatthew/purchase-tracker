@@ -1849,3 +1849,98 @@ describe("Follow-up correction (orphaned extension batch recovery) — Hidden ac
     expect(fn).toContain("if (recovering) return;");
   });
 });
+
+/**
+ * CORRECTIVE PASS (third real-submission audit — the live Batch #1/SKU
+ * 1644 inconsistency: a 'failed' parent whose child item was still
+ * 'queued', which the UI misleadingly displayed as ordinary "Queued" and
+ * offered no way to resolve). Phase 7's own test requirements 2-4, 13-15.
+ */
+describe("REQUIREMENT (test 3): 'needs_reconciliation' never displays as ordinary Queued/Uploaded/etc, in either the table or the inspector panel", () => {
+  const tableSource = read("components/listings-review/ListingsTable.tsx");
+  const detailsPanelSource = read("components/listings-review/ListingDetailsPanel.tsx");
+
+  it("ListingsTable checks ebayFeedBatchState.kind === \"needs_reconciliation\" BEFORE computing the ordinary ebayWorkflowStatus-derived label", () => {
+    const fnStart = tableSource.indexOf("function resolveWorkflowDisplay");
+    const fnBody = tableSource.slice(fnStart, tableSource.indexOf("if (!row.hasEbayPreparation)", fnStart) + 4000);
+    const reconciliationCheckIndex = fnBody.indexOf('row.ebayFeedBatchState.kind === "needs_reconciliation"');
+    const ordinaryLabelIndex = fnBody.indexOf("row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[row.ebayWorkflowStatus]");
+    expect(reconciliationCheckIndex).toBeGreaterThan(-1);
+    expect(ordinaryLabelIndex).toBeGreaterThan(reconciliationCheckIndex);
+  });
+
+  it("ListingsTable's needs_reconciliation branch never pulses (it is not genuinely still working)", () => {
+    const fnStart = tableSource.indexOf('row.ebayFeedBatchState.kind === "needs_reconciliation"');
+    const branchBody = tableSource.slice(fnStart, fnStart + 300);
+    expect(branchBody).toContain("pulse: false");
+  });
+
+  it("ListingDetailsPanel's EbayWorkflowStatusBlock checks feedBatchState.kind === \"needs_reconciliation\" BEFORE computing the ordinary label, and never pulses", () => {
+    const fnStart = detailsPanelSource.indexOf("function EbayWorkflowStatusBlock");
+    const fnBody = detailsPanelSource.slice(fnStart, detailsPanelSource.indexOf("function EbayFailedDraftActions"));
+    const reconciliationCheckIndex = fnBody.indexOf('ebay.feedBatchState.kind === "needs_reconciliation"');
+    const ordinaryLabelIndex = fnBody.indexOf("ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[ebay.workflowStatus]");
+    expect(reconciliationCheckIndex).toBeGreaterThan(-1);
+    expect(ordinaryLabelIndex).toBeGreaterThan(reconciliationCheckIndex);
+    const branchBody = fnBody.slice(reconciliationCheckIndex, ordinaryLabelIndex);
+    expect(branchBody).toContain("pulse={false}");
+  });
+
+  it("both components import and render the SAME shared label/secondary-line text — never independently-typed strings that could drift", () => {
+    expect(tableSource).toContain("NEEDS_RECONCILIATION_LABEL");
+    expect(tableSource).toContain("NEEDS_RECONCILIATION_SECONDARY_LINE");
+    expect(detailsPanelSource).toContain("NEEDS_RECONCILIATION_LABEL");
+    expect(detailsPanelSource).toContain("NEEDS_RECONCILIATION_SECONDARY_LINE");
+  });
+
+  it("REQUIREMENT: the shared label never says 'Queued' and never tells the user to wait", () => {
+    const workflowStatusSource = read("lib/listing-studio/ebay-feed/feed-workflow-status.ts");
+    const labelLine = workflowStatusSource.slice(workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_LABEL"), workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SECONDARY_LINE"));
+    expect(labelLine).not.toMatch(/\bQueued\b/);
+    expect(labelLine).not.toMatch(/\bwait\b/i);
+    const secondaryLine = workflowStatusSource.slice(workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SECONDARY_LINE"), workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SECONDARY_LINE") + 400);
+    expect(secondaryLine).not.toMatch(/\bwait\b/i);
+  });
+});
+
+describe("REQUIREMENT (test 4/13/14/15): a durable 'Reconcile failed batch' / 'Retry Seller Hub draft' entry point exists outside Live Activity's own session-only visibility", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("ebayBlockingBatchAction is computed from the currently-selected row's own already-fetched feedBatchState — never from ebayBatchStatusById (which only Live Activity's session polling populates)", () => {
+    const start = workspaceSource.indexOf("const ebayBlockingBatchAction = useMemo");
+    const fn = workspaceSource.slice(start, start + 700);
+    expect(fn).toContain("listingsById.get(id)?.ebay?.feedBatchState");
+  });
+
+  it("'Reconcile failed batch' is rendered only for kind 'needs_reconciliation', and 'Retry Seller Hub draft' only for kind 'failed' — never both at once, never for 'active'", () => {
+    const start = workspaceSource.indexOf("ebayBlockingBatchAction?.kind === \"needs_reconciliation\" && (");
+    const block = workspaceSource.slice(start, start + 500);
+    expect(block).toContain("Reconcile failed batch");
+    expect(block).toContain("Retry Seller Hub draft");
+    expect(block).toContain("handleOpenReconcileConfirm(ebayBlockingBatchAction.batchId)");
+    expect(block).toContain("handleOpenRetryConfirm(ebayBlockingBatchAction.batchId)");
+  });
+
+  it("REQUIREMENT (test 15): Reconcile and Retry are dispatched to genuinely separate handlers/endpoints, never combined into one action", () => {
+    expect(workspaceSource).toContain("handleConfirmReconcileEbayBatch");
+    expect(workspaceSource).toContain("handleConfirmRetryEbayBatch");
+    expect(workspaceSource).toMatch(/fetch\(`\/api\/listing-studio\/ebay-feed-batches\/\$\{batchId\}\/reconcile`/);
+    expect(workspaceSource).toMatch(/fetch\(`\/api\/listing-studio\/ebay-feed-batches\/\$\{batchId\}\/retry`/);
+  });
+
+  it("REQUIREMENT (test 15): the reconcile confirmation dialog explicitly states it makes no eBay request, and is a visually/structurally distinct dialog from the retry one", () => {
+    const dialogStart = workspaceSource.indexOf('id="reconcile-title"');
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 1200);
+    expect(dialogBody).toMatch(/no request to eBay/i);
+    expect(dialogBody).not.toContain('id="retry-title"');
+  });
+
+  it("REQUIREMENT: after a successful retry or reconcile, the row's own feedBatchState is refreshed via loadListings (never left stale)", () => {
+    const retryStart = workspaceSource.indexOf("const handleConfirmRetryEbayBatch = useCallback");
+    const retryFn = workspaceSource.slice(retryStart, workspaceSource.indexOf("}, [retryConfirmBatchId", retryStart));
+    expect(retryFn).toContain("await loadListings();");
+    const reconcileStart = workspaceSource.indexOf("const handleConfirmReconcileEbayBatch = useCallback");
+    const reconcileFn = workspaceSource.slice(reconcileStart, workspaceSource.indexOf("}, [reconcileConfirmBatchId", reconcileStart));
+    expect(reconcileFn).toContain("await loadListings();");
+  });
+});

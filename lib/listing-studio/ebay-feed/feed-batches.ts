@@ -296,6 +296,91 @@ async function resumeFailedBatch(ownerId: string, batchId: string, batchStatus: 
 }
 
 // ---------------------------------------------------------------------
+// PHASE 4 (third real-submission audit — historical data repair) — a
+// server-only, owner-protected reconciliation operation for a
+// PRE-EXISTING inconsistency this application's own OLDER code could
+// produce (before markBatchFailed's own item-cascade fix existed): a
+// batch whose PARENT already reached a terminal 'failed' status, with NO
+// remote eBay task ever recorded (nothing reached eBay), whose CHILD
+// item(s) are still sitting in queued/uploaded/awaiting_result because
+// the failure that terminated the batch happened before this
+// application ever wrote a per-item outcome for it.
+//
+// NO NEW SQL/RPC — deliberately follows this exact module's own
+// established "plain, conditional REST PATCH" pattern (see
+// cancelEbayFeedBatch and resumeFailedBatch above), the same pattern
+// used for every other simple, non-claim-based conditional status
+// update in this pipeline. A single PATCH request's WHERE clause is
+// evaluated atomically by Postgres against the CURRENT row set at
+// execution time (never a stale snapshot from an earlier SELECT), which
+// is exactly the concurrency-safety property this repair needs — no RPC
+// is required to get it. (A dedicated RPC exists elsewhere in this file
+// only where atomic "claim ownership from a specific claimed_by token"
+// semantics are needed, which this repair has no reason to need — it
+// never claims anything, and only ever transitions a row PostgREST's own
+// WHERE clause still finds in the exact state it expects.)
+export type FeedBatchReconciliationResult = { batchId: string; reconciledItemIds: string[]; alreadyConsistent: boolean };
+
+/**
+ * Deliberately conservative and GENERIC (never hardcoded to one batch
+ * id, though `batchId` may be passed to scope a single owner-owned
+ * batch):
+ *   - Only ever considers a batch whose status is EXACTLY 'failed'
+ *     (never completed_with_errors/cancelled/any in-progress status —
+ *     see this file's own header on why those already keep their own
+ *     items in sync through different, already-correct paths).
+ *   - Only ever considers a batch whose ebay_task_id IS NULL — if a
+ *     remote task was ever recorded, this repair refuses to touch it at
+ *     all (Phase 3's own invariant: "when a remote task exists, reconcile
+ *     it with eBay first, never blindly mark children failed" — see
+ *     retryEbayFeedBatch's own getFeedTask-based reconciliation for that
+ *     separate, different case).
+ *   - Only ever changes an item whose status is still
+ *     queued/uploaded/awaiting_result — an item already 'succeeded' or
+ *     'cancelled' is never touched, matching finishBatchItems's own
+ *     guard exactly.
+ *   - Never touches the parent batch row (it is already correctly
+ *     'failed' — there is nothing wrong with it).
+ *   - Never increments attempt_count (the batch row, the only place that
+ *     column exists, is never written here at all).
+ *   - Never calls eBay — every write here is a local Supabase PATCH.
+ *   - Idempotent — a batch with nothing left to fix is reported as
+ *     `alreadyConsistent: true` and receives no PATCH at all; running
+ *     this twice in a row is harmless.
+ *   - Owner-scoped — every query is filtered by owner_id; a batchId
+ *     belonging to a different owner simply matches nothing and is
+ *     silently absent from the result (never an error that would leak
+ *     whether that id exists at all).
+ */
+export async function reconcileInconsistentFailedFeedBatchItems(ownerId: string, batchId?: string): Promise<FeedBatchReconciliationResult[]> {
+  const batchFilter = batchId ? `&id=eq.${batchId}` : "";
+  const candidateBatches = await supabaseRequestAll<{ id: string; error_code: string | null; error_message: string | null }>(
+    `ebay_feed_batches?owner_id=eq.${ownerId}&status=eq.failed&ebay_task_id=is.null${batchFilter}&select=id,error_code,error_message`,
+  );
+  const results: FeedBatchReconciliationResult[] = [];
+  for (const batch of candidateBatches) {
+    const inconsistentItems = await supabaseRequestAll<{ id: string }>(
+      `ebay_feed_batch_items?batch_id=eq.${batch.id}&status=in.(queued,uploaded,awaiting_result)&select=id`,
+    );
+    if (inconsistentItems.length === 0) {
+      results.push({ batchId: batch.id, reconciledItemIds: [], alreadyConsistent: true });
+      continue;
+    }
+    await supabaseRequest(`ebay_feed_batch_items?batch_id=eq.${batch.id}&status=in.(queued,uploaded,awaiting_result)`, {
+      method: "PATCH", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        status: "failed",
+        error_code: batch.error_code ?? "reconciled_after_parent_failure",
+        error_message: batch.error_message ?? "This listing's Seller Hub draft attempt failed before eBay was ever contacted, but its local record was left inconsistent — reconciled automatically.",
+        completed_at: new Date().toISOString(),
+      }),
+    });
+    results.push({ batchId: batch.id, reconciledItemIds: inconsistentItems.map(i => i.id), alreadyConsistent: false });
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------
 // Bulk eligibility resolution — mirrors ebay-draft-batches.ts's own
 // resolveEbayDraftEligibilityForProducts exactly, using the Feed
 // pipeline's own evaluateEbayFeedDraftEligibility (no policy/location
@@ -318,6 +403,16 @@ export type EbayFeedEligibilityByProduct = Map<string, { marketplaceDraftId: str
  * eligibility check can never disagree about what counts as "active" vs.
  * "failed".
  */
+// CORRECTIVE PASS (third real-submission audit) — priority order when,
+// defensively, more than one blocking row is ever found for the same
+// marketplace draft: a genuinely still-in-flight submission always wins
+// (nothing else could be more urgently "don't submit again"), then an
+// inconsistent stale row (needs attention before Retry even makes
+// sense), then an ordinary retryable failure.
+const BLOCKING_STATE_PRIORITY: Record<EbayFeedBatchBlockingState["kind"], number> = {
+  active: 3, needs_reconciliation: 2, failed: 1, none: 0,
+};
+
 async function resolveFeedBatchBlockingStates(marketplaceDraftIds: string[]): Promise<Map<string, EbayFeedBatchBlockingState>> {
   const result = new Map<string, EbayFeedBatchBlockingState>();
   if (marketplaceDraftIds.length === 0) return result;
@@ -326,16 +421,27 @@ async function resolveFeedBatchBlockingStates(marketplaceDraftIds: string[]): Pr
   );
   if (items.length === 0) return result;
   const batchIds = [...new Set(items.map(i => i.batch_id))];
-  const batches = await supabaseRequestAll<{ id: string; display_number: number }>(`ebay_feed_batches?id=in.(${batchIds.join(",")})&select=id,display_number`);
+  // CORRECTIVE PASS (third real-submission audit) — batch_status and
+  // ebay_task_id are now fetched alongside display_number, so
+  // computeEbayFeedBatchBlockingState can recognise a stale item under an
+  // already-terminal parent as "needs_reconciliation" rather than
+  // wrongly reporting it as still "active".
+  const batches = await supabaseRequestAll<{ id: string; display_number: number; status: EbayFeedBatchStatus; ebay_task_id: string | null }>(
+    `ebay_feed_batches?id=in.(${batchIds.join(",")})&select=id,display_number,status,ebay_task_id`,
+  );
   const displayNumberByBatchId = new Map(batches.map(b => [b.id, b.display_number]));
+  const batchById = new Map(batches.map(b => [b.id, b]));
   for (const item of items) {
-    const state = computeEbayFeedBatchBlockingState({ batch_id: item.batch_id, item_status: item.status }, displayNumberByBatchId);
+    const batch = batchById.get(item.batch_id);
+    const state = computeEbayFeedBatchBlockingState(
+      { batch_id: item.batch_id, item_status: item.status, batch_status: batch?.status, ebay_task_id: batch?.ebay_task_id },
+      displayNumberByBatchId,
+    );
     if (state.kind === "none") continue;
-    // An "active" (still in-flight) state always takes priority over a
-    // stale "failed" one for the same listing if, defensively, more than
-    // one row is ever found — normal operation has at most one.
     const existing = result.get(item.marketplace_draft_id);
-    if (!existing || existing.kind !== "active") result.set(item.marketplace_draft_id, state);
+    if (!existing || BLOCKING_STATE_PRIORITY[state.kind] > BLOCKING_STATE_PRIORITY[existing.kind]) {
+      result.set(item.marketplace_draft_id, state);
+    }
   }
   return result;
 }
@@ -456,6 +562,10 @@ async function buildFeedDraftPreviewForProductInner(ownerId: string, productDraf
   // requirement — use Retry Seller Hub draft instead) — independently of
   // (and never via) the legacy ebay_offer_id column.
   const feedBatchState = (await resolveFeedBatchBlockingStates([draft.id])).get(draft.id) ?? { kind: "none" as const };
+  // CORRECTIVE PASS (third real-submission audit) — checked before
+  // "active" so a stale, inconsistent row is never misreported as still
+  // genuinely working.
+  if (feedBatchState.kind === "needs_reconciliation") return { ok: false, reason: `Seller Hub Batch #${feedBatchState.displayNumber}'s local record for this listing is inconsistent and needs reconciliation before it can be retried.` };
   if (feedBatchState.kind === "active") return { ok: false, reason: `The selected listing is already in Seller Hub Batch #${feedBatchState.displayNumber}.` };
   if (feedBatchState.kind === "failed") return { ok: false, reason: `Seller Hub Batch #${feedBatchState.displayNumber} failed for this listing — use Retry Seller Hub draft instead of Create.` };
 

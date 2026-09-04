@@ -15,7 +15,8 @@ import {
 // never the retired Inventory API pipeline's own vocabulary.
 import {
   EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
-  SELLER_HUB_DRAFTS_URL, type EbayFeedItemStatus, type EbayFeedBatchBlockingState,
+  SELLER_HUB_DRAFTS_URL, NEEDS_RECONCILIATION_LABEL, NEEDS_RECONCILIATION_SECONDARY_LINE,
+  type EbayFeedItemStatus, type EbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
@@ -37,6 +38,19 @@ const READINESS_TONE: Record<ListingReviewStatus, string> = { ready: READINESS_T
  * details for. "Content ready"/"Needs review" (content readiness, before
  * any draft attempt) reuses the same green/amber readiness tones. */
 function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
+  // CORRECTIVE PASS (third real-submission audit) — a stale, inconsistent
+  // item (parent already terminal-failed, this row never updated to
+  // match) must never display as ordinary "Queued"/"Uploaded"/etc, and
+  // must never tell the user to wait. Checked before the ordinary
+  // workflowStatus-derived label below.
+  if (ebay.feedBatchState.kind === "needs_reconciliation") {
+    return <>
+      <WorkflowStatus label={NEEDS_RECONCILIATION_LABEL} tone={EBAY_FEED_ITEM_STATUS_TONE.failed} pulse={false} secondaryLine={NEEDS_RECONCILIATION_SECONDARY_LINE} />
+      {ebay.legacyOfferId && (
+        <p className="lr-ebay-legacy-note">Legacy unpublished API offer — not visible in Seller Hub</p>
+      )}
+    </>;
+  }
   const label = ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[ebay.workflowStatus] : (ebay.contentReady ? "Content ready" : "Needs review");
   const tone = ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[ebay.workflowStatus] : (ebay.contentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
   const secondaryLine = ebay.workflowStatus
