@@ -31,7 +31,7 @@ describe("Sell Feed API host — always PRODUCTION, regardless of EBAY_ENVIRONME
 
   it("every Feed API function refuses up front when EBAY_ENVIRONMENT=SANDBOX, before ever calling fetch", async () => {
     process.env.EBAY_ENVIRONMENT = "SANDBOX";
-    await expect(createFeedTask("token")).rejects.toThrow(/does not support Seller Hub draft uploads in the Sandbox environment/);
+    await expect(createFeedTask("token", "EBAY_GB")).rejects.toThrow(/does not support Seller Hub draft uploads in the Sandbox environment/);
     await expect(getFeedTask("token", "abc123")).rejects.toThrow(/Sandbox environment/);
     await expect(getFeedTasks("token")).rejects.toThrow(/Sandbox environment/);
     await expect(getFeedResultFile("token", "abc123")).rejects.toThrow(/Sandbox environment/);
@@ -43,7 +43,7 @@ describe("Sell Feed API host — always PRODUCTION, regardless of EBAY_ENVIRONME
 describe("createFeedTask", () => {
   it("POSTs to /sell/feed/v1/task with feedType FX_LISTING and schemaVersion 1.0, and reads the task ID from the Location header", async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 200, headers: { Location: "https://api.ebay.com/sell/feed/v1/task/abc-123-def" } }));
-    const result = await createFeedTask("token");
+    const result = await createFeedTask("token", "EBAY_GB");
     expect(result).toEqual({ taskId: "abc-123-def" });
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe("https://api.ebay.com/sell/feed/v1/task");
@@ -53,17 +53,48 @@ describe("createFeedTask", () => {
 
   it("throws a clear error when eBay's response has no Location header, rather than guessing a body shape", async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
-    await expect(createFeedTask("token")).rejects.toThrow(/did not return a task ID/);
+    await expect(createFeedTask("token", "EBAY_GB")).rejects.toThrow(/did not return a task ID/);
   });
 
   it("surfaces a real error on a non-2xx response", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ errors: [{ message: "Invalid access token" }] }, 401));
-    await expect(createFeedTask("token")).rejects.toThrow();
+    await expect(createFeedTask("token", "EBAY_GB")).rejects.toThrow();
   });
 
   it("a 429 response carries a parsed Retry-After hint in seconds", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ errors: [{ message: "rate limited" }] }, 429, { "Retry-After": "30" }));
-    await expect(createFeedTask("token")).rejects.toMatchObject({ status: 429, retryAfterSeconds: 30 });
+    await expect(createFeedTask("token", "EBAY_GB")).rejects.toMatchObject({ status: 429, retryAfterSeconds: 30 });
+  });
+
+  // CORRECTIVE PASS (root cause of Batch #1's real failure) — the exact
+  // wire-level request-contract assertions Phase 5 requires: the real
+  // outgoing headers this function builds, not just source-string checks.
+  it("REQUIREMENT: sends X-EBAY-C-MARKETPLACE-ID: EBAY_GB on the actual outgoing request", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200, headers: { Location: "https://api.ebay.com/sell/feed/v1/task/abc-123" } }));
+    await createFeedTask("token", "EBAY_GB");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBe("EBAY_GB");
+  });
+
+  it("REQUIREMENT: never sends the CSV template's own site/country tokens ('UK' or 'GB') as the REST marketplace header value", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200, headers: { Location: "https://api.ebay.com/sell/feed/v1/task/abc-123" } }));
+    await createFeedTask("token", "EBAY_GB");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).not.toBe("UK");
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).not.toBe("GB");
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).not.toBe("EBAY_UK");
+  });
+
+  it("REQUIREMENT: a missing marketplace ID fails before any network call", async () => {
+    await expect(createFeedTask("token", "")).rejects.toThrow(/marketplace ID is required/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("REQUIREMENT: the Authorization header is present but this test never logs or asserts its literal value verbatim into output", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200, headers: { Location: "https://api.ebay.com/sell/feed/v1/task/abc-123" } }));
+    await createFeedTask("a-real-looking-token-value", "EBAY_GB");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.Authorization).toMatch(/^Bearer /);
   });
 });
 
@@ -200,6 +231,43 @@ describe("feedTaskHasInputFile — AUDIT POINT 13: authoritative existing-upload
   it("is gated by the Feed operation allowlist", () => {
     const source = require("node:fs").readFileSync("lib/ebay-account/feed-client.ts", "utf8") as string;
     expect(source).toContain('assertAllowedFeedOperation("getFeedInputFile")');
+  });
+});
+
+describe("REQUIREMENT (Phase 4): X-EBAY-C-MARKETPLACE-ID is sent ONLY where eBay's own documentation requires it — never blindly added to every operation", () => {
+  it("uploadFeedFile never sends the marketplace header (eBay's own docs: only Content-Type is required, and this task is already scoped by task_id)", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    await uploadFeedFile("token", "abc-123", 'Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193|CC=UTF-8),SKU\r\nDraft,1644\r\n');
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBeUndefined();
+  });
+
+  it("getFeedTask never sends the marketplace header (task-scoped, no additional required headers documented)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ taskId: "abc-123", status: "CREATED" }));
+    await getFeedTask("token", "abc-123");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBeUndefined();
+  });
+
+  it("getFeedTasks never sends the marketplace header (account-scoped, no additional required headers documented)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ tasks: [] }));
+    await getFeedTasks("token");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBeUndefined();
+  });
+
+  it("getFeedResultFile never sends the marketplace header (task-scoped)", async () => {
+    fetchMock.mockResolvedValue(new Response("Action,SKU\r\n", { status: 200 }));
+    await getFeedResultFile("token", "abc-123");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBeUndefined();
+  });
+
+  it("feedTaskHasInputFile (getInputFile) never sends the marketplace header (task-scoped)", async () => {
+    fetchMock.mockResolvedValue(new Response("content", { status: 200 }));
+    await feedTaskHasInputFile("token", "abc-123");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-EBAY-C-MARKETPLACE-ID"]).toBeUndefined();
   });
 });
 

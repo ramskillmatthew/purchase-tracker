@@ -7,6 +7,7 @@ import { getVintedCategoriesByIds, isPublishableVintedCategory } from "@/lib/lis
 import { normaliseFootwearVintedAudience, normaliseFootwearListingText, deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { buildPurchaseMatchIndex, matchSkuToPurchase, buildPurchaseSkuLookupQueries, type PurchaseMatchRecord } from "@/lib/listing-studio/purchase-match";
 import { listMarketplaceDraftsForProducts } from "@/lib/listing-studio/marketplace-drafts";
+import { computeEbayFeedBatchBlockingState } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 
 // Stage 6 (eBay draft batches) — the eBay equivalent of
 // LatestExtensionStatusRow, from rpc/listing_studio_latest_ebay_draft_status
@@ -202,10 +203,26 @@ export async function GET() {
     const ebayDrafts = draftIds.flatMap(id => (ebayDraftsByProduct.get(id) ?? []).filter(d => d.marketplace === "EBAY_UK"));
     const ebayStatusByMarketplaceDraftId = new Map(ebayStatusRows.map(row => [row.marketplace_draft_id, row]));
     const ebayFeedStatusByMarketplaceDraftId = new Map(ebayFeedStatusRows.map(row => [row.marketplace_draft_id, row]));
+
+    // CORRECTIVE PASS (second real submission — duplicate-submission
+    // defect, Phase 6) — one extra, small, bounded lookup for the display
+    // numbers of only the batches actually referenced above (never every
+    // batch this owner has ever created), so computeEbayFeedBatchBlockingState
+    // can name "Seller Hub Batch #N" without the client ever having to
+    // re-derive it from raw status fields itself.
+    const referencedFeedBatchIds = [...new Set(ebayFeedStatusRows.map(row => row.batch_id))];
+    const feedBatchDisplayNumberRows = referencedFeedBatchIds.length
+      ? await supabaseRequestAll<{ id: string; display_number: number }>(
+          `ebay_feed_batches?id=in.(${referencedFeedBatchIds.join(",")})&owner_id=eq.${user.id}&select=id,display_number`,
+        )
+      : [];
+    const feedBatchDisplayNumberById = new Map(feedBatchDisplayNumberRows.map(b => [b.id, b.display_number]));
+
     const ebayDraftsWithStatus = ebayDrafts.map(d => ({
       ...d,
       ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null,
       ebayFeedStatus: ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null,
+      feedBatchBlockingState: computeEbayFeedBatchBlockingState(ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null, feedBatchDisplayNumberById),
     }));
 
     const draftsWithCategoryValidity = drafts.map(draft => {

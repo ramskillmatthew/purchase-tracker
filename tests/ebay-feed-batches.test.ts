@@ -12,7 +12,7 @@ const {
   patchMarketplaceDraft: vi.fn(async (_ownerId: string, _id: string, _patch: Record<string, unknown>) => {}),
   getEbayConnection: vi.fn(async (_ownerId: string) => null as unknown),
   getValidEbayAccessToken: vi.fn(async (_ownerId: string) => ({ accessToken: "token-1", connection: {} as unknown })),
-  createFeedTask: vi.fn(async (_accessToken: string) => ({ taskId: "task-1" })),
+  createFeedTask: vi.fn(async (_accessToken: string, _marketplaceId: string) => ({ taskId: "task-1" })),
   uploadFeedFile: vi.fn(async (_accessToken: string, _taskId: string, _csv: string) => {}),
   getFeedTask: vi.fn(async (_accessToken: string, _taskId: string) => ({ taskId: "task-1", feedType: "FX_LISTING", status: "COMPLETED", creationDate: null, completionDate: null })),
   getFeedResultFile: vi.fn(async (_accessToken: string, _taskId: string) => 'Custom label (SKU),Status\r\n1644,Success\r\n'),
@@ -127,6 +127,16 @@ function makeFakeDb(batch: FakeBatch, items: FakeItem[]) {
       for (const item of items) if (item.batch_id === batchId && item.status === expectedStatus) Object.assign(item, patch);
       return new Response(null, { status: 204 });
     }
+    // CORRECTIVE PASS (duplicate-submission defect) — markBatchFailed's own
+    // cascade PATCH, matching any non-terminal item status via status=in.(...).
+    const itemsInPatchMatch = path.match(/^ebay_feed_batch_items\?batch_id=eq\.([^&]+)&status=in\.\(([^)]+)\)$/);
+    if (itemsInPatchMatch) {
+      const [, batchId, statusList] = itemsInPatchMatch;
+      const allowedStatuses = statusList.split(",");
+      const patch = JSON.parse(init!.body as string);
+      for (const item of items) if (item.batch_id === batchId && allowedStatuses.includes(item.status)) Object.assign(item, patch);
+      return new Response(null, { status: 204 });
+    }
     // prepareFeedPrimaryPhoto's own bounded top-1 photo query — goes
     // through supabaseRequest directly (never supabaseRequestAll, which
     // rejects an explicit limit= — see that function's own corrective-pass
@@ -237,6 +247,19 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
     });
   });
 
+  // CORRECTIVE PASS (root cause of the second real submission's actual
+  // failure) — REQUIREMENT: createFeedTask is called with the canonical
+  // eBay marketplace ID, never this app's own internal "EBAY_UK" value.
+  it("REQUIREMENT: createFeedTask is called with the resolved eBay marketplace ID EBAY_GB, not the internal EBAY_UK value", async () => {
+    const batch = fakeBatch({ status: "creating_task" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(createFeedTask).toHaveBeenCalledWith("token-1", "EBAY_GB");
+    });
+  });
+
   it("uploadFeedFile is called with the already-persisted task ID, never a freshly re-created one", async () => {
     const batch = fakeBatch({ status: "uploading", ebay_task_id: "task-1" });
     const items = [fakeItem()];
@@ -273,6 +296,38 @@ describe("runEbayFeedBatchProcessTick — full pipeline, one stage per tick", ()
       await runEbayFeedBatchProcessTick("owner-1", "batch-1");
       expect(uploadFeedFile).not.toHaveBeenCalled();
       expect(batch.status).toBe("failed");
+    });
+  });
+
+  // CORRECTIVE PASS (second real submission — duplicate-submission defect,
+  // Phase 6) — ROOT CAUSE of "the item stayed 'queued' and the bulk button
+  // stayed enabled even after Batch #1 had already failed": a batch that
+  // fails at an EARLY stage (before any real per-row result exists) used
+  // to leave its own items frozen at their pre-failure status forever.
+  it("REQUIREMENT: when createFeedTask fails and the batch is marked 'failed', every still-queued item in that batch is ALSO marked 'failed', carrying the same error", async () => {
+    createFeedTask.mockRejectedValue(new Error("The X-EBAY-C-MARKETPLACE-ID header is missing or invalid."));
+    const batch = fakeBatch({ status: "creating_task" });
+    const items = [fakeItem({ status: "queued" })];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(batch.status).toBe("failed");
+      expect(items[0].status).toBe("failed");
+      expect(items[0].error_message).toContain("X-EBAY-C-MARKETPLACE-ID");
+    });
+  });
+
+  it("REQUIREMENT: an item already 'succeeded' or 'cancelled' is never touched by a later batch-level failure cascade", async () => {
+    createFeedTask.mockRejectedValue(new Error("boom"));
+    const batch = fakeBatch({ status: "creating_task" });
+    const succeededItem = fakeItem({ id: "item-succeeded", sku: "1111", status: "succeeded", completed_at: "2026-01-01T00:00:00Z" });
+    const cancelledItem = fakeItem({ id: "item-cancelled", sku: "2222", status: "cancelled" });
+    const items = [succeededItem, cancelledItem];
+    await withFakeDb(batch, items, async () => {
+      const { runEbayFeedBatchProcessTick } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await runEbayFeedBatchProcessTick("owner-1", "batch-1");
+      expect(succeededItem.status).toBe("succeeded");
+      expect(cancelledItem.status).toBe("cancelled");
     });
   });
 
@@ -462,7 +517,8 @@ async function withPreviewFakeDb<T>(fn: () => Promise<T>, opts: { photoCount?: n
   const photoCount = opts.photoCount ?? 1;
   const supabaseRequestAll = vi.fn(async (path: string) => {
     if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
-    if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=eq.")) return []; // no active batch by default
+    if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=in.")) return []; // no active/failed batch item by default
+    if (path.startsWith("ebay_feed_batches?id=in.")) return [];
     if (path.startsWith("listing_draft_images?draft_id=eq.")) return Array.from({ length: photoCount }, (_, i) => ({ id: `img-${i}` }));
     return [];
   });
@@ -560,11 +616,12 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     });
   });
 
-  it("a listing already in an ACTIVE (non-terminal) batch is blocked with a precise reason", async () => {
+  it("a listing already in an ACTIVE (non-terminal) batch is blocked with a precise reason naming the batch number", async () => {
     await withPreviewFakeDb(async () => {
       const { supabaseRequestAll } = await import("@/lib/supabase");
       (supabaseRequestAll as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
-        if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=eq.")) return [{ id: "item-x" }];
+        if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=in.")) return [{ marketplace_draft_id: "mdraft-1", batch_id: "batch-x", status: "queued" }];
+        if (path.startsWith("ebay_feed_batches?id=in.")) return [{ id: "batch-x", display_number: 1 }];
         if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
         if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) return [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }];
         if (path.startsWith("listing_draft_images?draft_id=eq.")) return [{ id: "img-1" }];
@@ -573,7 +630,31 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toContain("already in an active");
+      if (!result.ok) expect(result.reason).toContain("Seller Hub Batch #1");
+    });
+  });
+
+  // CORRECTIVE PASS (second real submission — duplicate-submission defect,
+  // Phase 6/7/8/10) — a listing whose most recent batch FAILED must not
+  // silently become eligible for a brand-new "Create" again.
+  it("REQUIREMENT (Phase 6): a listing whose most recent batch FAILED is blocked with a Retry-oriented reason, never silently re-offered as a fresh Create", async () => {
+    await withPreviewFakeDb(async () => {
+      const { supabaseRequestAll } = await import("@/lib/supabase");
+      (supabaseRequestAll as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
+        if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=in.")) return [{ marketplace_draft_id: "mdraft-1", batch_id: "batch-1", status: "failed" }];
+        if (path.startsWith("ebay_feed_batches?id=in.")) return [{ id: "batch-1", display_number: 1 }];
+        if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
+        if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) return [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }];
+        if (path.startsWith("listing_draft_images?draft_id=eq.")) return [{ id: "img-1" }];
+        return [];
+      });
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("Seller Hub Batch #1");
+        expect(result.reason).toMatch(/Retry Seller Hub draft/);
+      }
     });
   });
 

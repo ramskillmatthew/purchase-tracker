@@ -11,7 +11,8 @@ import { evaluateEbayFeedDraftEligibility } from "@/lib/listing-studio/ebay-feed
 import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import { createSignedDownloadUrl, StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
 import type { MarketplaceDynamicData } from "@/lib/listing-studio/marketplace-types";
-import { isEbayFeedBatchStatusTerminal, type EbayFeedItemStatus, type EbayFeedBatchStatus } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
+import { isEbayFeedBatchStatusTerminal, computeEbayFeedBatchBlockingState, type EbayFeedItemStatus, type EbayFeedBatchStatus, type EbayFeedBatchBlockingState } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
+import { resolveEbayFeedMarketplace } from "@/lib/listing-studio/ebay-feed/feed-marketplace-mapping";
 
 /**
  * The Sell Feed API pipeline's own persistence + orchestration — the new,
@@ -196,12 +197,148 @@ export async function cancelEbayFeedBatch(ownerId: string, batchId: string): Pro
 }
 
 // ---------------------------------------------------------------------
+// PHASE 7 — deliberate retry of an already-failed batch. Never called
+// during this corrective task itself (per its own explicit instruction);
+// exists so a genuine, later, user-initiated retry is safe.
+
+export type EbayFeedRetryOutcome = { resumedFromTaskId: string | null; resumedStatus: EbayFeedBatchStatus };
+
+/**
+ * Retries the SAME batch row — never creates a new one — preserving
+ * Batch #N's own identity, created_at, and running attempt_count exactly
+ * (this corrective task's own explicit requirement: "preserve Batch 1
+ * history", "preserve attempt count"). Mirrors cancelEbayFeedBatch's own
+ * "plain, conditional, atomic PATCH" pattern rather than
+ * listing_studio_advance_ebay_feed_batch — a failed batch's claim was
+ * already released the moment it failed (see that RPC's own "ALWAYS
+ * releases the claim" comment), so there is no live claimed_by token for
+ * a retry action to present; reusing that RPC here would always fail with
+ * CLAIM_NOT_HELD. The `status=eq.failed` (or `=eq.queued`/`=eq.uploaded`/
+ * `=eq.awaiting_result` for the item-level PATCHes) WHERE clause is this
+ * function's own concurrency protection: only the FIRST of two
+ * simultaneous retry requests actually matches a row (Postgres commits
+ * one UPDATE at a time), so a double-click or a second browser tab can
+ * never retry the same batch twice.
+ *
+ * RECONCILIATION (this corrective task's own explicit requirement — "will
+ * first reconcile whether a remote task exists... will not create another
+ * task if an existing task already accepted the upload"):
+ *   - No ebay_task_id was ever persisted (createTask itself failed, e.g.
+ *     SKU 1644's real Batch #1) -> nothing remote exists; safe to restart
+ *     the WHOLE pipeline fresh from "queued" (a full re-check of
+ *     eligibility, a fresh CSV, a fresh createTask call).
+ *   - A real ebay_task_id WAS persisted before this batch failed (it
+ *     failed at a LATER stage — uploading/processing/downloading_result/
+ *     parsing_result) -> this function calls the real, read-only
+ *     getFeedTask to find out what eBay itself currently believes about
+ *     that task, and resumes from the correct stage without ever calling
+ *     createTask or uploadFeedFile again for it:
+ *       - eBay reports the task terminal (COMPLETED/COMPLETED_WITH_ERROR/
+ *         FAILED/ABORTED) -> resume at "downloading_result" (re-download
+ *         and parse the real result, never re-upload).
+ *       - eBay reports the task still in progress, OR the task can no
+ *         longer be found/read at all -> resume at "processing" (poll
+ *         again; never re-upload, never re-create).
+ *
+ * Never retries a batch that isn't currently 'failed' — a
+ * 'completed_with_errors' batch (some rows succeeded) needs its own,
+ * different "create a fresh batch for just the failed rows" flow, not
+ * built here; a 'completed'/'cancelled' batch has nothing to retry.
+ */
+export async function retryEbayFeedBatch(ownerId: string, batchId: string): Promise<EbayFeedRetryOutcome> {
+  const batches = await supabaseRequestAll<{ id: string; status: EbayFeedBatchStatus; ebay_task_id: string | null }>(
+    `ebay_feed_batches?id=eq.${batchId}&owner_id=eq.${ownerId}&select=id,status,ebay_task_id`,
+  );
+  const batch = batches[0];
+  if (!batch) throw new Error("This Seller Hub draft batch could not be found.");
+  if (batch.status !== "failed") throw new Error(`Only a failed Seller Hub draft batch can be retried (this one is currently "${batch.status}").`);
+
+  if (!batch.ebay_task_id) {
+    const patched = await resumeFailedBatch(ownerId, batchId, "queued", "queued");
+    if (!patched) throw new Error("This batch was already retried (by another request) or is no longer failed.");
+    return { resumedFromTaskId: null, resumedStatus: "queued" };
+  }
+
+  const { accessToken } = await getValidEbayAccessToken(ownerId);
+  let remoteStatus: Awaited<ReturnType<typeof getFeedTask>> | null = null;
+  try {
+    remoteStatus = await getFeedTask(accessToken, batch.ebay_task_id);
+  } catch {
+    remoteStatus = null; // task genuinely unreachable/expired — treat like "still in progress" below: never re-create, just resume polling
+  }
+
+  const resumeStatus: EbayFeedBatchStatus = remoteStatus && isTerminalFeedTaskStatus(remoteStatus.status) ? "downloading_result" : "processing";
+  // Items that reached eBay before the failure (this only ever happens
+  // once a real task existed) go back to "uploaded" — never "queued" —
+  // so a re-entrant "uploading" stage (should this resume at "processing"
+  // and eBay somehow still shows the task non-terminal indefinitely) is
+  // never mistaken for a batch whose file was never sent.
+  const patched = await resumeFailedBatch(ownerId, batchId, resumeStatus, "uploaded");
+  if (!patched) throw new Error("This batch was already retried (by another request) or is no longer failed.");
+  return { resumedFromTaskId: batch.ebay_task_id, resumedStatus: resumeStatus };
+}
+
+/** Returns true if the batch row was genuinely still 'failed' (and so was
+ * actually patched); false if a concurrent retry already won the race —
+ * the caller treats false as "nothing to do", never as a hard error. */
+async function resumeFailedBatch(ownerId: string, batchId: string, batchStatus: EbayFeedBatchStatus, itemStatus: EbayFeedItemStatus): Promise<boolean> {
+  const response = await supabaseRequest(`ebay_feed_batches?id=eq.${batchId}&owner_id=eq.${ownerId}&status=eq.failed`, {
+    method: "PATCH", headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ status: batchStatus, error_code: null, error_message: null, completed_at: null }),
+  });
+  const updated = await response.json() as unknown[];
+  if (!Array.isArray(updated) || updated.length === 0) return false;
+  await supabaseRequest(`ebay_feed_batch_items?batch_id=eq.${batchId}&status=eq.failed`, {
+    method: "PATCH", headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({ status: itemStatus, error_code: null, error_message: null, completed_at: null }),
+  });
+  return true;
+}
+
+// ---------------------------------------------------------------------
 // Bulk eligibility resolution — mirrors ebay-draft-batches.ts's own
 // resolveEbayDraftEligibilityForProducts exactly, using the Feed
 // pipeline's own evaluateEbayFeedDraftEligibility (no policy/location
 // checks — see that function's own header for why).
 
 export type EbayFeedEligibilityByProduct = Map<string, { marketplaceDraftId: string | null; sku: string | null; eligible: boolean; reasons: string[] }>;
+
+/**
+ * CORRECTIVE PASS (duplicate-submission defect, Phase 6) — the single
+ * place this pipeline resolves "does this marketplace draft currently have
+ * an in-flight or unretried-failed Seller Hub Feed batch item", queried
+ * fresh from ebay_feed_batch_items/ebay_feed_batches directly (never via
+ * the listings-review page's own read RPC, which this synchronous
+ * eligibility gate has no reason to depend on). Bulk-capable (accepts many
+ * marketplace draft IDs in one round trip) so both the single-listing
+ * preview builder and the multi-listing batch-creation eligibility check
+ * can share it. Uses computeEbayFeedBatchBlockingState — the SAME pure
+ * function the listings-review route and the client both use — so this
+ * server-side gate, the read-only display, and the client's own mirrored
+ * eligibility check can never disagree about what counts as "active" vs.
+ * "failed".
+ */
+async function resolveFeedBatchBlockingStates(marketplaceDraftIds: string[]): Promise<Map<string, EbayFeedBatchBlockingState>> {
+  const result = new Map<string, EbayFeedBatchBlockingState>();
+  if (marketplaceDraftIds.length === 0) return result;
+  const items = await supabaseRequestAll<{ marketplace_draft_id: string; batch_id: string; status: EbayFeedItemStatus }>(
+    `ebay_feed_batch_items?marketplace_draft_id=in.(${marketplaceDraftIds.join(",")})&status=in.(queued,uploaded,awaiting_result,failed)&select=marketplace_draft_id,batch_id,status`,
+  );
+  if (items.length === 0) return result;
+  const batchIds = [...new Set(items.map(i => i.batch_id))];
+  const batches = await supabaseRequestAll<{ id: string; display_number: number }>(`ebay_feed_batches?id=in.(${batchIds.join(",")})&select=id,display_number`);
+  const displayNumberByBatchId = new Map(batches.map(b => [b.id, b.display_number]));
+  for (const item of items) {
+    const state = computeEbayFeedBatchBlockingState({ batch_id: item.batch_id, item_status: item.status }, displayNumberByBatchId);
+    if (state.kind === "none") continue;
+    // An "active" (still in-flight) state always takes priority over a
+    // stale "failed" one for the same listing if, defensively, more than
+    // one row is ever found — normal operation has at most one.
+    const existing = result.get(item.marketplace_draft_id);
+    if (!existing || existing.kind !== "active") result.set(item.marketplace_draft_id, state);
+  }
+  return result;
+}
 
 export async function resolveEbayFeedDraftEligibilityForProducts(ownerId: string, productDraftIds: string[]): Promise<EbayFeedEligibilityByProduct> {
   const result: EbayFeedEligibilityByProduct = new Map();
@@ -217,6 +354,11 @@ export async function resolveEbayFeedDraftEligibilityForProducts(ownerId: string
   const photoCountByProduct = new Map<string, number>();
   for (const row of imageRows) photoCountByProduct.set(row.draft_id, (photoCountByProduct.get(row.draft_id) ?? 0) + 1);
 
+  const ebayDraftIds = productDraftIds
+    .map(id => (draftsByProduct.get(id) ?? []).find(d => d.marketplace === "EBAY_UK")?.id)
+    .filter((id): id is string => Boolean(id));
+  const feedBatchStates = await resolveFeedBatchBlockingStates(ebayDraftIds);
+
   for (const productDraftId of productDraftIds) {
     const sku = skuByProduct.get(productDraftId) ?? null;
     const ebayDraft = (draftsByProduct.get(productDraftId) ?? []).find(d => d.marketplace === "EBAY_UK") ?? null;
@@ -225,6 +367,7 @@ export async function resolveEbayFeedDraftEligibilityForProducts(ownerId: string
       hasEbayPreparation: true,
       accountUsable: connection?.connectionStatus === "connected",
       alreadyHasFeedDraft: ebayDraft.ebayFeedDraftCreatedAt !== null,
+      feedBatchState: feedBatchStates.get(ebayDraft.id) ?? { kind: "none" },
       contentReady: ebayDraft.readiness.ready,
       hasValidPrice: ebayDraft.pricePence != null && ebayDraft.pricePence > 0,
       hasPhoto: (photoCountByProduct.get(productDraftId) ?? 0) > 0,
@@ -306,13 +449,15 @@ async function buildFeedDraftPreviewForProductInner(ownerId: string, productDraf
   if (!draft) return { ok: false, reason: "The selected eBay listing could not be found." };
   if (draft.ebayFeedDraftCreatedAt !== null) return { ok: false, reason: "A Seller Hub draft already exists for this listing." };
 
-  // Active (non-terminal) batch check — a listing already queued/uploaded/
-  // awaiting a result in a still-live batch must not be offered again,
-  // independently of (and never via) the legacy ebay_offer_id column.
-  const activeItems = await supabaseRequestAll<{ id: string }>(
-    `ebay_feed_batch_items?marketplace_draft_id=eq.${draft.id}&status=in.(queued,uploaded,awaiting_result)&select=id`,
-  );
-  if (activeItems.length > 0) return { ok: false, reason: "The selected listing is already in an active Seller Hub draft batch." };
+  // Active/failed batch check — a listing already queued/uploaded/
+  // awaiting a result in a still-live batch must not be offered again, and
+  // a listing whose most recent batch FAILED must not silently become a
+  // brand-new "Create" with no context either (Phase 6's explicit
+  // requirement — use Retry Seller Hub draft instead) — independently of
+  // (and never via) the legacy ebay_offer_id column.
+  const feedBatchState = (await resolveFeedBatchBlockingStates([draft.id])).get(draft.id) ?? { kind: "none" as const };
+  if (feedBatchState.kind === "active") return { ok: false, reason: `The selected listing is already in Seller Hub Batch #${feedBatchState.displayNumber}.` };
+  if (feedBatchState.kind === "failed") return { ok: false, reason: `Seller Hub Batch #${feedBatchState.displayNumber} failed for this listing — use Retry Seller Hub draft instead of Create.` };
 
   const [skuRows, connection, imageRows] = await Promise.all([
     supabaseRequestAll<{ id: string; sku: string | null }>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=id,sku`),
@@ -422,8 +567,40 @@ async function finishBatchItems(batchId: string, claimedBy: string, results: Arr
   });
 }
 
+/**
+ * CORRECTIVE PASS (duplicate-submission defect — Phase 6) — ROOT CAUSE of
+ * "the item stayed 'queued' and the bulk 'Create 1 Seller Hub draft'
+ * button stayed enabled even after Batch #1 had already failed": this
+ * pipeline's own design (see this file's own header — items are only ever
+ * individually written once a real per-row RESULT exists, via
+ * finishBatchItems) means a batch that fails at any EARLY stage (queued,
+ * generating_csv, creating_task, uploading, processing,
+ * downloading_result — before a real per-row result file was ever
+ * downloaded and parsed) previously left every one of its own items
+ * frozen at 'queued'/'uploaded'/'awaiting_result' forever, even though the
+ * BATCH itself was already terminal. Both this function's own caller
+ * (advanceClaimedBatch's error paths) and every eligibility check that
+ * asks "is this listing still blocked by an in-flight submission" relied
+ * on ITEM status, not batch status — so a failed-before-any-real-result
+ * batch's items kept silently reporting "still active" indefinitely.
+ *
+ * Fixed here, once, at the single choke point every early-stage failure
+ * already routes through: whenever a batch is marked failed, every one of
+ * its own items still sitting in a non-terminal status is now marked
+ * 'failed' too, carrying the SAME error onto each item (mirrors
+ * finishBatchItems's own per-item error_code/error_message shape, and
+ * cancelEbayFeedBatch's own existing "sync item status to the batch
+ * decision" pattern for the cancel case). An item already 'succeeded' or
+ * 'cancelled' — impossible before any result file existed, but checked
+ * defensively — is never touched; only queued/uploaded/awaiting_result
+ * items are ever affected, exactly like finishBatchItems's own guard.
+ */
 async function markBatchFailed(batchId: string, claimedBy: string, code: string, message: string): Promise<void> {
   await advanceBatch(batchId, claimedBy, "failed", { errorCode: code, errorMessage: message });
+  await supabaseRequest(`ebay_feed_batch_items?batch_id=eq.${batchId}&status=in.(queued,uploaded,awaiting_result)`, {
+    method: "PATCH", headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({ status: "failed", error_code: code, error_message: message, completed_at: new Date().toISOString() }),
+  });
 }
 
 /**
@@ -632,7 +809,14 @@ async function advanceClaimedBatch(ownerId: string, claimedBatch: ClaimedBatchRo
     case "creating_task": {
       try {
         const { accessToken } = await getValidEbayAccessToken(ownerId);
-        const task = await createFeedTask(accessToken);
+        // CORRECTIVE PASS (root cause of Batch #1's real failure — "The
+        // X-EBAY-C-MARKETPLACE-ID header is missing or invalid.") — this
+        // pipeline only ever creates EBAY_UK Feed tasks (see this file's
+        // own "EBAY_UK" literals throughout); resolveEbayFeedMarketplace
+        // is the one place that gets translated into eBay's own canonical
+        // EBAY_GB MarketplaceIdEnum value for the actual request header.
+        const { feedMarketplaceId } = resolveEbayFeedMarketplace("EBAY_UK");
+        const task = await createFeedTask(accessToken, feedMarketplaceId);
         await advanceBatch(batchId, claimedBy, "uploading", { ebayTaskId: task.taskId });
       } catch (error) {
         await handleStageError(batchId, claimedBy, error, "ebay_task_error", "The eBay upload task could not be created.");

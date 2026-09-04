@@ -22,6 +22,7 @@
  */
 
 import { toFeedTemplateConditionId } from "@/lib/listing-studio/ebay-feed/feed-condition";
+import type { EbayFeedBatchBlockingState } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 
 export type EbayFeedDraftEligibilityInput = {
   hasEbayPreparation: boolean;
@@ -30,6 +31,17 @@ export type EbayFeedDraftEligibilityInput = {
    * already set for this listing — a genuine, already-confirmed Seller Hub
    * draft, never merely "an attempt was started". */
   alreadyHasFeedDraft: boolean;
+  /** CORRECTIVE PASS (duplicate-submission defect, Phase 6) — whether this
+   * listing currently has an in-flight ("active") or unretried-failed
+   * ("failed") Seller Hub Feed batch item. Optional and defaults to
+   * { kind: "none" } so every pre-existing call site (and every
+   * pre-existing test constructing this input) keeps compiling and
+   * behaving exactly as before; only a call site that actually resolved
+   * real batch-item state needs to pass it. See
+   * lib/listing-studio/ebay-feed/feed-workflow-status.ts's own
+   * computeEbayFeedBatchBlockingState — the one place this value is ever
+   * derived, shared by server and client alike. */
+  feedBatchState?: EbayFeedBatchBlockingState;
   contentReady: boolean;
   hasValidPrice: boolean;
   hasPhoto: boolean;
@@ -44,6 +56,14 @@ export type EbayFeedDraftEligibilityResult = { eligible: boolean; reasons: strin
 export function evaluateEbayFeedDraftEligibility(input: EbayFeedDraftEligibilityInput): EbayFeedDraftEligibilityResult {
   if (!input.hasEbayPreparation) return { eligible: false, reasons: ["No eBay preparation for this listing"] };
   if (input.alreadyHasFeedDraft) return { eligible: false, reasons: ["A Seller Hub draft already exists for this listing"] };
+
+  const feedBatchState = input.feedBatchState ?? { kind: "none" as const };
+  if (feedBatchState.kind === "active") {
+    return { eligible: false, reasons: [`Already in Seller Hub Batch #${feedBatchState.displayNumber}`] };
+  }
+  if (feedBatchState.kind === "failed") {
+    return { eligible: false, reasons: [`Seller Hub Batch #${feedBatchState.displayNumber} failed for this listing — use Retry Seller Hub draft instead of Create`] };
+  }
 
   const reasons: string[] = [];
   if (!input.accountUsable) reasons.push("eBay account is not connected");

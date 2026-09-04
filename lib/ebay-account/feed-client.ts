@@ -56,10 +56,19 @@ function assertCsvOnlyContainsAllowedAction(csv: string): void {
   assertAllowedFeedAction(firstCell);
 }
 
-async function feedRequest(accessToken: string, method: "GET" | "POST", path: string, init?: { body?: BodyInit; contentType?: string }): Promise<Response> {
+async function feedRequest(accessToken: string, method: "GET" | "POST", path: string, init?: { body?: BodyInit; contentType?: string; marketplaceId?: string }): Promise<Response> {
   assertProductionOnly();
   const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
   if (init?.contentType) headers["Content-Type"] = init.contentType;
+  // CORRECTIVE PASS (root cause of the first failed Seller Hub Feed
+  // submission) — only ever set when a caller explicitly passes one.
+  // Confirmed against eBay's own Sell Feed API documentation, per
+  // operation, that X-EBAY-C-MARKETPLACE-ID is Required for createTask
+  // and NOT documented as required (or even mentioned) for uploadFile,
+  // getTask, getTasks, getResultFile, or getInputFile — so this is never
+  // set unconditionally for every call. See createFeedTask below for the
+  // one call site that actually passes marketplaceId.
+  if (init?.marketplaceId) headers["X-EBAY-C-MARKETPLACE-ID"] = init.marketplaceId;
   let response: Response;
   try {
     response = await fetch(`${ebayApiBase("PRODUCTION")}${path}`, {
@@ -103,11 +112,27 @@ export type CreateFeedTaskResult = { taskId: string };
  * new task's ID given only in the `Location` response header (e.g.
  * ".../sell/feed/v1/task/<taskId>") — this function reads the task ID from
  * that header and throws a clear, specific error if it is ever missing
- * rather than guessing at an undocumented body shape. */
-export async function createFeedTask(accessToken: string): Promise<CreateFeedTaskResult> {
+ * rather than guessing at an undocumented body shape.
+ *
+ * CORRECTIVE PASS (root cause of the first failed Seller Hub Feed
+ * submission — Batch #1 failed with "The X-EBAY-C-MARKETPLACE-ID header
+ * is missing or invalid.") — `marketplaceId` is now a REQUIRED parameter
+ * (never a guessed default), so this can never again be called without a
+ * marketplace value the caller deliberately resolved (see
+ * lib/listing-studio/ebay-feed/feed-marketplace-mapping.ts's own
+ * resolveEbayFeedMarketplace — the caller, not this low-level client,
+ * owns translating this application's internal "EBAY_UK" into eBay's own
+ * canonical "EBAY_GB" MarketplaceIdEnum value, keeping this file decoupled
+ * from lib/listing-studio's own marketplace vocabulary). Confirmed against
+ * eBay's own documentation that this header is Required specifically for
+ * createTask — see feedRequest's own comment for the full per-operation
+ * matrix this app checked. */
+export async function createFeedTask(accessToken: string, marketplaceId: string): Promise<CreateFeedTaskResult> {
   assertAllowedFeedOperation("createFeedTask");
+  if (!marketplaceId) throw new Error("A marketplace ID is required to create an eBay Feed task.");
   const response = await feedRequest(accessToken, "POST", "/sell/feed/v1/task", {
     contentType: "application/json",
+    marketplaceId,
     body: JSON.stringify({ schemaVersion: "1.0", feedType: "FX_LISTING" }),
   });
   if (!response.ok) throw await feedError(response, "eBay Feed task could not be created.");

@@ -1002,9 +1002,24 @@ describe("components/listings-review/DraftActivityPanel.tsx — Live Activity pa
     expect(source).toContain("const visibleEvents = showAll ? events : events.slice(0, COLLAPSED_VISIBLE_COUNT);");
   });
 
-  it("renders no Retry button/control anywhere — the existing recourse for a failed item (resend, via the table row/inspector overflow menu) is unchanged", () => {
-    expect(source).not.toMatch(/<button[^>]*>\s*Retry/i);
-    expect(source).not.toMatch(/onRetry/);
+  // CORRECTIVE PASS (second real submission — Phase 6/7) — this test
+  // previously asserted NO Retry control existed anywhere in this panel.
+  // That was true for Vinted (whose own recourse for a failed item —
+  // resend, via the table row/inspector overflow menu — is unchanged and
+  // still not rendered here) but is now DELIBERATELY no longer true for
+  // the eBay Sell Feed pipeline: a genuinely failed Seller Hub batch now
+  // offers a real, explicit "Retry Seller Hub draft" control right here,
+  // by this corrective task's own explicit requirement (never an
+  // unexplained fresh "Create" — see feed-batches.ts's own
+  // retryEbayFeedBatch). It is rendered only when the specific event
+  // carries retryableBatchId (set only for a genuinely failed eBay batch —
+  // see ListingsReviewWorkspace.tsx's own construction) and only when the
+  // parent actually passes an onRetryBatch handler, so it can never appear
+  // for a Vinted event or a still-in-progress eBay batch.
+  it("renders 'Retry Seller Hub draft' ONLY gated by event.retryableBatchId and an onRetryBatch handler — never unconditionally, never for Vinted", () => {
+    expect(source).toContain("Retry Seller Hub draft");
+    expect(source).toMatch(/event\.retryableBatchId\s*&&\s*\(onViewError \|\| onRetryBatch\)/);
+    expect(source).toContain("onRetryBatch(event.retryableBatchId!)");
   });
 
   it("every event row shows a dot, a message, and a short timestamp — colour is never the only signal (a screen-reader-only tone label precedes the message)", () => {

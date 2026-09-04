@@ -30,6 +30,7 @@ import { computeExtensionWorkflowStatus, WORKFLOW_STATUS_TAB_GROUPS, isBatchStat
 import {
   EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_BATCH_STATUS_LABELS, isEbayFeedBatchStatusTerminal, isEbayFeedItemInProgress,
   isEbayFeedBatchInProgress, computeEbayFeedItemWorkflowStatus, SELLER_HUB_DRAFTS_URL, type EbayFeedItemStatus, type EbayFeedBatchStatus,
+  type EbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import type { ListingGenerationFields } from "@/lib/listing-studio/listing-generation-schemas";
 import { computeCostPence, computeProfitPence, type SkuPurchaseMatch } from "@/lib/listing-studio/purchase-match";
@@ -62,6 +63,10 @@ type EbayMarketplaceDraftRow = {
     ebay_task_id: string | null; error_code: string | null; error_message: string | null;
     started_at: string | null; completed_at: string | null;
   } | null;
+  // CORRECTIVE PASS (second real submission — duplicate-submission
+  // defect, Phase 6) — server-computed, mirrors
+  // app/api/listing-studio/listings-review/route.ts's own field exactly.
+  feedBatchBlockingState: EbayFeedBatchBlockingState;
 };
 
 // Mirrors app/api/listing-studio/ebay-feed-batches/[batchId]/route.ts's GET
@@ -279,6 +284,16 @@ export default function ListingsReviewWorkspace() {
   const ebayBatchStatusByIdRef = useRef<Map<string, EbayBatchStatus>>(new Map());
   useEffect(() => { ebayVisibleBatchIdsRef.current = ebayVisibleBatchIds; }, [ebayVisibleBatchIds]);
   useEffect(() => { ebayBatchStatusByIdRef.current = ebayBatchStatusById; }, [ebayBatchStatusById]);
+
+  // CORRECTIVE PASS (second real submission — Phase 7/8: "View error" /
+  // "Retry Seller Hub draft") — both dialogs read the already-fetched,
+  // already-polled EbayBatchStatus straight out of ebayBatchStatusById;
+  // neither one issues its own extra fetch just to display what this page
+  // already knows.
+  const [viewErrorBatchId, setViewErrorBatchId] = useState<string | null>(null);
+  const [retryConfirmBatchId, setRetryConfirmBatchId] = useState<string | null>(null);
+  const [retryingBatchId, setRetryingBatchId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
   // Listings Review redesign — the 5 top tabs (All/Ready/Needs review/
@@ -640,6 +655,7 @@ export default function ListingsReviewWorkspace() {
         workflowStatus: ebayDraft.ebayFeedStatus ? computeEbayFeedItemWorkflowStatus(ebayDraft.ebayFeedStatus.item_status) : null,
         queuePosition: ebayDraft.ebayFeedStatus?.queue_position ?? null,
         errorMessage: ebayDraft.ebayFeedStatus?.error_message ?? null,
+        feedBatchState: ebayDraft.feedBatchBlockingState ?? { kind: "none" },
       } satisfies EbayTabData : null,
     };
   }), [drafts, photoIdsByDraftId, ebayByProductId]);
@@ -944,6 +960,7 @@ export default function ListingsReviewWorkspace() {
         hasEbayPreparation: true,
         accountUsable: ebayAccountUsable,
         alreadyHasFeedDraft: row.ebay.feedDraftCreatedAt !== null,
+        feedBatchState: row.ebay.feedBatchState,
         contentReady: row.ebay.contentReady,
         hasValidPrice: row.ebay.sellingPricePence != null && row.ebay.sellingPricePence > 0,
         hasPhoto: row.photoIds.length > 0,
@@ -1091,6 +1108,45 @@ export default function ListingsReviewWorkspace() {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss_activity" }),
     }).catch(() => {});
   }, []);
+
+  // CORRECTIVE PASS (second real submission — Phase 7/8) — "View error"
+  // opens a real dialog showing the batch's FULL, already-fetched
+  // errorMessage (never the CSS-truncated Live Activity row's own text).
+  const handleViewEbayBatchError = useCallback((batchId: string) => { setViewErrorBatchId(batchId); }, []);
+
+  // "Retry Seller Hub draft" — a real confirmation step first (this
+  // corrective task's own Phase 7 requirement), explaining what will
+  // happen before any request is sent.
+  const handleOpenRetryConfirm = useCallback((batchId: string) => { setRetryError(""); setRetryConfirmBatchId(batchId); }, []);
+
+  const handleConfirmRetryEbayBatch = useCallback(async () => {
+    if (!retryConfirmBatchId) return;
+    const batchId = retryConfirmBatchId;
+    setRetryingBatchId(batchId);
+    setRetryError("");
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-feed-batches/${batchId}/retry`, { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setRetryError(body?.error || "Could not retry this Seller Hub draft."); return; }
+      // Reflect the fresh, now-non-terminal status immediately — the
+      // existing poll loop (see the useEffect above) picks this batch back
+      // up on its own next tick because it reads batch status fresh from
+      // ebayBatchStatusById, never a value cached from before this retry.
+      setEbayBatchStatusById(current => new Map(current).set(batchId, body as EbayBatchStatus));
+      // Allow a LATER failure of this same batch to be logged again — it
+      // was already logged once (the failure that led to this retry).
+      ebayCompletedBatchesLoggedRef.current.delete(batchId);
+      setEbayActivityEvents(current => [
+        { id: `${batchId}:retried:${Date.now()}`, batchId, batchLabel: `Batch ${(body as EbayBatchStatus).displayNumber}`, tone: "sent", message: "Seller Hub draft attempt retried", timestampIso: new Date().toISOString() },
+        ...current,
+      ]);
+      setRetryConfirmBatchId(null);
+    } catch {
+      setRetryError("Could not reach the server to retry this Seller Hub draft.");
+    } finally {
+      setRetryingBatchId(null);
+    }
+  }, [retryConfirmBatchId]);
 
   // Stuck-batch dismissal (product spec requirement) — a small × on each
   // stuck eBay batch row opens a real confirmation dialog (never a browser
@@ -1823,7 +1879,16 @@ export default function ListingsReviewWorkspace() {
               ? `${succeededCount} Seller Hub draft${succeededCount === 1 ? "" : "s"} created, ${failedCount} need${failedCount === 1 ? "s" : ""} attention`
               : `${succeededCount} Seller Hub draft${succeededCount === 1 ? "" : "s"} created`;
         setEbayActivityEvents(current => [
-          { id: `${batchId}:batch-complete`, batchId, batchLabel, tone: body.status === "failed" || failedCount > 0 ? "failure" : "success", message, timestampIso: body.completedAt ?? new Date().toISOString() },
+          {
+            id: `${batchId}:batch-complete`, batchId, batchLabel, tone: body.status === "failed" || failedCount > 0 ? "failure" : "success", message,
+            timestampIso: body.completedAt ?? new Date().toISOString(),
+            // CORRECTIVE PASS (second real submission — Phase 7/8) — only a
+            // genuinely FAILED batch is retryable this way; a
+            // completed_with_errors batch's own failed rows need a
+            // different flow (see feed-batches.ts's own retryEbayFeedBatch
+            // header) and are not offered "Retry Seller Hub draft" here.
+            retryableBatchId: body.status === "failed" ? batchId : null,
+          },
           ...current,
         ]);
         // Refreshes ebayDrafts so each completed row's Seller Hub draft
@@ -2507,9 +2572,62 @@ export default function ListingsReviewWorkspace() {
           channel={activityChannel}
           onChannelChange={setActivityChannel}
           showChannelToggle={marketplaceToggleOptions.includes("EBAY_UK")}
+          onViewError={activityChannel === "EBAY_UK" ? handleViewEbayBatchError : undefined}
+          onRetryBatch={activityChannel === "EBAY_UK" ? handleOpenRetryConfirm : undefined}
         />
       </div>
     </div>}
+
+    {/* CORRECTIVE PASS (second real submission — Phase 8) — "View error":
+        the FULL, un-truncated, already-sanitised error this app stored for
+        the batch, never the CSS-truncated Live Activity row text, and
+        never a raw eBay/database response. */}
+    {viewErrorBatchId && (() => {
+      const status = ebayBatchStatusById.get(viewErrorBatchId);
+      return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setViewErrorBatchId(null); }}>
+        <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="view-error-title" aria-describedby="view-error-body">
+          <button className="dialog-close" type="button" onClick={() => setViewErrorBatchId(null)} aria-label="Close">×</button>
+          <div className="dialog-copy">
+            <h2 id="view-error-title">Batch {status?.displayNumber ?? "?"} — {status ? "no Seller Hub draft was created" : "details unavailable"}</h2>
+            <p id="view-error-body" className="import-select-error" role="alert">
+              {status?.errorMessage || "No further detail was recorded for this failure."}
+            </p>
+            {status?.errorCode && <p className="lr-bulk-message">Diagnostic code: {status.errorCode}</p>}
+          </div>
+          <div className="dialog-actions dialog-actions-single">
+            <button type="button" className="dialog-cancel" onClick={() => setViewErrorBatchId(null)}>Close</button>
+          </div>
+        </div>
+      </div>;
+    })()}
+
+    {/* CORRECTIVE PASS (second real submission — Phase 7) — a real
+        confirmation step before ANY retry request is sent, explaining
+        exactly what will (and will not) happen — this task's own explicit
+        requirement. The actual retry is never triggered merely by opening
+        this dialog. */}
+    {retryConfirmBatchId && (() => {
+      const status = ebayBatchStatusById.get(retryConfirmBatchId);
+      const retrying = retryingBatchId === retryConfirmBatchId;
+      return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !retrying) setRetryConfirmBatchId(null); }}>
+        <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="retry-title" aria-describedby="retry-body">
+          <button className="dialog-close" type="button" onClick={() => setRetryConfirmBatchId(null)} aria-label="Close" disabled={retrying}>×</button>
+          <div className="dialog-copy">
+            <h2 id="retry-title">Retry Seller Hub Batch {status?.displayNumber ?? "?"}?</h2>
+            <p id="retry-body">
+              Batch {status?.displayNumber ?? "?"} previously failed{status?.errorMessage ? `: ${status.errorMessage}` : "."} Retrying will first check
+              whether eBay already has a record of this attempt, so it never creates a duplicate upload — it will not publish anything, and it will not
+              create a new task if one already accepted this batch&apos;s file.
+            </p>
+          </div>
+          {retryError && <p className="import-select-error" role="alert">{retryError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setRetryConfirmBatchId(null)} disabled={retrying}>Cancel</button>
+            <button type="button" className="dialog-confirm" onClick={handleConfirmRetryEbayBatch} disabled={retrying}>{retrying ? "Retrying…" : "Retry Seller Hub draft"}</button>
+          </div>
+        </div>
+      </div>;
+    })()}
 
     {carouselListing && <PhotoCarouselDialog
       title={carouselListing.generatedTitle || "Photos"}

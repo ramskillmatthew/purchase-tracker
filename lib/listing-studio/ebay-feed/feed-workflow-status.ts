@@ -131,3 +131,52 @@ export function computeEbayFeedWorkflowSecondaryLine(input: {
  * this link is not a convenience shortcut past that, it IS the next
  * required step. */
 export const SELLER_HUB_DRAFTS_URL = "https://www.ebay.co.uk/sh/lst/drafts";
+
+// ---------------------------------------------------------------------
+// CORRECTIVE PASS (duplicate-submission defect, second failed-submission
+// audit) — one shared, single-source-of-truth notion of "does this
+// listing currently have a Seller Hub Feed submission that should block
+// (or redirect) a plain 'Create' action", used identically by:
+//   - the server (lib/listing-studio/ebay-feed/feed-batches.ts's own
+//     resolveFeedBatchBlockingStates, feeding both the preview builder
+//     and the real batch-creation eligibility check)
+//   - the listings-review API route (attaches the already-computed result
+//     onto each row, so the client never has to re-derive it from raw
+//     status fields)
+//   - the client (ListingsReviewWorkspace.tsx's own ebayEligibilityById,
+//     which mirrors the server's eligibility check exactly)
+// so all three can never disagree about whether a listing is currently
+// blocked, and why.
+
+export type EbayFeedBatchBlockingState =
+  | { kind: "none" }
+  /** A still-in-flight (non-terminal-batch) item — the ordinary "this
+   * listing is already being processed" case. */
+  | { kind: "active"; batchId: string; displayNumber: number }
+  /** The listing's most recent Seller Hub Feed attempt ended in a FAILED
+   * batch and was never retried — must not silently become eligible for a
+   * brand-new "Create" again (Phase 6's explicit requirement); the UI
+   * offers a deliberate "Retry Seller Hub draft" action for this case
+   * instead. */
+  | { kind: "failed"; batchId: string; displayNumber: number };
+
+/** Pure function over already-fetched status fields — never fetches
+ * anything itself. `displayNumberByBatchId` may be a Map (server-internal
+ * use) or a plain object (safe to build directly from a JSON API
+ * response, which can never carry a Map). */
+export function computeEbayFeedBatchBlockingState(
+  status: { batch_id: string; item_status: string } | null,
+  displayNumberByBatchId: Map<string, number> | Record<string, number>,
+): EbayFeedBatchBlockingState {
+  if (!status) return { kind: "none" };
+  const displayNumber = displayNumberByBatchId instanceof Map
+    ? (displayNumberByBatchId.get(status.batch_id) ?? 0)
+    : (displayNumberByBatchId[status.batch_id] ?? 0);
+  if (isEbayFeedItemInProgress(status.item_status as EbayFeedItemStatus)) {
+    return { kind: "active", batchId: status.batch_id, displayNumber };
+  }
+  if (status.item_status === "failed") {
+    return { kind: "failed", batchId: status.batch_id, displayNumber };
+  }
+  return { kind: "none" };
+}

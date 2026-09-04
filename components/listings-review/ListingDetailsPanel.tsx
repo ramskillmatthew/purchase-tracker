@@ -15,7 +15,7 @@ import {
 // never the retired Inventory API pipeline's own vocabulary.
 import {
   EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
-  SELLER_HUB_DRAFTS_URL, type EbayFeedItemStatus,
+  SELLER_HUB_DRAFTS_URL, type EbayFeedItemStatus, type EbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { WorkflowStatus } from "./WorkflowStatus";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
@@ -54,15 +54,24 @@ function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
 }
 
 /**
- * PHASE 4 (Listings Review UI wiring) — "View error" only. The retired
- * per-item "Retry failed draft" button is gone: this pipeline's unit of
- * work is a whole batch/CSV upload, not one row, so there is no
- * "resubmit just this row" operation (see
- * lib/listing-studio/ebay-feed/feed-batches.ts's own header on why). A
- * failed listing simply stays eligible — it never got a Seller Hub draft,
- * so re-selecting it and clicking "Create Seller Hub draft" again picks
- * it up fresh, through the exact same, already-tested pipeline as any
- * other first attempt.
+ * PHASE 4 (Listings Review UI wiring) — "View error" only; there is still
+ * no PER-ITEM retry button here (this pipeline's unit of work is a whole
+ * batch/CSV upload, not one row — see
+ * lib/listing-studio/ebay-feed/feed-batches.ts's own header on why a
+ * "resubmit just this row" operation doesn't exist).
+ *
+ * CORRECTIVE PASS (second real submission — Phase 6/7) — the hint text
+ * below used to say "just re-select it and click Create Seller Hub draft
+ * again" on the (mistaken) assumption that a failed listing simply became
+ * eligible again. It doesn't: a listing whose most recent Seller Hub
+ * batch failed is now deliberately BLOCKED from a plain "Create" (see
+ * evaluateEbayFeedDraftEligibility's own feedBatchState check) specifically
+ * so it can never silently reappear as an unexplained fresh attempt with
+ * no context (this corrective task's own explicit requirement). The real
+ * retry action lives in Live Activity, on this listing's own failed batch
+ * — see DraftActivityPanel.tsx's own "Retry Seller Hub draft" control —
+ * which retries the SAME batch (preserving its history and attempt
+ * count), never creates an unexplained new one.
  */
 function EbayFailedDraftActions({ ebay }: { ebay: EbayTabData }) {
   const [expanded, setExpanded] = useState(false);
@@ -75,7 +84,7 @@ function EbayFailedDraftActions({ ebay }: { ebay: EbayTabData }) {
     </div>
     {expanded && <div className="lr-ebay-failed-detail">
       <p className="lr-ebay-failed-message">{ebay.errorMessage || "No further detail was recorded for this failure."}</p>
-      <p className="lr-ebay-failed-hint">Select this listing again and click &quot;Create Seller Hub draft&quot; to try again.</p>
+      <p className="lr-ebay-failed-hint">Open Live Activity and use &quot;Retry Seller Hub draft&quot; on this listing&apos;s failed batch to try again.</p>
     </div>}
   </div>;
 }
@@ -159,6 +168,14 @@ export type EbayTabData = {
   workflowStatus: EbayFeedItemStatus | null;
   queuePosition: number | null;
   errorMessage: string | null;
+  // CORRECTIVE PASS (second real submission — duplicate-submission
+  // defect, Phase 6) — server-computed via
+  // lib/listing-studio/ebay-feed/feed-workflow-status.ts's own
+  // computeEbayFeedBatchBlockingState, the single source of truth this
+  // page's own eligibility check (evaluateEbayFeedDraftEligibility) reads
+  // directly, so the client never re-derives "is this listing already in
+  // an active or failed batch" from raw status fields itself.
+  feedBatchState: EbayFeedBatchBlockingState;
 };
 
 /**

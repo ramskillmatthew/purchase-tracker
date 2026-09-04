@@ -1,0 +1,41 @@
+-- Listings Review — corrective pass (second real Seller Hub Feed
+-- submission: the duplicate-submission defect). ADDITIVE ONLY — nothing
+-- here drops, renames, or narrows any existing column, index, table, or
+-- function; every statement is idempotent (`if not exists`), matching
+-- every other supabase-*.sql file's own convention. NOT applied as part
+-- of the corrective pass that wrote this file — see that task's own
+-- report for why (the application-layer eligibility check, already
+-- shipped, is the actually-enforced protection today; this index is
+-- additional defence in depth for a genuine future deploy).
+--
+-- BACKGROUND: the application layer (see
+-- lib/listing-studio/ebay-feed/feed-batches.ts's own
+-- resolveFeedBatchBlockingStates, used by both the pre-submission preview
+-- and the real batch-creation eligibility re-check) already prevents a
+-- marketplace draft from entering a second Seller Hub Feed batch while
+-- one is still active (queued/uploaded/awaiting_result) or was left
+-- unretried after a failure. That check is correct for the ordinary
+-- request path, but it is NOT atomic with the INSERT that actually
+-- creates the new batch's items — two genuinely concurrent requests
+-- (two browser tabs, a double-submit that raced past the client's own
+-- disabled-button guard) could both read "not currently blocked" before
+-- either one's INSERT commits. This index is the database's own
+-- backstop against exactly that race, independent of and in addition to
+-- the application-layer check.
+create unique index if not exists ebay_feed_batch_items_active_marketplace_draft_idx
+  on public.ebay_feed_batch_items (marketplace_draft_id)
+  where status in ('queued', 'uploaded', 'awaiting_result');
+
+-- Once applied, a second concurrent INSERT for the same marketplace draft
+-- while one is already active will fail with a Postgres unique-violation
+-- (SQLSTATE 23505) inside rpc/listing_studio_create_ebay_feed_batch's own
+-- INSERT into ebay_feed_batch_items — surfacing today as this RPC's call
+-- failing with a generic Postgres error, which
+-- lib/listing-studio/ebay-feed/feed-batches.ts's createEbayFeedBatch
+-- already propagates through app/api/listing-studio/ebay-feed-batches/route.ts's
+-- own safeApiError (a safe, generic message to the browser; the real
+-- detail logged server-side only) — never a raw database error reaching
+-- the client. Recognising this specific race and returning a more
+-- specific "already in an active batch" message is a reasonable following
+-- improvement once this index is actually applied and this exact failure
+-- mode can be observed for real, rather than being guessed at now.

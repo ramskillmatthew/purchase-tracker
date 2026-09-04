@@ -2047,6 +2047,15 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-activity-dismiss-batch:hover { text-decoration: underline; }
 .lr-activity-batch-tag { color: var(--lr-muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
 
+/* CORRECTIVE PASS (second real submission — Phase 7/8) — "View error" /
+   "Retry Seller Hub draft", shown only on a genuinely failed batch's own
+   completion event. Deliberately NOT .lr-activity-message's truncating
+   rule — these are small action links, not the message text itself. */
+.lr-activity-batch-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; }
+.lr-activity-action-btn { padding: 0; border: 0; background: none; color: var(--lr-violet); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.lr-activity-action-btn:hover { text-decoration: underline; }
+.lr-activity-action-btn-retry { color: var(--lr-red); }
+
 /* Polish pass — the bottom-right toast stack (.lr-toast-*) was removed
    entirely from Listings Review: every event it ever showed (draft
    started/in-progress detail, item drafted, draft failed, batch

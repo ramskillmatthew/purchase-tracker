@@ -26,6 +26,13 @@ export type ActivityEvent = {
   message: string;
   detail?: string | null;
   timestampIso: string;
+  // CORRECTIVE PASS (second real submission — Phase 7/8) — set ONLY on a
+  // batch-complete event for a batch that is now genuinely retryable
+  // (status 'failed'), so this panel can offer "View error" / "Retry
+  // Seller Hub draft" right where the failure is reported, without ever
+  // guessing from the event's own id/tone/message text. null/undefined on
+  // every other event (Vinted events never set this at all).
+  retryableBatchId?: string | null;
 };
 
 export type ActivityBatchFilter = { batchId: string; label: string };
@@ -48,10 +55,15 @@ const COLLAPSED_VISIBLE_COUNT = 6;
  * batch), and capped by the parent (never fetches or computes anything
  * itself). "View all" only toggles between the capped slice and the full
  * already-filtered `events` array the parent hands in — there is no
- * second, larger backing store; nothing here is persisted. No Retry action
- * is rendered anywhere in this panel: the existing recourse for a failed
- * item (resend, via the table row/inspector overflow menu) is unchanged
- * and still available.
+ * second, larger backing store; nothing here is persisted. For Vinted, the
+ * existing recourse for a failed item (resend, via the table row/inspector
+ * overflow menu) is unchanged. CORRECTIVE PASS (second real submission —
+ * Phase 7/8): for the eBay Sell Feed pipeline specifically, a batch-complete
+ * event whose batch genuinely FAILED now also carries `retryableBatchId`,
+ * which this panel renders as "View error" / "Retry Seller Hub draft"
+ * controls right on that event — still purely presentational, this panel
+ * never decides retryability itself (see ListingsReviewWorkspace.tsx's own
+ * construction of these events).
  *
  * Multi-batch support — still exactly ONE panel (never one per batch).
  * `filters` lists every batch whose activity isn't dismissed, in display
@@ -63,7 +75,7 @@ const COLLAPSED_VISIBLE_COUNT = 6;
  */
 function DraftActivityPanel({
   events, isLive, filters, selectedFilter, onSelectFilter, onDismissActivity,
-  channel, onChannelChange, showChannelToggle,
+  channel, onChannelChange, showChannelToggle, onViewError, onRetryBatch,
 }: {
   events: ActivityEvent[];
   isLive: boolean;
@@ -77,6 +89,12 @@ function DraftActivityPanel({
   channel: "VINTED" | "EBAY_UK";
   onChannelChange: (channel: "VINTED" | "EBAY_UK") => void;
   showChannelToggle: boolean;
+  // CORRECTIVE PASS (second real submission — Phase 7/8) — present only
+  // when the parent supports the Sell Feed API's retry workflow (eBay
+  // channel only; Vinted events never set event.retryableBatchId, so
+  // these are simply never invoked for a Vinted event either way).
+  onViewError?: (batchId: string) => void;
+  onRetryBatch?: (batchId: string) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const visibleEvents = showAll ? events : events.slice(0, COLLAPSED_VISIBLE_COUNT);
@@ -119,6 +137,10 @@ function DraftActivityPanel({
                 {event.message}
               </span>
               {event.detail && <span className="lr-activity-detail">{event.detail}</span>}
+              {event.retryableBatchId && (onViewError || onRetryBatch) && <span className="lr-activity-batch-actions">
+                {onViewError && <button type="button" className="lr-activity-action-btn" onClick={() => onViewError(event.retryableBatchId!)}>View error</button>}
+                {onRetryBatch && <button type="button" className="lr-activity-action-btn lr-activity-action-btn-retry" onClick={() => onRetryBatch(event.retryableBatchId!)}>Retry Seller Hub draft</button>}
+              </span>}
             </div>
           </li>)}
         </ul>}

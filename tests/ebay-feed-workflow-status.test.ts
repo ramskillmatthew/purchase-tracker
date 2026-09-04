@@ -4,6 +4,7 @@ import {
   EBAY_FEED_BATCH_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE,
   isEbayFeedBatchStatusTerminal, isEbayFeedBatchInProgress, isEbayFeedItemInProgress,
   computeEbayFeedWorkflowSecondaryLine, computeEbayFeedItemWorkflowStatus, SELLER_HUB_DRAFTS_URL,
+  computeEbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 
 describe("eBay Feed workflow terminology — never implies auto-publish or reuses the retired Inventory API pipeline's vocabulary", () => {
@@ -80,5 +81,38 @@ describe("PHASE 4 — per-item helpers for the single-listing workflow chip", ()
     expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: "failed", queuePosition: null, errorMessage: "Category ID is invalid" })).toBe("Category ID is invalid");
     expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: "succeeded", queuePosition: null, errorMessage: null })).toBeNull();
     expect(computeEbayFeedWorkflowSecondaryLine({ itemStatus: null, queuePosition: null, errorMessage: null })).toBeNull();
+  });
+});
+
+describe("computeEbayFeedBatchBlockingState — CORRECTIVE PASS (duplicate-submission defect, Phase 6): the one shared source of truth for server, route, and client alike", () => {
+  it("null status is { kind: \"none\" }", () => {
+    expect(computeEbayFeedBatchBlockingState(null, new Map())).toEqual({ kind: "none" });
+  });
+
+  it("a queued/uploaded/awaiting_result item is 'active', carrying the batch's display number (Map form)", () => {
+    const map = new Map([["batch-1", 1]]);
+    for (const itemStatus of ["queued", "uploaded", "awaiting_result"]) {
+      expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: itemStatus }, map))
+        .toEqual({ kind: "active", batchId: "batch-1", displayNumber: 1 });
+    }
+  });
+
+  it("a queued item is 'active' using the plain-object form (as a JSON API response would carry it)", () => {
+    expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "queued" }, { "batch-1": 1 }))
+      .toEqual({ kind: "active", batchId: "batch-1", displayNumber: 1 });
+  });
+
+  it("a failed item is 'failed', carrying the batch's display number", () => {
+    expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "failed" }, new Map([["batch-1", 1]])))
+      .toEqual({ kind: "failed", batchId: "batch-1", displayNumber: 1 });
+  });
+
+  it("a succeeded or cancelled item is 'none' — never blocks, never offers Retry", () => {
+    expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "succeeded" }, new Map([["batch-1", 1]]))).toEqual({ kind: "none" });
+    expect(computeEbayFeedBatchBlockingState({ batch_id: "batch-1", item_status: "cancelled" }, new Map([["batch-1", 1]]))).toEqual({ kind: "none" });
+  });
+
+  it("an unknown batch id falls back to display number 0 rather than throwing", () => {
+    expect(computeEbayFeedBatchBlockingState({ batch_id: "unknown-batch", item_status: "failed" }, new Map())).toEqual({ kind: "failed", batchId: "unknown-batch", displayNumber: 0 });
   });
 });

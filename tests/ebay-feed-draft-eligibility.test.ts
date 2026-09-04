@@ -55,4 +55,38 @@ describe("evaluateEbayFeedDraftEligibility", () => {
     const result = evaluateEbayFeedDraftEligibility(baseInput({ hasValidPrice: false, hasPhoto: false, hasSku: false }));
     expect(result.reasons).toHaveLength(3);
   });
+
+  // CORRECTIVE PASS (second real submission — duplicate-submission defect,
+  // Phase 6/10) — feedBatchState is optional so every test above (which
+  // never mentions it) keeps behaving exactly as before.
+  describe("feedBatchState — REQUIREMENT (Phase 6): an active or failed Seller Hub batch blocks eligibility", () => {
+    it("omitting feedBatchState entirely behaves exactly like { kind: \"none\" } (backward compatible)", () => {
+      expect(evaluateEbayFeedDraftEligibility(baseInput())).toEqual({ eligible: true, reasons: [] });
+    });
+
+    it("an ACTIVE batch item blocks with a reason naming the batch number", () => {
+      const result = evaluateEbayFeedDraftEligibility(baseInput({ feedBatchState: { kind: "active", batchId: "b1", displayNumber: 1 } }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons).toEqual(["Already in Seller Hub Batch #1"]);
+    });
+
+    it("a FAILED batch item blocks with a Retry-oriented reason, never silently re-offered as a fresh Create", () => {
+      const result = evaluateEbayFeedDraftEligibility(baseInput({ feedBatchState: { kind: "failed", batchId: "b1", displayNumber: 2 } }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons[0]).toContain("Seller Hub Batch #2");
+      expect(result.reasons[0]).toMatch(/Retry Seller Hub draft/);
+    });
+
+    it("an active/failed batch state is checked before (and short-circuits) the ordinary field-completeness reasons — never a confusing mixed reason list", () => {
+      const result = evaluateEbayFeedDraftEligibility(baseInput({
+        feedBatchState: { kind: "active", batchId: "b1", displayNumber: 1 },
+        hasValidPrice: false, hasPhoto: false,
+      }));
+      expect(result.reasons).toEqual(["Already in Seller Hub Batch #1"]);
+    });
+
+    it("{ kind: \"none\" } explicitly passed behaves identically to omitting it", () => {
+      expect(evaluateEbayFeedDraftEligibility(baseInput({ feedBatchState: { kind: "none" } }))).toEqual({ eligible: true, reasons: [] });
+    });
+  });
 });

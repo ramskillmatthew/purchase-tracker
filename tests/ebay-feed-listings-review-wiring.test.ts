@@ -119,15 +119,49 @@ describe("PHASE 9.30/9.31 — the retired legacy pipeline's own historical label
   });
 });
 
-describe("PHASE 9 — retry is genuinely gone from the UI, never a dead button pointing at a 410 route", () => {
-  it("no retry-batch-item fetch call exists anywhere in the workspace", () => {
+describe("PHASE 9 — the retired legacy PER-ITEM retry is genuinely gone from the UI, never a dead button pointing at a 410 route", () => {
+  it("no legacy per-item retry-batch-item fetch call exists anywhere in the workspace", () => {
     expect(workspaceSource).not.toMatch(/\/items\/\$\{.*\}\/retry/);
   });
 
-  it("EbayFailedDraftActions only offers View error, never a Retry button", () => {
+  it("EbayFailedDraftActions (the per-listing inspector panel) offers View error, never its own per-item 'Retry failed draft' button", () => {
     const fnBody = detailsPanelSource.slice(detailsPanelSource.indexOf("function EbayFailedDraftActions"), detailsPanelSource.indexOf("export type ListingDetails"));
     expect(fnBody).not.toContain("Retry failed draft");
     expect(fnBody).toContain("View error");
+  });
+});
+
+// CORRECTIVE PASS (second real submission — Phase 6/7) — a genuine,
+// deliberate BATCH-level retry now exists (Live Activity, not the
+// per-listing inspector panel above) — the opposite of "retry is gone".
+describe("PHASE 7/8 — the new, deliberate BATCH-level 'Retry Seller Hub draft' exists in Live Activity, wired to the batch route (never the legacy per-item one)", () => {
+  it("the workspace posts to the batch-level retry route, never a per-item one", () => {
+    expect(workspaceSource).toContain("/retry`, { method: \"POST\" }");
+    expect(workspaceSource).not.toMatch(/\/items\/\$\{.*\}\/retry/);
+  });
+
+  it("DraftActivityPanel renders 'Retry Seller Hub draft' only when the event carries retryableBatchId", () => {
+    const panelSource = read("components/listings-review/DraftActivityPanel.tsx");
+    expect(panelSource).toContain("Retry Seller Hub draft");
+    expect(panelSource).toContain("event.retryableBatchId");
+  });
+
+  it("a batch-complete event is only ever marked retryableBatchId for a genuinely FAILED batch, never a completed/completed_with_errors one", () => {
+    expect(workspaceSource).toContain('retryableBatchId: body.status === "failed" ? batchId : null');
+  });
+
+  it("the per-listing inspector's own failed-draft hint no longer claims re-selecting and clicking Create again will work (it is now correctly blocked) — it points to Live Activity's Retry instead", () => {
+    const fnBody = detailsPanelSource.slice(detailsPanelSource.indexOf("function EbayFailedDraftActions"), detailsPanelSource.indexOf("export type ListingDetails"));
+    expect(fnBody).not.toMatch(/click.*Create Seller Hub draft.*to try again/i);
+    expect(fnBody).toMatch(/Retry Seller Hub draft/);
+  });
+
+  it("the retry confirmation dialog explains reconciliation and never-publishes before any retry request is sent", () => {
+    const dialogStart = workspaceSource.indexOf('id="retry-title"');
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 1200);
+    expect(dialogBody).toMatch(/eBay already has a record/i);
+    expect(dialogBody).toMatch(/will not publish/i);
+    expect(dialogBody).toMatch(/will not[\s\S]*create a new task/i);
   });
 });
 
