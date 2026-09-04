@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
-import { createEbayFeedBatch, listOwnerEbayFeedBatches, runEbayFeedBatchProcessTick, resolveEbayFeedDraftEligibilityForProducts } from "@/lib/listing-studio/ebay-feed/feed-batches";
+import { createEbayFeedBatch, listOwnerEbayFeedBatches, driveEbayFeedBatchTicks, resolveEbayFeedDraftEligibilityForProducts } from "@/lib/listing-studio/ebay-feed/feed-batches";
 import { enforceRateLimit } from "@/lib/security/activity";
 import { isMissingSchemaError } from "@/lib/supabase";
 
@@ -74,11 +74,14 @@ export async function POST(request: Request) {
     }
 
     const { batchId, displayNumber } = await createEbayFeedBatch(user.id, eligibleMarketplaceDraftIds, eligibleProductIds, eligibleSkus);
-    // ONE bounded, awaited tick — never a loop to completion. Its own
-    // failure must never fail batch CREATION, which already succeeded;
-    // the client's poll loop continues from persisted state on the next
-    // tick regardless.
-    await runEbayFeedBatchProcessTick(user.id, batchId).catch(() => {});
+    // CORRECTIVE PASS (fourth real-submission audit) — drives multiple
+    // bounded ticks through every fast local stage (never just one — see
+    // driveEbayFeedBatchTicks's own header on why), so real progress
+    // happens within this same request even if the browser closes right
+    // away. Its own failure must never fail batch CREATION, which already
+    // succeeded; the client's poll loop continues from persisted state on
+    // its own next tick regardless.
+    await driveEbayFeedBatchTicks(user.id, batchId).catch(() => {});
 
     return NextResponse.json({ batchId, displayNumber, eligibleCount: eligibleProductIds.length, skippedCount: skipped.length, skipped });
   } catch (error) {

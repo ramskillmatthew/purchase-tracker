@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
-import { getEbayFeedBatch, retryEbayFeedBatch, runEbayFeedBatchProcessTick } from "@/lib/listing-studio/ebay-feed/feed-batches";
+import { getEbayFeedBatch, retryEbayFeedBatch, driveEbayFeedBatchTicks } from "@/lib/listing-studio/ebay-feed/feed-batches";
 import { SELLER_HUB_DRAFTS_URL } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { enforceRateLimit } from "@/lib/security/activity";
 
@@ -22,12 +22,15 @@ const RATE_LIMIT_WINDOW_SECONDS = 10 * 60;
  * underlying PATCH only matches a row still genuinely 'failed' — see that
  * function's own comment).
  *
- * ONE bounded, awaited process tick immediately follows a successful
- * retry — mirrors the create route's own "start the pipeline moving right
- * away rather than waiting for the client's own poll loop to notice" —
- * but its own failure must never fail the retry request itself, which
- * already succeeded; the client's existing poll loop continues from
- * persisted state on the next tick regardless.
+ * CORRECTIVE PASS (fourth real-submission audit — root cause of "Retry
+ * returns to Queued forever") — drives MULTIPLE bounded process ticks
+ * (driveEbayFeedBatchTicks, never just one) through every fast local
+ * stage immediately after a successful retry, so real progress happens
+ * within this same request even if the browser closes right away. Its
+ * own failure must never fail the retry request itself, which already
+ * succeeded; the client's existing poll loop (now correctly re-including
+ * this batch — see ListingsReviewWorkspace.tsx's own fix) continues from
+ * persisted state on its own next tick regardless.
  */
 export async function POST(_request: Request, { params }: { params: Promise<{ batchId: string }> }) {
   try {
@@ -50,7 +53,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ ba
       return NextResponse.json({ error: "This batch was already retried — reload to see its current status." }, { status: 409 });
     }
 
-    await runEbayFeedBatchProcessTick(user.id, batchId).catch(() => {});
+    await driveEbayFeedBatchTicks(user.id, batchId).catch(() => {});
 
     const loaded = await getEbayFeedBatch(user.id, batchId);
     if (!loaded) return NextResponse.json({ error: "Batch not found." }, { status: 404 });

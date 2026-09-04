@@ -13,7 +13,7 @@ import {
 // that retired pipeline's own historical batch display elsewhere).
 import {
   EBAY_FEED_ITEM_STATUS_LABELS, EBAY_FEED_ITEM_STATUS_TONE, computeEbayFeedWorkflowSecondaryLine, isEbayFeedItemInProgress,
-  NEEDS_RECONCILIATION_LABEL, NEEDS_RECONCILIATION_SECONDARY_LINE,
+  NEEDS_RECONCILIATION_SHORT_HINT,
   type EbayFeedItemStatus, type EbayFeedBatchBlockingState,
 } from "@/lib/listing-studio/ebay-feed/feed-workflow-status";
 import { formatPenceAsGBP } from "@/lib/listing-studio/selling-price";
@@ -102,17 +102,30 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
   // match) must never display as ordinary "Queued"/"Uploaded"/etc, which
   // would falsely suggest the submission is still genuinely working.
   // Checked BEFORE the ordinary ebayWorkflowStatus-derived label below.
+  //
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 7 error
+  // presentation) — the TABLE cell's own PRIMARY label is kept to the
+  // short, fixed vocabulary (Ready/Queued/Processing/Failed/Draft
+  // created) specifically; the fuller explanation moves to the secondary
+  // line instead of inflating the primary label text (this narrow column
+  // is exactly where the reported clipping/overlap happened). The
+  // inspector panel — a wider surface with room for it — still shows the
+  // fuller NEEDS_RECONCILIATION_LABEL as its own primary label.
   if (row.ebayFeedBatchState.kind === "needs_reconciliation") {
     return {
-      label: NEEDS_RECONCILIATION_LABEL, tone: EBAY_FEED_ITEM_STATUS_TONE.failed, pulse: false,
-      secondaryLine: NEEDS_RECONCILIATION_SECONDARY_LINE, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
+      label: "Failed", tone: EBAY_FEED_ITEM_STATUS_TONE.failed, pulse: false,
+      secondaryLine: NEEDS_RECONCILIATION_SHORT_HINT, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
     };
   }
   const label = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_LABELS[row.ebayWorkflowStatus] : (row.ebayContentReady ? "Ready" : "Needs review");
   const tone = row.ebayWorkflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[row.ebayWorkflowStatus] : (row.ebayContentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
   return {
     label, tone, pulse: isEbayFeedItemInProgress(row.ebayWorkflowStatus),
-    secondaryLine: computeEbayFeedWorkflowSecondaryLine({ itemStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: row.ebayErrorMessage }),
+    // REQUIREMENT (Phase 7): never the raw eBay error text in this narrow
+    // cell — errorMessage is deliberately omitted here (queue position
+    // only); the real message lives in View error / the status panel /
+    // the wider inspector panel instead.
+    secondaryLine: computeEbayFeedWorkflowSecondaryLine({ itemStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: null }),
     pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
   };
 }

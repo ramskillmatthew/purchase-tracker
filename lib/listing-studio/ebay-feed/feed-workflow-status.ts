@@ -180,6 +180,14 @@ export type EbayFeedBatchBlockingState =
  * blocking-reason text can never drift apart on wording. */
 export const NEEDS_RECONCILIATION_LABEL = "Failed — local batch state needs reconciliation";
 export const NEEDS_RECONCILIATION_SECONDARY_LINE = "This attempt failed before eBay was ever contacted, but its local record wasn't fully updated. Nothing reached eBay — reconcile it before retrying.";
+// CORRECTIVE PASS (fourth real-submission audit — Phase 7 error
+// presentation) — a genuinely short variant for the narrow table
+// workflow cell specifically ("Workflow cell should say only: Ready/
+// Queued/Processing/Failed/Draft created" — no long prose, even as a
+// secondary line). The fuller NEEDS_RECONCILIATION_SECONDARY_LINE above
+// is still used by the wider inspector panel and the full-width status
+// panel, which both have room for it.
+export const NEEDS_RECONCILIATION_SHORT_HINT = "Nothing reached eBay — see status panel";
 
 /** Pure function over already-fetched status fields — never fetches
  * anything itself. `displayNumberByBatchId` may be a Map (server-internal

@@ -3,20 +3,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 const {
-  requireOwner, enforceRateLimit, getEbayFeedBatch, retryEbayFeedBatch, runEbayFeedBatchProcessTick,
+  requireOwner, enforceRateLimit, getEbayFeedBatch, retryEbayFeedBatch, driveEbayFeedBatchTicks,
 } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   enforceRateLimit: vi.fn(async () => {}),
   getEbayFeedBatch: vi.fn(async (_ownerId: string, _batchId: string) => null as unknown),
   retryEbayFeedBatch: vi.fn(async (_ownerId: string, _batchId: string) => ({ resumedFromTaskId: null as string | null, resumedStatus: "queued" as const })),
-  runEbayFeedBatchProcessTick: vi.fn(async () => ({ claimedCount: 0, batchStatus: null as string | null, hasMoreWork: false })),
+  // CORRECTIVE PASS (fourth real-submission audit) — the retry route now
+  // drives MULTIPLE bounded ticks (never just one) via
+  // driveEbayFeedBatchTicks, so real progress happens within this same
+  // request even if the browser closes right away.
+  driveEbayFeedBatchTicks: vi.fn(async () => ({ claimedCount: 0, batchStatus: null as string | null, hasMoreWork: false })),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
   return { ...actual, requireOwner };
 });
 vi.mock("@/lib/security/activity", () => ({ enforceRateLimit }));
-vi.mock("@/lib/listing-studio/ebay-feed/feed-batches", () => ({ getEbayFeedBatch, retryEbayFeedBatch, runEbayFeedBatchProcessTick }));
+vi.mock("@/lib/listing-studio/ebay-feed/feed-batches", () => ({ getEbayFeedBatch, retryEbayFeedBatch, driveEbayFeedBatchTicks }));
 
 const { POST: retryRoute } = await import("@/app/api/listing-studio/ebay-feed-batches/[batchId]/retry/route");
 
@@ -39,10 +43,10 @@ function failedBatch(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   requireOwner.mockClear(); enforceRateLimit.mockClear();
-  getEbayFeedBatch.mockReset(); retryEbayFeedBatch.mockReset(); runEbayFeedBatchProcessTick.mockReset();
+  getEbayFeedBatch.mockReset(); retryEbayFeedBatch.mockReset(); driveEbayFeedBatchTicks.mockReset();
   getEbayFeedBatch.mockResolvedValue(failedBatch());
   retryEbayFeedBatch.mockResolvedValue({ resumedFromTaskId: null, resumedStatus: "queued" });
-  runEbayFeedBatchProcessTick.mockResolvedValue({ claimedCount: 1, batchStatus: "generating_csv", hasMoreWork: true });
+  driveEbayFeedBatchTicks.mockResolvedValue({ claimedCount: 1, batchStatus: "generating_csv", hasMoreWork: true });
 });
 
 describe("POST /api/listing-studio/ebay-feed-batches/[batchId]/retry", () => {
@@ -78,7 +82,7 @@ describe("POST /api/listing-studio/ebay-feed-batches/[batchId]/retry", () => {
     const response = await retryRoute(req(), params());
     expect(response.status).toBe(200);
     expect(retryEbayFeedBatch).toHaveBeenCalledWith("owner-1", BATCH_ID);
-    expect(runEbayFeedBatchProcessTick).toHaveBeenCalledWith("owner-1", BATCH_ID);
+    expect(driveEbayFeedBatchTicks).toHaveBeenCalledWith("owner-1", BATCH_ID);
     const body = await response.json();
     expect(body.status).toBe("generating_csv");
     expect(body.resumedFromTaskId).toBeNull();
@@ -88,7 +92,7 @@ describe("POST /api/listing-studio/ebay-feed-batches/[batchId]/retry", () => {
     retryEbayFeedBatch.mockRejectedValue(new Error("This batch was already retried (by another request) or is no longer failed."));
     const response = await retryRoute(req(), params());
     expect(response.status).toBe(409);
-    expect(runEbayFeedBatchProcessTick).not.toHaveBeenCalled();
+    expect(driveEbayFeedBatchTicks).not.toHaveBeenCalled();
   });
 
   it("REQUIREMENT: a genuinely unexpected error never leaks raw detail to the browser", async () => {

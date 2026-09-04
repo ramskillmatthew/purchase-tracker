@@ -1886,9 +1886,22 @@ describe("REQUIREMENT (test 3): 'needs_reconciliation' never displays as ordinar
     expect(branchBody).toContain("pulse={false}");
   });
 
-  it("both components import and render the SAME shared label/secondary-line text — never independently-typed strings that could drift", () => {
-    expect(tableSource).toContain("NEEDS_RECONCILIATION_LABEL");
-    expect(tableSource).toContain("NEEDS_RECONCILIATION_SECONDARY_LINE");
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 7 error
+  // presentation) — the table's own narrow workflow cell now uses a
+  // deliberately SHORT shared hint (never the long full label/sentence,
+  // which is exactly what caused the reported clipping); the wider
+  // inspector panel still uses the fuller shared constants. Both still
+  // import from the ONE shared module — never independently-typed
+  // strings that could drift.
+  it("the table uses the SHORT shared hint (short label + short secondary line), never the long constants, in its narrow workflow cell", () => {
+    const fnStart = tableSource.indexOf('row.ebayFeedBatchState.kind === "needs_reconciliation"');
+    const branchBody = tableSource.slice(fnStart, fnStart + 300);
+    expect(branchBody).toContain('label: "Failed"');
+    expect(branchBody).toContain("NEEDS_RECONCILIATION_SHORT_HINT");
+    expect(branchBody).not.toContain("NEEDS_RECONCILIATION_SECONDARY_LINE");
+  });
+
+  it("the wider inspector panel still uses the FULL shared label/secondary-line constants (it has room for them)", () => {
     expect(detailsPanelSource).toContain("NEEDS_RECONCILIATION_LABEL");
     expect(detailsPanelSource).toContain("NEEDS_RECONCILIATION_SECONDARY_LINE");
   });
@@ -1900,6 +1913,14 @@ describe("REQUIREMENT (test 3): 'needs_reconciliation' never displays as ordinar
     expect(labelLine).not.toMatch(/\bwait\b/i);
     const secondaryLine = workflowStatusSource.slice(workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SECONDARY_LINE"), workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SECONDARY_LINE") + 400);
     expect(secondaryLine).not.toMatch(/\bwait\b/i);
+  });
+
+  it("REQUIREMENT: the short table-cell hint also never says 'Queued' and never tells the user to wait", () => {
+    const workflowStatusSource = read("lib/listing-studio/ebay-feed/feed-workflow-status.ts");
+    expect(workflowStatusSource).toContain("export const NEEDS_RECONCILIATION_SHORT_HINT");
+    const shortHintLine = workflowStatusSource.slice(workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SHORT_HINT"), workflowStatusSource.indexOf("export const NEEDS_RECONCILIATION_SHORT_HINT") + 200);
+    expect(shortHintLine).not.toMatch(/\bQueued\b/);
+    expect(shortHintLine).not.toMatch(/\bwait\b/i);
   });
 });
 
@@ -1942,5 +1963,95 @@ describe("REQUIREMENT (test 4/13/14/15): a durable 'Reconcile failed batch' / 'R
     const reconcileStart = workspaceSource.indexOf("const handleConfirmReconcileEbayBatch = useCallback");
     const reconcileFn = workspaceSource.slice(reconcileStart, workspaceSource.indexOf("}, [reconcileConfirmBatchId", reconcileStart));
     expect(reconcileFn).toContain("await loadListings();");
+  });
+});
+
+/**
+ * CORRECTIVE PASS (fourth real-submission audit — root cause of "Retry
+ * returns to Queued forever", plus the Phase 7 action-area redesign).
+ */
+describe("REQUIREMENT (fourth audit): the ROOT CAUSE fix — retry/reconcile/resume re-add the batch to the polled/visible set", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("handleConfirmRetryEbayBatch adds the batch id to ebayVisibleBatchIds before/alongside updating its status", () => {
+    const start = workspaceSource.indexOf("const handleConfirmRetryEbayBatch = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, [retryConfirmBatchId", start));
+    expect(fn).toContain("setEbayVisibleBatchIds(current => new Set(current).add(batchId));");
+  });
+
+  it("handleConfirmReconcileEbayBatch also adds the batch id to ebayVisibleBatchIds", () => {
+    const start = workspaceSource.indexOf("const handleConfirmReconcileEbayBatch = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, [reconcileConfirmBatchId", start));
+    expect(fn).toContain("setEbayVisibleBatchIds(current => new Set(current).add(batchId));");
+  });
+
+  it("handleResumeProcessing also adds the batch id to ebayVisibleBatchIds and calls the existing /process route (never a duplicate task-creating path)", () => {
+    const start = workspaceSource.indexOf("const handleResumeProcessing = useCallback");
+    const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start));
+    expect(fn).toContain("setEbayVisibleBatchIds(current => new Set(current).add(batchId));");
+    expect(fn).toMatch(/fetch\(`\/api\/listing-studio\/ebay-feed-batches\/\$\{batchId\}\/process`/);
+  });
+
+  it("the retry and create routes both drive MULTIPLE ticks (driveEbayFeedBatchTicks), never a single runEbayFeedBatchProcessTick call, so real progress happens within one request", () => {
+    const retrySource = read("app/api/listing-studio/ebay-feed-batches/[batchId]/retry/route.ts");
+    const createSource = read("app/api/listing-studio/ebay-feed-batches/route.ts");
+    expect(retrySource).toContain("driveEbayFeedBatchTicks(user.id, batchId)");
+    expect(createSource).toContain("driveEbayFeedBatchTicks(user.id, batchId)");
+  });
+});
+
+describe("REQUIREMENT (Phase 7 action-area redesign): exactly one eBay primary action, marketplace-exclusive controls, no jumbled row", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("Send to extension is gated by workflowMarketplaceView === \"VINTED\" — never rendered while eBay is the active workflow", () => {
+    expect(workspaceSource).toContain('workflowMarketplaceView === "VINTED" && <button');
+    const idx = workspaceSource.indexOf('workflowMarketplaceView === "VINTED" && <button');
+    const block = workspaceSource.slice(idx, idx + 800);
+    expect(block).toContain('{sendToExtensionRunning ? "Preparing batch…" : `Send ${bulkCount} to extension`}');
+  });
+
+  it("the eBay action group (policy control, Create, Open Seller Hub Drafts) is gated by workflowMarketplaceView === \"EBAY_UK\"", () => {
+    const idx = workspaceSource.indexOf("<BulkEbayPolicyControl");
+    const before = workspaceSource.slice(Math.max(0, idx - 300), idx);
+    expect(before).toMatch(/marketplaceToggleOptions\.includes\("EBAY_UK"\) && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>/);
+  });
+
+  it("Create and 'Open Seller Hub Drafts' are mutually exclusive (eligibleEbayCount > 0 vs === 0 && already drafted) — never both, never a disabled Create 0 button", () => {
+    const groupStart = workspaceSource.indexOf("<BulkEbayPolicyControl");
+    const groupEnd = workspaceSource.indexOf("</>}", groupStart);
+    const group = workspaceSource.slice(groupStart, groupEnd);
+    expect(group).toContain("eligibleEbayCount > 0 && (");
+    expect(group).toContain("eligibleEbayCount === 0 && ebayAlreadyDraftedSingleSelection && (");
+    expect(group).not.toMatch(/disabled=\{ebayCreatingDrafts \|\| eligibleEbayCount === 0/); // the old always-rendered disabled Create button is gone
+  });
+
+  it("the status panel's own primary actions are mutually exclusive: needs_reconciliation shows Reconcile, failed shows Retry, active-stalled shows Resume — never more than one kind's button in the same render", () => {
+    const panelStart = workspaceSource.indexOf('className="lr-ebay-status-panel-actions"');
+    const panelBody = workspaceSource.slice(panelStart, panelStart + 1200);
+    expect(panelBody).toContain('ebayBlockingBatchAction?.kind === "needs_reconciliation" && (');
+    expect(panelBody).toContain('ebayBlockingBatchAction?.kind === "failed" && <>');
+    expect(panelBody).toContain("ebayStalledBatchAction && (");
+    expect(panelBody).toContain("Reconcile failed batch");
+    expect(panelBody).toContain("Retry Seller Hub draft");
+    expect(panelBody).toContain("Resume processing");
+  });
+
+  it("the status panel is a full-width block OUTSIDE .lr-bulk-bar-actions — never squeezed into the same narrow flex row as the selection/delete/send buttons", () => {
+    const barActionsStart = workspaceSource.indexOf('<div className="lr-bulk-bar-actions">');
+    const barActionsEnd = workspaceSource.indexOf("</div>", workspaceSource.lastIndexOf("</>}", workspaceSource.indexOf('className="lr-ebay-status-panel"')));
+    const barActionsBody = workspaceSource.slice(barActionsStart, barActionsEnd);
+    expect(barActionsBody).not.toContain("lr-ebay-status-panel");
+    expect(workspaceSource).toContain('<div className="lr-ebay-status-panel" role="status">');
+  });
+
+  it("the stalled-detection state persists a changed-at timestamp per batch, distinct from a fixed 'Position 1 forever' display", () => {
+    expect(workspaceSource).toContain("const [ebayBatchStatusChangedAt, setEbayBatchStatusChangedAt] = useState<Map<string, number>>(new Map());");
+    expect(workspaceSource).toContain("EBAY_STALL_THRESHOLD_MS");
+  });
+
+  it("REQUIREMENT: a batch never observed this session (e.g. its box was previously dismissed) is ALSO treated as needing a manual nudge, not silently invisible", () => {
+    const start = workspaceSource.indexOf("const ebayStalledBatchAction = useMemo");
+    const fn = workspaceSource.slice(start, start + 900);
+    expect(fn).toContain("if (!status) return state;");
   });
 });

@@ -290,6 +290,29 @@ export default function ListingsReviewWorkspace() {
   const ebayBatchStatusByIdRef = useRef<Map<string, EbayBatchStatus>>(new Map());
   useEffect(() => { ebayVisibleBatchIdsRef.current = ebayVisibleBatchIds; }, [ebayVisibleBatchIds]);
   useEffect(() => { ebayBatchStatusByIdRef.current = ebayBatchStatusById; }, [ebayBatchStatusById]);
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 5/9: stalled
+  // detection) — the timestamp a batch's own status was last OBSERVED to
+  // change, updated inside applyEbayBatchResult below. Session-scoped
+  // (like every other "live" signal this page tracks) — a batch never
+  // observed to change this session simply isn't reported as stalled
+  // (unknown, not "fine"), rather than guessing from a page-load
+  // snapshot with no real history to compare against.
+  //
+  // Deliberately real React STATE, never a ref: ebayStalledBatchAction's
+  // own useMemo below reads this during render to decide whether to
+  // offer "Resume processing" — a ref read during render is unsafe (React
+  // refs are only meant for imperative, non-render-time access) and is
+  // actually flagged by this codebase's own eslint-plugin-react-hooks
+  // "refs" rule; state is the correct tool for a value that legitimately
+  // drives what gets rendered.
+  const [ebayBatchStatusChangedAt, setEbayBatchStatusChangedAt] = useState<Map<string, number>>(new Map());
+  const EBAY_STALL_THRESHOLD_MS = 90_000;
+  const isEbayBatchStalled = useCallback((batchId: string, status: EbayFeedBatchStatus): boolean => {
+    if (isEbayFeedBatchStatusTerminal(status)) return false;
+    const changedAt = ebayBatchStatusChangedAt.get(batchId);
+    if (!changedAt) return false;
+    return Date.now() - changedAt > EBAY_STALL_THRESHOLD_MS;
+  }, [ebayBatchStatusChangedAt]);
 
   // CORRECTIVE PASS (second real submission — Phase 7/8: "View error" /
   // "Retry Seller Hub draft") — both dialogs read the already-fetched,
@@ -1026,6 +1049,48 @@ export default function ListingsReviewWorkspace() {
     return state;
   }, [bulkSelectedIds, listingsById]);
 
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 5/9: "queued
+  // beyond a sensible threshold") — an "active" (genuinely in-flight)
+  // batch offers "Resume processing" instead of silently saying
+  // "Position 1" forever, in EITHER of two cases:
+  //   (a) it's genuinely stalled — polled this session, but its status
+  //       hasn't changed in EBAY_STALL_THRESHOLD_MS; or
+  //   (b) it has NEVER been polled this session at all — a real gap this
+  //       audit found: a batch whose box was previously dismissed (e.g.
+  //       the real Batch #1) is excluded from ebayVisibleBatchIds on
+  //       every fresh page load (GET /ebay-feed-batches's own "visible"
+  //       filter), so ebayBatchStatusById never gets an entry for it —
+  //       without case (b), such a batch would show no Resume control at
+  //       all, not even after a genuine Retry, because nothing this
+  //       session ever confirmed it was progressing OR stalled.
+  // Deliberately separate from ebayBlockingBatchAction above (which
+  // excludes "active" entirely) since this needs live poll data
+  // (ebayBatchStatusById), not just the row's own already-fetched
+  // feedBatchState.
+  const ebayStalledBatchAction = useMemo(() => {
+    if (bulkSelectedIds.size !== 1) return null;
+    const id = [...bulkSelectedIds][0];
+    const state = listingsById.get(id)?.ebay?.feedBatchState;
+    if (!state || state.kind !== "active") return null;
+    const status = ebayBatchStatusById.get(state.batchId);
+    if (!status) return state; // case (b): never observed this session
+    if (!isEbayBatchStalled(state.batchId, status.status)) return null;
+    return state; // case (a): genuinely stalled
+  }, [bulkSelectedIds, listingsById, ebayBatchStatusById, isEbayBatchStalled]);
+
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 7 action-area
+  // redesign) — whether the single selected listing already has a
+  // genuine, confirmed Seller Hub draft (independent of feedBatchState,
+  // which only ever describes an in-flight or failed ATTEMPT — a
+  // completed one clears differently, via ebayFeedDraftCreatedAt). Used
+  // to offer "Open Seller Hub Drafts" as the one eBay primary action
+  // instead of a disabled/absent Create button.
+  const ebayAlreadyDraftedSingleSelection = useMemo(() => {
+    if (bulkSelectedIds.size !== 1) return false;
+    const id = [...bulkSelectedIds][0];
+    return listingsById.get(id)?.ebay?.feedDraftCreatedAt != null;
+  }, [bulkSelectedIds, listingsById]);
+
   // CORRECTIVE PASS — step 1: opens the preview dialog for every currently
   // ELIGIBLE selected listing (never the ineligible ones — nothing to
   // preview for a listing that won't be included). Purely read-only: no
@@ -1167,11 +1232,28 @@ export default function ListingsReviewWorkspace() {
       const response = await fetch(`/api/listing-studio/ebay-feed-batches/${batchId}/retry`, { method: "POST" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) { setRetryError(body?.error || "Could not retry this Seller Hub draft."); return; }
+      // CORRECTIVE PASS (fourth real-submission audit — ROOT CAUSE of "Retry
+      // returns to Queued forever") — this line was missing entirely. The
+      // poll loop's own idsToPoll only ever considers
+      // ebayVisibleBatchIdsRef.current (see that useEffect's own comment);
+      // a batch whose box was previously dismissed (exactly Batch #1's real
+      // state) is NOT in that set, so setting ebayBatchStatusById alone —
+      // which is all this handler used to do — updated the DISPLAYED status
+      // but left the batch permanently invisible to the very poll loop that
+      // was supposed to keep driving it forward. Confirmed live: Batch #1's
+      // real row was found genuinely healthy and claimable (generating_csv,
+      // no stale lease, no zombie claim) minutes after a real Retry click —
+      // nothing was ever broken at the data layer, nothing was ever
+      // re-polling it. Retrying now un-dismisses the batch's box locally
+      // (matches the real intent: you are actively working this batch
+      // again) so it re-enters the poll loop immediately.
+      setEbayVisibleBatchIds(current => new Set(current).add(batchId));
       // Reflect the fresh, now-non-terminal status immediately — the
       // existing poll loop (see the useEffect above) picks this batch back
       // up on its own next tick because it reads batch status fresh from
       // ebayBatchStatusById, never a value cached from before this retry.
       setEbayBatchStatusById(current => new Map(current).set(batchId, body as EbayBatchStatus));
+      setEbayBatchStatusChangedAt(current => new Map(current).set(batchId, Date.now()));
       // Allow a LATER failure of this same batch to be logged again — it
       // was already logged once (the failure that led to this retry).
       ebayCompletedBatchesLoggedRef.current.delete(batchId);
@@ -1209,6 +1291,11 @@ export default function ListingsReviewWorkspace() {
       const response = await fetch(`/api/listing-studio/ebay-feed-batches/${batchId}/reconcile`, { method: "POST" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) { setReconcileError(body?.error || "Could not reconcile this Seller Hub draft batch."); return; }
+      // CORRECTIVE PASS (fourth real-submission audit) — same fix as
+      // handleConfirmRetryEbayBatch: a previously-dismissed batch must
+      // re-enter the visible/polled set once the user is actively working
+      // it again, so its status (and any later Retry) stays live-observed.
+      setEbayVisibleBatchIds(current => new Set(current).add(batchId));
       setEbayBatchStatusById(current => new Map(current).set(batchId, body as EbayBatchStatus));
       setReconcileConfirmBatchId(null);
       // Refreshes row.ebay.feedBatchState fresh from the server — once
@@ -1222,6 +1309,35 @@ export default function ListingsReviewWorkspace() {
       setReconcilingBatchId(null);
     }
   }, [reconcileConfirmBatchId, loadListings]);
+
+  // CORRECTIVE PASS (fourth real-submission audit — Phase 5) — "Resume
+  // processing": runs exactly one safe tick via the EXISTING /process
+  // route (never a special "force" path), which never re-creates a task
+  // if one already exists (see feed-batches.ts's own "uploading" stage:
+  // feedTaskHasInputFile is checked first, always). Also re-adds the
+  // batch to the polled/visible set — the same root-cause fix Retry and
+  // Reconcile now both apply — so a stalled batch stops being stalled for
+  // real, not just for one manual click.
+  const [resumingBatchId, setResumingBatchId] = useState<string | null>(null);
+  const handleResumeProcessing = useCallback(async (batchId: string) => {
+    setResumingBatchId(batchId);
+    setEbayVisibleBatchIds(current => new Set(current).add(batchId));
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-feed-batches/${batchId}/process`, { method: "POST" });
+      if (response.ok) {
+        const body = await response.json() as EbayBatchStatus;
+        setEbayBatchStatusById(current => new Map(current).set(batchId, body));
+        setEbayBatchStatusChangedAt(current => new Map(current).set(batchId, Date.now()));
+      }
+      // A non-ok response is not surfaced as a hard error here — the
+      // batch was already re-added to the visible/polled set above, so
+      // the existing poll loop retries on its own very next tick
+      // regardless (Phase 5's own "do not silently remain queued
+      // forever, but also do not treat one transient failure as fatal").
+    } catch { /* poll loop retries regardless — see above */ } finally {
+      setResumingBatchId(null);
+    }
+  }, []);
 
   // Stuck-batch dismissal (product spec requirement) — a small × on each
   // stuck eBay batch row opens a real confirmation dialog (never a browser
@@ -1912,6 +2028,22 @@ export default function ListingsReviewWorkspace() {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     function applyEbayBatchResult(batchId: string, body: EbayBatchStatus) {
+      // CORRECTIVE PASS (fourth real-submission audit — Phase 5/9) —
+      // previousStatus reads the REF (ebayBatchStatusByIdRef), never
+      // component state directly, so this stays correct even though
+      // applyEbayBatchResult is recreated only when hasVisibleEbayBatches
+      // changes (see this effect's own dependency array) — a plain state
+      // read here would risk a stale snapshot from whenever the effect
+      // last ran. The actual changed-at VALUE is real React state (see
+      // that state's own comment on why — a ref would be unsafe to read
+      // during render, which ebayStalledBatchAction's own useMemo does),
+      // updated here via its functional setter form so this still never
+      // needs to read that particular piece of state directly either.
+      const previousStatus = ebayBatchStatusByIdRef.current.get(batchId)?.status;
+      setEbayBatchStatusChangedAt(current => {
+        if (previousStatus === body.status && current.has(batchId)) return current;
+        return new Map(current).set(batchId, Date.now());
+      });
       setEbayBatchStatusById(current => new Map(current).set(batchId, body));
       const batchLabel = `Batch ${body.displayNumber}`;
       const previousItems = ebayPreviousItemsByBatchRef.current.get(batchId) ?? null;
@@ -2534,6 +2666,18 @@ export default function ListingsReviewWorkspace() {
           marketplaceToggleOptions={marketplaceToggleOptions}
           onMarketplaceChange={setWorkflowMarketplaceView}
         />
+        {/* CORRECTIVE PASS (fourth real-submission audit — Phase 7 action-
+            area redesign). Two deliberately separate pieces, never one
+            jumbled row:
+              1. lr-bulk-bar — the SELECTION toolbar: who's selected, plus
+                 a small, fixed set of ACTION CONTROLS (never long text,
+                 never a variable-height explanation).
+              2. lr-ebay-status-panel — a full-width block BELOW the
+                 toolbar, shown only when there's something to explain
+                 (blocked/needs-reconciliation/failed/stalled). Carries the
+                 explanation AND that state's own single primary action
+                 button, so the toolbar row itself never has to grow to fit
+                 prose or hold more than one eBay action at a time. */}
         {bulkCount > 0 && <div className="lr-bulk-bar" role="toolbar" aria-label="Bulk actions">
           <div className="lr-bulk-bar-selection" role="status">
             <strong>{bulkCount} selected</strong>
@@ -2556,7 +2700,9 @@ export default function ListingsReviewWorkspace() {
               },
             ]} />
             <button type="button" className="button-danger" disabled={bulkActionRunning} onClick={() => setBulkDeleteConfirmOpen(true)}>Delete</button>
-            <button
+            {/* REQUIREMENT (Phase 7): Vinted's Send to extension must never
+                appear while the active selected workflow is eBay. */}
+            {workflowMarketplaceView === "VINTED" && <button
               type="button"
               className="button"
               disabled={sendToExtensionRunning || bulkCount > MAX_EXTENSION_BATCH_LISTINGS}
@@ -2564,57 +2710,79 @@ export default function ListingsReviewWorkspace() {
               onClick={() => handleSendToExtension()}
             >
               {sendToExtensionRunning ? "Preparing batch…" : `Send ${bulkCount} to extension`}
-            </button>
+            </button>}
             {/* Stage 6 (eBay draft batches) — sibling eBay actions, same
                 design language, entirely independent of the Vinted button
                 above (creating eBay drafts never touches Vinted state, and
-                vice versa). Only shown once at least one visible listing
-                has an eBay preparation, matching the Workflow toggle's own
-                visibility rule. */}
-            {marketplaceToggleOptions.includes("EBAY_UK") && <>
+                vice versa). REQUIREMENT (Phase 7): only shown while the
+                active selected workflow is eBay — never a Vinted-mode
+                leftover, and never more than ONE eBay primary action. */}
+            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>
               <BulkEbayPolicyControl
                 eligibleCount={eligibleEbayCount}
                 policies={ebayPolicies}
                 onApply={handleApplyBulkEbayPolicy}
-                disabledReason={ebayBatchingAvailable ? undefined : "Not enabled yet on this database — the eBay batch-drafting migration hasn't been applied."}
               />
-              <button
-                type="button"
-                className="button"
-                disabled={ebayCreatingDrafts || eligibleEbayCount === 0 || !ebayBatchingAvailable}
-                title={ebayBatchingAvailable ? "Creates genuine, editable drafts in eBay Seller Hub — never publishes anything" : "Seller Hub draft database upgrade required — the required migration hasn't been applied yet."}
-                onClick={handleOpenEbayCreatePreview}
-              >
-                {`Create ${eligibleEbayCount} Seller Hub draft${eligibleEbayCount === 1 ? "" : "s"}`}
-              </button>
+              {eligibleEbayCount > 0 && (
+                <button
+                  type="button"
+                  className="button"
+                  disabled={ebayCreatingDrafts}
+                  title="Creates genuine, editable drafts in eBay Seller Hub — never publishes anything"
+                  onClick={handleOpenEbayCreatePreview}
+                >
+                  {`Create ${eligibleEbayCount} Seller Hub draft${eligibleEbayCount === 1 ? "" : "s"}`}
+                </button>
+              )}
+              {/* REQUIREMENT (Phase 7): a genuinely completed listing's one
+                  primary action is opening Seller Hub itself — never a
+                  disabled Create button, never squeezed beside Retry text. */}
+              {eligibleEbayCount === 0 && ebayAlreadyDraftedSingleSelection && (
+                <a className="button" href={SELLER_HUB_DRAFTS_URL} target="_blank" rel="noreferrer">Open Seller Hub Drafts ↗</a>
+              )}
             </>}
-            {marketplaceToggleOptions.includes("EBAY_UK") && !ebayBatchingAvailable && (
-              <p className="lr-bulk-ebay-unavailable-note" role="status">Seller Hub draft database upgrade required — this database hasn&apos;t been upgraded to support Seller Hub drafts yet. Per-item eBay editing above is unaffected.</p>
-            )}
-            {/* Never an unexplained "Create 0 Seller Hub drafts": every
-                distinct reason blocking every selected, eBay-workflow,
-                ineligible listing, so the user can see exactly what to fix
-                instead of guessing. */}
-            {marketplaceToggleOptions.includes("EBAY_UK") && ebayBatchingAvailable && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && eligibleEbayCount === 0 && ebayIneligibleBlockingReasons.length > 0 && (
-              <div className="lr-bulk-ebay-unavailable-note" role="status">
-                <strong>{bulkCount === 1 ? "This listing isn't ready for a Seller Hub draft yet:" : "None of the selected listings are ready for a Seller Hub draft yet:"}</strong>
-                <ul className="lr-bulk-ebay-blockers">
-                  {ebayIneligibleBlockingReasons.map(reason => <li key={reason}>{reason}</li>)}
-                </ul>
-                {/* CORRECTIVE PASS (third real-submission audit) — a
-                    DURABLE Reconcile/Retry entry point, always reachable
-                    here regardless of Live Activity's own session-only
-                    visibility (see ebayBlockingBatchAction's own comment). */}
-                {ebayBlockingBatchAction?.kind === "needs_reconciliation" && (
-                  <button type="button" className="button-secondary" onClick={() => handleOpenReconcileConfirm(ebayBlockingBatchAction.batchId)}>Reconcile failed batch</button>
-                )}
-                {ebayBlockingBatchAction?.kind === "failed" && (
-                  <button type="button" className="button-secondary" onClick={() => handleOpenRetryConfirm(ebayBlockingBatchAction.batchId)}>Retry Seller Hub draft</button>
-                )}
-              </div>
-            )}
           </div>
         </div>}
+        {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && !ebayBatchingAvailable && (
+          <div className="lr-ebay-status-panel" role="status">
+            <p className="lr-ebay-status-panel-title">Seller Hub draft database upgrade required</p>
+            <p className="lr-ebay-status-panel-body">This database hasn&apos;t been upgraded to support Seller Hub drafts yet. Per-item eBay editing above is unaffected.</p>
+          </div>
+        )}
+        {/* REQUIREMENT (Phase 7): a full-width panel, never squeezed into
+            the button row — one clear title, the real reasons, and this
+            state's own single primary action (Reconcile / Retry / Resume /
+            View error), never combined, never overlapping the toolbar
+            above. Never an unexplained "Create 0 Seller Hub drafts": every
+            distinct reason blocking every selected, eBay-workflow,
+            ineligible listing is shown here instead of guessing. */}
+        {marketplaceToggleOptions.includes("EBAY_UK") && ebayBatchingAvailable && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && eligibleEbayCount === 0 && !ebayAlreadyDraftedSingleSelection && ebayIneligibleBlockingReasons.length > 0 && (
+          <div className="lr-ebay-status-panel" role="status">
+            <p className="lr-ebay-status-panel-title">
+              {ebayBlockingBatchAction?.kind === "needs_reconciliation" ? "Failed — local batch state needs reconciliation"
+                : ebayBlockingBatchAction?.kind === "failed" ? "Failed"
+                : ebayStalledBatchAction ? "Queued — processing has not started"
+                : bulkCount === 1 ? "This listing isn't ready for a Seller Hub draft yet" : "None of the selected listings are ready for a Seller Hub draft yet"}
+            </p>
+            <ul className="lr-ebay-status-panel-reasons">
+              {ebayIneligibleBlockingReasons.map(reason => <li key={reason}>{reason}</li>)}
+            </ul>
+            <div className="lr-ebay-status-panel-actions">
+              {ebayBlockingBatchAction?.kind === "needs_reconciliation" && (
+                <button type="button" className="button" onClick={() => handleOpenReconcileConfirm(ebayBlockingBatchAction.batchId)}>Reconcile failed batch</button>
+              )}
+              {ebayBlockingBatchAction?.kind === "failed" && <>
+                <button type="button" className="button" onClick={() => handleOpenRetryConfirm(ebayBlockingBatchAction.batchId)}>Retry Seller Hub draft</button>
+                <button type="button" className="button-secondary" onClick={() => handleViewEbayBatchError(ebayBlockingBatchAction.batchId)}>View error</button>
+              </>}
+              {ebayStalledBatchAction && (
+                <button type="button" className="button" disabled={resumingBatchId === ebayStalledBatchAction.batchId} onClick={() => handleResumeProcessing(ebayStalledBatchAction.batchId)}>
+                  {resumingBatchId === ebayStalledBatchAction.batchId ? "Resuming…" : "Resume processing"}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         {ebayCreateError && <div className="home-error" role="alert">{ebayCreateError}</div>}
         {ebayCreateMessage && <div className="lr-bulk-message" role="status">{ebayCreateMessage}</div>}
       </div>

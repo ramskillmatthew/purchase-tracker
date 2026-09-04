@@ -1071,3 +1071,61 @@ export async function runEbayFeedBatchProcessTick(ownerId: string, batchId: stri
   const hasMoreWork = batchStatus !== null && !isEbayFeedBatchStatusTerminal(batchStatus);
   return { claimedCount: claimed.length, batchStatus, hasMoreWork };
 }
+
+// CORRECTIVE PASS (fourth real-submission audit — "Consider processing
+// safe immediate stages within the same server request until reaching a
+// genuine remote waiting state, while respecting request timeouts") —
+// these are the LOCAL, fast, should-resolve-in-one-tick stages: no eBay
+// call has any reason to still be pending between two consecutive ticks
+// (unlike "processing", which genuinely waits on eBay's own undocumented
+// processing time and could legitimately need many ticks over real
+// minutes — see FEED_IMAGE_URL_LIFETIME_SECONDS's own comment). Driving
+// only through these stages synchronously, never "processing" itself,
+// keeps this bounded and avoids hammering eBay's own task-status
+// endpoint.
+// "downloading_result"/"parsing_result" are included too — once a batch
+// has reached "processing" and eBay's own task status is confirmed
+// terminal, downloading and parsing the result file are both one-shot,
+// non-waiting operations (the result is definitively ready; nothing
+// about them could still be "pending" the way createTask/upload/
+// processing-poll genuinely can be). Only "processing" itself — which
+// polls eBay's own undocumented, open-ended processing time — is excluded.
+const FAST_LOCAL_BATCH_STAGES: ReadonlySet<EbayFeedBatchStatus> = new Set([
+  "queued", "generating_csv", "creating_task", "uploading", "downloading_result", "parsing_result",
+]);
+const DRIVE_MAX_TICKS = 6;
+const DRIVE_TIME_BUDGET_MS = 20_000;
+
+/**
+ * Calls runEbayFeedBatchProcessTick repeatedly — never just once — until
+ * EITHER the batch reaches a genuine remote-waiting or terminal stage,
+ * OR a bounded tick count / time budget is exhausted, whichever comes
+ * first. Exists specifically so a newly created or newly retried batch
+ * makes REAL progress within the same HTTP request/response cycle,
+ * rather than sitting exactly where a single tick left it until the
+ * browser's own 4-second poll loop happens to notice — the confirmed
+ * root cause of a real batch appearing "stuck" for minutes after a
+ * genuine, successful Retry (its single post-retry tick correctly
+ * advanced it to 'generating_csv', fully claimable, but nothing called
+ * runEbayFeedBatchProcessTick again until this fix).
+ *
+ * Its own failure must never fail the caller's already-succeeded
+ * create/retry — every call site wraps this in its own `.catch(() => {})`
+ * exactly as before, this function does not change that contract.
+ */
+export async function driveEbayFeedBatchTicks(ownerId: string, batchId: string): Promise<FeedProcessTickResult> {
+  const deadline = Date.now() + DRIVE_TIME_BUDGET_MS;
+  let result = await runEbayFeedBatchProcessTick(ownerId, batchId);
+  let ticks = 1;
+  while (
+    result.hasMoreWork
+    && result.batchStatus !== null
+    && FAST_LOCAL_BATCH_STAGES.has(result.batchStatus)
+    && ticks < DRIVE_MAX_TICKS
+    && Date.now() < deadline
+  ) {
+    result = await runEbayFeedBatchProcessTick(ownerId, batchId);
+    ticks += 1;
+  }
+  return result;
+}

@@ -4,14 +4,20 @@ vi.mock("server-only", () => ({}));
 
 const {
   requireOwner, enforceRateLimit,
-  createEbayFeedBatch, listOwnerEbayFeedBatches, runEbayFeedBatchProcessTick, resolveEbayFeedDraftEligibilityForProducts,
+  createEbayFeedBatch, listOwnerEbayFeedBatches, runEbayFeedBatchProcessTick, driveEbayFeedBatchTicks, resolveEbayFeedDraftEligibilityForProducts,
   getEbayFeedBatch, cancelEbayFeedBatch, dismissEbayFeedBatch,
 } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   enforceRateLimit: vi.fn(async () => {}),
   createEbayFeedBatch: vi.fn(async () => ({ batchId: "batch-1", displayNumber: 1 })),
   listOwnerEbayFeedBatches: vi.fn(async () => ({ visible: [] as unknown[], stuck: [] as unknown[] })),
+  // Still used directly by [batchId]/process/route.ts (unchanged).
   runEbayFeedBatchProcessTick: vi.fn(async (_ownerId: string, _batchId: string) => ({ claimedCount: 0, batchStatus: null as string | null, hasMoreWork: false })),
+  // CORRECTIVE PASS (fourth real-submission audit) — the CREATE route now
+  // drives MULTIPLE bounded ticks (never just one) via
+  // driveEbayFeedBatchTicks, so real progress happens within this same
+  // request even if the browser closes right away.
+  driveEbayFeedBatchTicks: vi.fn(async (_ownerId: string, _batchId: string) => ({ claimedCount: 0, batchStatus: null as string | null, hasMoreWork: false })),
   resolveEbayFeedDraftEligibilityForProducts: vi.fn(async (_ownerId: string, _ids: string[]) => new Map()),
   getEbayFeedBatch: vi.fn(async (_ownerId: string, _batchId: string) => null as unknown),
   cancelEbayFeedBatch: vi.fn(async (_ownerId: string, _batchId: string) => "cancelled" as const),
@@ -23,7 +29,7 @@ vi.mock("@/lib/auth/server", async importOriginal => {
 });
 vi.mock("@/lib/security/activity", () => ({ enforceRateLimit }));
 vi.mock("@/lib/listing-studio/ebay-feed/feed-batches", () => ({
-  createEbayFeedBatch, listOwnerEbayFeedBatches, runEbayFeedBatchProcessTick, resolveEbayFeedDraftEligibilityForProducts,
+  createEbayFeedBatch, listOwnerEbayFeedBatches, runEbayFeedBatchProcessTick, driveEbayFeedBatchTicks, resolveEbayFeedDraftEligibilityForProducts,
   getEbayFeedBatch, cancelEbayFeedBatch, dismissEbayFeedBatch,
 }));
 
@@ -39,11 +45,12 @@ function jsonRequest(body: unknown, method = "POST") { return new Request("http:
 
 beforeEach(() => {
   requireOwner.mockClear(); enforceRateLimit.mockClear();
-  createEbayFeedBatch.mockReset(); listOwnerEbayFeedBatches.mockReset(); runEbayFeedBatchProcessTick.mockReset();
+  createEbayFeedBatch.mockReset(); listOwnerEbayFeedBatches.mockReset(); runEbayFeedBatchProcessTick.mockReset(); driveEbayFeedBatchTicks.mockReset();
   resolveEbayFeedDraftEligibilityForProducts.mockReset(); getEbayFeedBatch.mockReset(); cancelEbayFeedBatch.mockReset(); dismissEbayFeedBatch.mockReset();
   createEbayFeedBatch.mockResolvedValue({ batchId: BATCH_ID, displayNumber: 1 });
   listOwnerEbayFeedBatches.mockResolvedValue({ visible: [], stuck: [] });
   runEbayFeedBatchProcessTick.mockResolvedValue({ claimedCount: 0, batchStatus: null, hasMoreWork: false });
+  driveEbayFeedBatchTicks.mockResolvedValue({ claimedCount: 0, batchStatus: null, hasMoreWork: false });
   resolveEbayFeedDraftEligibilityForProducts.mockResolvedValue(new Map());
   getEbayFeedBatch.mockResolvedValue(null);
   cancelEbayFeedBatch.mockResolvedValue("cancelled");
@@ -86,7 +93,7 @@ describe("POST /api/listing-studio/ebay-feed-batches", () => {
     expect(body.skippedCount).toBe(1);
     expect(body.skipped).toEqual([{ draftId: PRODUCT_B, reasons: ["Missing eBay selling price"] }]);
     expect(createEbayFeedBatch).toHaveBeenCalledWith("owner-1", ["mdraft-a"], [PRODUCT_A], ["SKU-A"]);
-    expect(runEbayFeedBatchProcessTick).toHaveBeenCalledWith("owner-1", BATCH_ID);
+    expect(driveEbayFeedBatchTicks).toHaveBeenCalledWith("owner-1", BATCH_ID);
   });
 
   it("an eligible listing missing a resolved SKU is treated as not creatable (defence in depth — SKU is required to build the CSV row)", async () => {
@@ -98,13 +105,13 @@ describe("POST /api/listing-studio/ebay-feed-batches", () => {
     expect(createEbayFeedBatch).not.toHaveBeenCalled();
   });
 
-  it("runs exactly ONE bounded, awaited process tick — never a fire-and-forget unawaited call", async () => {
+  it("awaits the process-driving call before responding — never a fire-and-forget unawaited call", async () => {
     resolveEbayFeedDraftEligibilityForProducts.mockResolvedValue(new Map([[PRODUCT_A, { marketplaceDraftId: "mdraft-a", sku: "SKU-A", eligible: true, reasons: [] }]]));
     let tickResolved = false;
-    runEbayFeedBatchProcessTick.mockImplementation(async () => { await Promise.resolve(); tickResolved = true; return { claimedCount: 1, batchStatus: null, hasMoreWork: true }; });
+    driveEbayFeedBatchTicks.mockImplementation(async () => { await Promise.resolve(); tickResolved = true; return { claimedCount: 1, batchStatus: null, hasMoreWork: true }; });
     await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
     expect(tickResolved).toBe(true);
-    expect(runEbayFeedBatchProcessTick).toHaveBeenCalledTimes(1);
+    expect(driveEbayFeedBatchTicks).toHaveBeenCalledTimes(1);
   });
 
   it("400s with no batch created when NOTHING selected is eligible", async () => {
@@ -114,7 +121,7 @@ describe("POST /api/listing-studio/ebay-feed-batches", () => {
     const response = await createRoute(jsonRequest({ draftIds: [PRODUCT_A] }));
     expect(response.status).toBe(400);
     expect(createEbayFeedBatch).not.toHaveBeenCalled();
-    expect(runEbayFeedBatchProcessTick).not.toHaveBeenCalled();
+    expect(driveEbayFeedBatchTicks).not.toHaveBeenCalled();
   });
 
   it("applies the shared rate limit before creating anything", async () => {
@@ -132,7 +139,7 @@ describe("POST /api/listing-studio/ebay-feed-batches", () => {
     expect(response.status).toBe(409);
     const body = await response.json();
     expect(body.available).toBe(false);
-    expect(runEbayFeedBatchProcessTick).not.toHaveBeenCalled();
+    expect(driveEbayFeedBatchTicks).not.toHaveBeenCalled();
   });
 });
 

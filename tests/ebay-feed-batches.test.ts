@@ -558,6 +558,61 @@ async function withPreviewFakeDb<T>(fn: () => Promise<T>, opts: { photoCount?: n
   return fn();
 }
 
+// CORRECTIVE PASS (fourth real-submission audit — root cause of "Retry
+// returns to Queued forever") — REQUIREMENT: real progress happens
+// within one server request, never just a single tick, until a genuine
+// remote-waiting stage is reached.
+describe("driveEbayFeedBatchTicks — PHASE 5: drives real progress within one request, never just one tick", () => {
+  it("advances through every fast local stage (queued -> generating_csv -> creating_task -> uploading) in ONE call, stopping at 'processing' (a genuine remote wait)", async () => {
+    const batch = fakeBatch({ status: "queued" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { driveEbayFeedBatchTicks } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await driveEbayFeedBatchTicks("owner-1", "batch-1");
+      expect(batch.status).toBe("processing");
+      expect(result.batchStatus).toBe("processing");
+      expect(result.hasMoreWork).toBe(true);
+    });
+  });
+
+  it("never hammers 'processing' — stops the moment it ADVANCES INTO that stage, never actually executing it (that stage's own getFeedTask poll is left for a later, separate tick)", async () => {
+    const batch = fakeBatch({ status: "queued" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { driveEbayFeedBatchTicks } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      await driveEbayFeedBatchTicks("owner-1", "batch-1");
+      // getFeedTask (the "processing" stage's own eBay call) is never
+      // invoked at all from this drive call — the loop stops as soon as
+      // the batch's status BECOMES "processing", before any tick that
+      // would actually poll eBay for it runs.
+      expect(getFeedTask).not.toHaveBeenCalled();
+    });
+  });
+
+  it("advances all the way to 'completed' in one call when eBay reports the task already COMPLETED", async () => {
+    getFeedTask.mockResolvedValue({ taskId: "task-1", feedType: "FX_LISTING", status: "COMPLETED", creationDate: null, completionDate: null });
+    const batch = fakeBatch({ status: "processing", ebay_task_id: "task-1" });
+    const items = [fakeItem()];
+    await withFakeDb(batch, items, async () => {
+      const { driveEbayFeedBatchTicks } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await driveEbayFeedBatchTicks("owner-1", "batch-1");
+      expect(result.batchStatus).toBe("completed");
+      expect(items[0].status).toBe("succeeded");
+    });
+  });
+
+  it("stops immediately once the batch reaches a terminal status, never loops past it", async () => {
+    const batch = fakeBatch({ status: "failed" });
+    const items = [fakeItem({ status: "failed" })];
+    await withFakeDb(batch, items, async () => {
+      const { driveEbayFeedBatchTicks } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await driveEbayFeedBatchTicks("owner-1", "batch-1");
+      expect(result.hasMoreWork).toBe(false);
+      expect(result.batchStatus).toBe("failed");
+    });
+  });
+});
+
 describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields transfer vs must be completed in Seller Hub", () => {
   it("REQUIREMENT: reports the real, honest values that will transfer", async () => {
     await withPreviewFakeDb(async () => {

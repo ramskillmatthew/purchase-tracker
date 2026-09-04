@@ -1887,11 +1887,18 @@ h1 { font-size: 1.5rem; font-weight: 720; }
    comment); sticky to the BOTTOM of that column, not the viewport, so it
    can never cover the inspector/activity column and never needs a guessed
    layout reservation elsewhere on the page. */
-.lr-bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; min-height: 56px; padding: 10px 14px; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--lr-border); border-top: 0; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--lr-surface) 97%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(12px); }
+.lr-bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; min-height: 56px; padding: 10px 14px; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; border: 1px solid var(--lr-border); border-top: 0; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--lr-surface) 97%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(12px); }
 .lr-bulk-bar-selection { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--lr-muted); font-size: 11px; font-weight: 650; }
 .lr-bulk-bar-selection strong { color: var(--lr-text); font-weight: 700; white-space: nowrap; }
 .lr-bulk-bar-selection .button-secondary { min-height: 28px; padding: 0 9px; font-size: 10px; }
-.lr-bulk-bar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+/* CORRECTIVE PASS (fourth real-submission audit — Phase 7 action-area
+   redesign) — REQUIREMENT: "Actions wrap intentionally... no clipped
+   text... no overlapping controls" at every width, not only the narrow
+   breakpoint below. Long variable-length explanatory content no longer
+   lives in this row at all (see .lr-ebay-status-panel below); this row
+   now only ever holds a small, fixed set of short action buttons, so
+   wrapping here is a rare safety net, not the normal case. */
+.lr-bulk-bar-actions { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
 .lr-bulk-bar-actions .button { background: var(--lr-violet); border-color: var(--lr-violet); }
 .lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { min-height: 36px; padding: 0 14px; font-size: 11px; white-space: nowrap; }
 
@@ -2821,7 +2828,19 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-bulk-ebay-policy-close:focus-visible { outline: 2px solid var(--lr-violet); outline-offset: 1px; }
 .lr-bulk-ebay-policy-count { margin: 0; color: var(--lr-muted); font-size: 10.5px; }
 .lr-bulk-ebay-policy-result { margin: 0; color: var(--lr-text); font-size: 10.5px; }
-.lr-bulk-ebay-unavailable-note { margin: 0; padding: 6px 10px; color: var(--lr-muted); font-size: 10.5px; }
-.lr-bulk-ebay-unavailable-note strong { display: block; margin-bottom: 4px; color: var(--lr-text); font-weight: 700; }
-.lr-bulk-ebay-blockers { margin: 0; padding-left: 16px; list-style: disc; }
-.lr-bulk-ebay-blockers li { margin: 2px 0; }
+/* CORRECTIVE PASS (fourth real-submission audit — Phase 7 action-area
+   redesign) — REPLACES the old .lr-bulk-ebay-unavailable-note/
+   .lr-bulk-ebay-blockers pair, which squeezed a variable-length title +
+   reasons list + action buttons into the SAME narrow flex row as every
+   other bulk-action button, the confirmed cause of the reported overlap/
+   clipping. This is now a genuinely separate, full-width block, its own
+   row entirely below .lr-bulk-bar (see that rule's own comment): never
+   competes for horizontal space with Clear selection/Delete/Send/Create,
+   never clips text, wraps its own action buttons independently. */
+.lr-ebay-status-panel { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 8px; padding: 12px 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); }
+.lr-ebay-status-panel-title { margin: 0; color: var(--lr-text); font-size: 12px; font-weight: 700; }
+.lr-ebay-status-panel-body { margin: 0; color: var(--lr-muted); font-size: 11px; line-height: 1.5; }
+.lr-ebay-status-panel-reasons { margin: 0; padding-left: 18px; list-style: disc; color: var(--lr-muted); font-size: 11px; line-height: 1.6; }
+.lr-ebay-status-panel-reasons li { margin: 2px 0; overflow-wrap: anywhere; }
+.lr-ebay-status-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.lr-ebay-status-panel-actions .button, .lr-ebay-status-panel-actions .button-secondary { min-height: 32px; padding: 0 12px; font-size: 10.5px; }
