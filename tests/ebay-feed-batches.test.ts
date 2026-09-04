@@ -127,6 +127,14 @@ function makeFakeDb(batch: FakeBatch, items: FakeItem[]) {
       for (const item of items) if (item.batch_id === batchId && item.status === expectedStatus) Object.assign(item, patch);
       return new Response(null, { status: 204 });
     }
+    // prepareFeedPrimaryPhoto's own bounded top-1 photo query — goes
+    // through supabaseRequest directly (never supabaseRequestAll, which
+    // rejects an explicit limit= — see that function's own corrective-pass
+    // comment), so it must be served here, not by the supabaseRequestAll
+    // mock below.
+    if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) {
+      return new Response(JSON.stringify([{ id: "img-1", storage_path: "owner-1/product-1/img-1-x.jpg" }]), { status: 200 });
+    }
     if (path.startsWith("ebay_feed_batches?") || path.startsWith("ebay_feed_batch_items?")) return new Response(null, { status: 204 });
     return new Response(JSON.stringify([]), { status: 200 });
   });
@@ -454,11 +462,20 @@ async function withPreviewFakeDb<T>(fn: () => Promise<T>, opts: { photoCount?: n
   const photoCount = opts.photoCount ?? 1;
   const supabaseRequestAll = vi.fn(async (path: string) => {
     if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
-    if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) return photoCount > 0 ? [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }] : [];
+    if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=eq.")) return []; // no active batch by default
     if (path.startsWith("listing_draft_images?draft_id=eq.")) return Array.from({ length: photoCount }, (_, i) => ({ id: `img-${i}` }));
     return [];
   });
-  const supabaseRequest = vi.fn(async () => new Response(null, { status: 204 }));
+  // prepareFeedPrimaryPhoto's own bounded top-1 photo query goes through
+  // supabaseRequest directly (never supabaseRequestAll — see that
+  // function's own corrective-pass comment on why an explicit `limit=`
+  // must never reach supabaseRequestAll), so it must be served here.
+  const supabaseRequest = vi.fn(async (path: string) => {
+    if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) {
+      return new Response(JSON.stringify(photoCount > 0 ? [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }] : []), { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  });
   vi.doMock("@/lib/supabase", () => ({ supabaseRequest, supabaseRequestAll }));
   vi.resetModules();
   return fn();
@@ -469,10 +486,11 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     await withPreviewFakeDb(async () => {
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview, got: " + result.error);
-      expect(result.fields.Title).toBe("On Running Cloud 5");
-      expect(result.fields["Custom label (SKU)"]).toBe("1644");
-      expect(result.fields["Category ID"]).toBe("95672");
+      if (!result.ok) throw new Error("expected a preview, got: " + result.reason);
+      expect(result.row.fields.Title).toBe("On Running Cloud 5");
+      expect(result.row.fields["Custom label (SKU)"]).toBe("1644");
+      expect(result.row.fields["Category ID"]).toBe("95672");
+      expect(result.row.draftId).toBe("product-1");
     });
   });
 
@@ -480,9 +498,9 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     await withPreviewFakeDb(async () => {
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview");
-      expect(result.completeInSellerHub.some(s => /policies/i.test(s))).toBe(true);
-      expect(result.completeInSellerHub.some(s => /location/i.test(s))).toBe(true);
+      if (!result.ok) throw new Error("expected a preview");
+      expect(result.row.completeInSellerHub.some(s => /policies/i.test(s))).toBe(true);
+      expect(result.row.completeInSellerHub.some(s => /location/i.test(s))).toBe(true);
     });
   });
 
@@ -490,8 +508,8 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     await withPreviewFakeDb(async () => {
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview");
-      expect(result.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(true);
+      if (!result.ok) throw new Error("expected a preview");
+      expect(result.row.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(true);
     }, { photoCount: 4 });
   });
 
@@ -499,8 +517,8 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     await withPreviewFakeDb(async () => {
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview");
-      expect(result.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(false);
+      if (!result.ok) throw new Error("expected a preview");
+      expect(result.row.completeInSellerHub.some(s => /additional photo/i.test(s))).toBe(false);
     }, { photoCount: 1 });
   });
 
@@ -510,8 +528,8 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
       (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce(marketplaceDraft({ dynamicData: { Colour: { value: ["Red", "Blue"], source: "manual", confidence: "high", needsReview: false, userConfirmed: true, updatedAt: "x" } } }));
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview");
-      expect(result.completeInSellerHub.some(s => s.includes("Colour"))).toBe(true);
+      if (!result.ok) throw new Error("expected a preview");
+      expect(result.row.completeInSellerHub.some(s => s.includes("Colour"))).toBe(true);
     });
   });
 
@@ -519,9 +537,116 @@ describe("buildFeedDraftPreviewForProduct — PHASE 2/4: exactly which fields tr
     await withPreviewFakeDb(async () => {
       const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
       const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
-      if ("error" in result) throw new Error("expected a preview");
+      if (!result.ok) throw new Error("expected a preview");
       expect(JSON.stringify(result)).not.toContain("token=abc");
     });
+  });
+
+  it("PHASE 6 REGRESSION (root cause of the first live preview attempt): prepareFeedPrimaryPhoto never passes a caller-supplied limit into supabaseRequestAll — it must use supabaseRequest directly for its bounded top-1 photo query", () => {
+    const source = require("node:fs").readFileSync("lib/listing-studio/ebay-feed/feed-batches.ts", "utf8") as string;
+    const fnBody = source.slice(source.indexOf("async function prepareFeedPrimaryPhoto"), source.indexOf("async function prepareFeedPrimaryPhoto") + 1200);
+    expect(fnBody).not.toMatch(/supabaseRequestAll[^)]*limit=/);
+    expect(fnBody).toContain("await supabaseRequest(");
+  });
+
+  it("a listing already SUCCEEDED (a genuine Seller Hub draft already exists) is blocked with a precise reason, never silently re-offered", async () => {
+    await withPreviewFakeDb(async () => {
+      const { getMarketplaceDraft } = await import("@/lib/listing-studio/marketplace-drafts");
+      (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce(marketplaceDraft({ ebayFeedDraftCreatedAt: "2026-09-04T00:00:00Z" }));
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain("already exists");
+    });
+  });
+
+  it("a listing already in an ACTIVE (non-terminal) batch is blocked with a precise reason", async () => {
+    await withPreviewFakeDb(async () => {
+      const { supabaseRequestAll } = await import("@/lib/supabase");
+      (supabaseRequestAll as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
+        if (path.startsWith("ebay_feed_batch_items?marketplace_draft_id=eq.")) return [{ id: "item-x" }];
+        if (path.startsWith("listing_drafts?id=eq.")) return [{ id: "product-1", sku: "1644" }];
+        if (path.startsWith("listing_draft_images?draft_id=eq.") && path.includes("limit=1")) return [{ id: "img-1", storage_path: "owner-1/product-1/img-1.jpg" }];
+        if (path.startsWith("listing_draft_images?draft_id=eq.")) return [{ id: "img-1" }];
+        return [];
+      });
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain("already in an active");
+    });
+  });
+
+  it("REQUIREMENT: the legacy Inventory API's own ebay_offer_id is NEVER consulted by the preview builder — only ebay_feed_draft_created_at and active-batch-item status", () => {
+    const source = require("node:fs").readFileSync("lib/listing-studio/ebay-feed/feed-batches.ts", "utf8") as string;
+    const fnBody = source.slice(source.indexOf("export async function buildFeedDraftPreviewForProduct"), source.indexOf("export async function buildFeedDraftPreviewForProduct") + 3500);
+    expect(fnBody).not.toMatch(/\bebayOfferId\b/);
+  });
+
+  it("PHASE 5 SAFETY: a genuinely unexpected exception (e.g. an unrelated Supabase failure) for ONE listing NEVER throws out of this function — it resolves to a safe blocker instead, so one listing's failure can never blank out every other listing's own valid preview", async () => {
+    await withPreviewFakeDb(async () => {
+      const { getMarketplaceDraft } = await import("@/lib/listing-studio/marketplace-drafts");
+      (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("genuine unexpected database error"));
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("This listing's preview could not be built due to an unexpected error.");
+        // Never leaks the real internal error message/stack to the caller.
+        expect(result.reason).not.toContain("genuine unexpected database error");
+      }
+    });
+  });
+
+  it("PHASE 8.7: an unknown/nonexistent listing id returns a precise blocker, never a throw", async () => {
+    await withPreviewFakeDb(async () => {
+      const { getMarketplaceDraft } = await import("@/lib/listing-studio/marketplace-drafts");
+      (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "does-not-exist");
+      expect(result).toEqual({ ok: false, reason: "The selected eBay listing could not be found." });
+    });
+  });
+
+  it("PHASE 8.9: a missing numeric category produces the exact eligibility blocker, proving the preview builder's reuse of evaluateEbayFeedDraftEligibility is correctly wired end-to-end", async () => {
+    await withPreviewFakeDb(async () => {
+      const { getMarketplaceDraft } = await import("@/lib/listing-studio/marketplace-drafts");
+      (getMarketplaceDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce(marketplaceDraft({ categoryId: null }));
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain("Missing eBay category");
+    });
+  });
+
+  it("PHASE 8.10: a photo row exists in the database but signing/reachability genuinely fails produces a precise, distinct blocker from 'no photo at all'", async () => {
+    await withPreviewFakeDb(async () => {
+      const { createSignedDownloadUrl } = await import("@/lib/listing-studio/storage-rest");
+      (createSignedDownloadUrl as ReturnType<typeof vi.fn>).mockResolvedValueOnce("https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc");
+      vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(null, { status: 200 }))));
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("The primary photo could not be prepared — it may not be reachable right now.");
+      vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "HEAD" ? new Response(null, { status: 200 }) : new Response(null, { status: 200 })))); // restore for later tests
+    });
+  });
+
+  it("PHASE 8.11: a template-contract problem (defensive — structurally unreachable in real code today, since assertTemplateContractCurrent never reads a file) still produces a precise blocker if it were ever to occur", async () => {
+    await withPreviewFakeDb(async () => {
+      const { assertTemplateContractCurrent } = await import("@/lib/listing-studio/ebay-feed/template-contract");
+      vi.spyOn(await import("@/lib/listing-studio/ebay-feed/template-contract"), "assertTemplateContractCurrent").mockImplementation(() => { throw new Error("simulated template drift"); });
+      void assertTemplateContractCurrent; // keep the import referenced
+      const { buildFeedDraftPreviewForProduct } = await import("@/lib/listing-studio/ebay-feed/feed-batches");
+      const result = await buildFeedDraftPreviewForProduct("owner-1", "product-1");
+      expect(result).toEqual({ ok: false, reason: "The Seller Hub draft template is unavailable." });
+    });
+  });
+
+  it("PHASE 8.12: the template contract never reads a file at runtime — the bundled fixture is a TEST-ONLY reference, so it structurally cannot fail to resolve in the production build (see the compatibility test in ebay-feed-template-contract.test.ts, which is the only place the fixture is ever read)", () => {
+    const source = require("node:fs").readFileSync("lib/listing-studio/ebay-feed/template-contract.ts", "utf8") as string;
+    expect(source).not.toMatch(/readFileSync|readFile\(|import\(.*\.csv/);
+    expect(source).not.toContain("Downloads");
   });
 });
 

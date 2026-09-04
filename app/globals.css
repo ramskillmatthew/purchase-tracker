@@ -1951,6 +1951,12 @@ h1 { font-size: 1.5rem; font-weight: 720; }
 .lr-ebay-preview-description { margin: 6px 0 0; color: var(--lr-muted); font-size: 10.5px; line-height: 1.4; }
 .lr-ebay-preview-complete-note { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--lr-border); color: var(--lr-muted); font-size: 10px; }
 .lr-ebay-preview-complete-note ul { margin: 4px 0 0; padding-left: 16px; list-style: disc; }
+/* CORRECTIVE PASS (require valid Seller Hub draft preview) — the dialog's
+   own blocked-listing list and required partial-submission acknowledgement. */
+.lr-ebay-preview-blockers { padding: 8px 10px; margin: 8px 0; border: 1px solid color-mix(in srgb, var(--lr-red) 25%, var(--lr-border)); border-radius: 8px; background: color-mix(in srgb, var(--lr-red) 8%, transparent); color: var(--lr-text); font-size: 10.5px; }
+.lr-ebay-preview-blockers ul { margin: 4px 0 0; padding-left: 16px; list-style: disc; }
+.lr-ebay-preview-ack { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; color: var(--lr-text); font-size: 10.5px; line-height: 1.4; cursor: pointer; }
+.lr-ebay-preview-ack input { margin-top: 2px; }
 /* Capped at 2 lines — a long generated title must never grow to 3-4 lines
    and push the rest of the compact card down. */
 .lr-inspector-title { overflow: hidden; display: -webkit-box; margin: 0; color: var(--lr-text); font-size: 14px; font-weight: 700; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

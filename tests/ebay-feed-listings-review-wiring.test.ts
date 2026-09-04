@@ -38,9 +38,15 @@ describe("PHASE 9.4/9.5 — the button says 'Seller Hub draft', correctly singul
   });
 
   it("the preview/confirm dialog title also uses the correct singular/plural Seller Hub draft wording", () => {
-    expect(workspaceSource).toContain("{`Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? \"\" : \"s\"}?`}");
+    expect(workspaceSource).toContain('`Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? "" : "s"}?`');
   });
 });
+
+// Anchors every "ready"/"blocked" phase assertion to that SPECIFIC branch
+// of the dialog — never the first "ebay-preview-title" occurrence, which
+// (since the corrective pass) is now the LOADING phase's own heading, a
+// wholly different branch with none of the real preview content.
+const readyPhaseAnchor = 'ebayPreviewPhase === "ready" || ebayPreviewPhase === "blocked"';
 
 describe("PHASE 9.6 — a preview is shown before any real batch is created", () => {
   it("the button opens a preview first (handleOpenEbayCreatePreview), never creating a batch directly on click", () => {
@@ -52,7 +58,7 @@ describe("PHASE 9.6 — a preview is shown before any real batch is created", ()
   });
 
   it("the preview dialog shows the real fields the acceptance criteria require: title, SKU, category, price, quantity, condition, description, photo", () => {
-    const dialogBody = workspaceSource.slice(workspaceSource.indexOf('id="ebay-preview-title"'), workspaceSource.indexOf("dialog-actions"));
+    const dialogBody = workspaceSource.slice(workspaceSource.indexOf(readyPhaseAnchor), workspaceSource.indexOf(readyPhaseAnchor) + 4800);
     for (const field of ["Title", "Custom label (SKU)", "Category ID", "Price", "Quantity", "Condition ID", "Item photo URL", "Description"]) {
       expect(dialogBody, field).toContain(field);
     }
@@ -64,8 +70,8 @@ describe("PHASE 9.6 — a preview is shown before any real batch is created", ()
   });
 
   it("the actual create call only fires from the dialog's own confirm button, never from opening the preview", () => {
-    const dialogStart = workspaceSource.indexOf('id="ebay-preview-title"');
-    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 3000);
+    const dialogStart = workspaceSource.indexOf(readyPhaseAnchor);
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 4800);
     expect(dialogBody).toContain("onClick={handleCreateEbayDrafts}");
     // handleOpenEbayCreatePreview (which only builds the read-only preview)
     // is called by the OUTER bulk-action button, never by anything inside
@@ -76,7 +82,7 @@ describe("PHASE 9.6 — a preview is shown before any real batch is created", ()
 
 describe("PHASE 9.7/9.8 — confirmation states plainly: creates drafts, never publishes, must open Seller Hub, exact row count — and no publish capability exists anywhere in the UI", () => {
   it("the confirmation message states all four required facts", () => {
-    const dialogBody = workspaceSource.slice(workspaceSource.indexOf('id="ebay-preview-title"'), workspaceSource.indexOf("dialog-actions"));
+    const dialogBody = workspaceSource.slice(workspaceSource.indexOf(readyPhaseAnchor), workspaceSource.indexOf(readyPhaseAnchor) + 4800);
     expect(dialogBody).toMatch(/creates.*(?:a draft|drafts).*eBay Seller Hub/i);
     expect(dialogBody).toMatch(/does\s*<strong>not<\/strong>\s*publish/i);
     expect(dialogBody).toMatch(/open Seller Hub yourself/i);
@@ -131,5 +137,71 @@ describe("PHASE 9 — Open Seller Hub Drafts link is present and points at the r
     expect(detailsPanelSource).toMatch(/import\s*\{[^}]*SELLER_HUB_DRAFTS_URL[^}]*\}\s*from ["']@\/lib\/listing-studio\/ebay-feed\/feed-workflow-status["']/);
     expect(workspaceSource).toContain("href={SELLER_HUB_DRAFTS_URL}");
     expect(workspaceSource).toMatch(/import\s*\{[^}]*SELLER_HUB_DRAFTS_URL[^}]*\}\s*from ["']@\/lib\/listing-studio\/ebay-feed\/feed-workflow-status["']/);
+  });
+});
+
+/**
+ * CORRECTIVE PASS (require valid Seller Hub draft preview) — Phase 8's own
+ * dialog-state-machine requirements (items 19-24). This codebase has no
+ * jsdom/React-render test harness for this component (see this file's own
+ * header comment), so these verify the exact CODE that drives each
+ * required state, matching the file's own established pattern.
+ */
+describe("PHASE 8.19-24 — the preview dialog state machine never shows a false/contradictory count or an enabled submission it shouldn't", () => {
+  it("REQUIREMENT 19: the loading phase renders a real progress message, never a bare row/draft count — no ebayPreviewRows.length is read anywhere inside the loading branch", () => {
+    const loadingStart = workspaceSource.indexOf('ebayPreviewPhase === "loading" &&');
+    const loadingEnd = workspaceSource.indexOf('ebayPreviewPhase === "failed"', loadingStart);
+    const loadingBody = workspaceSource.slice(loadingStart, loadingEnd);
+    expect(loadingBody).toContain("Preparing Seller Hub draft preview");
+    expect(loadingBody).not.toContain("ebayPreviewRows.length");
+  });
+
+  it("REQUIREMENT 20: the failed phase never renders the row list or the submit button — only Close and Try preview again", () => {
+    const failedStart = workspaceSource.indexOf('ebayPreviewPhase === "failed" &&');
+    const failedEnd = workspaceSource.indexOf('(ebayPreviewPhase === "ready"', failedStart);
+    const failedBody = workspaceSource.slice(failedStart, failedEnd);
+    expect(failedBody).toContain("Try preview again");
+    expect(failedBody).not.toContain("handleCreateEbayDrafts");
+    expect(failedBody).not.toContain("dialog-confirm");
+  });
+
+  it("REQUIREMENT 21/24: the submit button's disabled expression includes ebayPreviewRows.length === 0 — a zero-row (or still-loading, or failed) preview can never show an enabled submit action, and the button's own displayed count is always ebayPreviewRows.length (the server-authoritative row count), never a client-side selection count", () => {
+    const dialogStart = workspaceSource.indexOf(readyPhaseAnchor);
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 4800);
+    expect(dialogBody).toMatch(/disabled=\{[\s\S]*ebayPreviewRows\.length === 0[\s\S]*\}/);
+    expect(dialogBody).toContain("Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1");
+  });
+
+  it("REQUIREMENT 22: a ready preview (at least one row) enables the submit button — the disabled expression is not permanently true", () => {
+    const dialogStart = workspaceSource.indexOf(readyPhaseAnchor);
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 4800);
+    // The ONLY conditions that disable submission are: currently
+    // submitting, zero rows, or an un-acknowledged partial submission —
+    // never an unconditional `disabled` on the confirm button.
+    expect(dialogBody).toMatch(/disabled=\{\s*\n\s*ebayCreatingDrafts\s*\n\s*\|\|\s*ebayPreviewRows\.length === 0\s*\n\s*\|\|\s*\(ebayPreviewBlockers\.length > 0 && !ebayPreviewPartialAck\)\s*\n\s*\}/);
+  });
+
+  it("REQUIREMENT 23: the button's displayed row count and the actual submitted draftIds both come from the SAME ebayPreviewRows array — they can never diverge", () => {
+    const createFnBody = workspaceSource.slice(workspaceSource.indexOf("async function handleCreateEbayDrafts"), workspaceSource.indexOf("async function handleCreateEbayDrafts") + 600);
+    expect(createFnBody).toContain("const ids = ebayPreviewRows.map(row => row.draftId);");
+  });
+
+  it("REQUIREMENT 24 (client tampering): the create-batch request body is built from ebayPreviewRows (server-derived), never from bulkSelectedIds or any other client-only selection state, inside handleCreateEbayDrafts", () => {
+    const createFnBody = workspaceSource.slice(workspaceSource.indexOf("async function handleCreateEbayDrafts"), workspaceSource.indexOf("async function handleCreateEbayDrafts") + 1200);
+    expect(createFnBody).not.toContain("bulkSelectedIds");
+  });
+
+  it("the Close/Cancel button remains available and enabled during a preview failure", () => {
+    const failedStart = workspaceSource.indexOf('ebayPreviewPhase === "failed" &&');
+    const failedEnd = workspaceSource.indexOf('(ebayPreviewPhase === "ready"', failedStart);
+    const failedBody = workspaceSource.slice(failedStart, failedEnd);
+    expect(failedBody).toMatch(/<button type="button" className="dialog-cancel" onClick=\{\(\) => setEbayPreviewOpen\(false\)\}>Close<\/button>/);
+  });
+
+  it("opening the preview always resets partial-acknowledgement, rows, and blockers from any PREVIOUS dialog session — a stale acknowledgement can never silently carry over", () => {
+    const openFnBody = workspaceSource.slice(workspaceSource.indexOf("async function handleOpenEbayCreatePreview"), workspaceSource.indexOf("async function handleOpenEbayCreatePreview") + 900);
+    expect(openFnBody).toContain("setEbayPreviewPartialAck(false)");
+    expect(openFnBody).toContain("setEbayPreviewRows([])");
+    expect(openFnBody).toContain("setEbayPreviewBlockers([])");
   });
 });

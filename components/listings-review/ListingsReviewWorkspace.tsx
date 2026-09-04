@@ -236,15 +236,28 @@ export default function ListingsReviewWorkspace() {
   const [ebayCreatingDrafts, setEbayCreatingDrafts] = useState(false);
   const [ebayCreateError, setEbayCreateError] = useState("");
   const [ebayCreateMessage, setEbayCreateMessage] = useState("");
-  // PHASE 4 — pre-submission preview + confirmation, required before any
-  // real batch is created: exactly which fields transfer to the Seller
-  // Hub draft and which the user must complete themselves afterward.
+  // CORRECTIVE PASS — pre-submission preview + confirmation, required
+  // before any real batch is created: exactly which fields transfer to
+  // the Seller Hub draft and which the user must complete themselves
+  // afterward. An explicit `phase` (never an implicit combination of
+  // loading/error/row-count booleans) drives the dialog's entire
+  // title/body/button state — see the incident this corrects: a failed
+  // or still-loading preview must NEVER be able to show an
+  // enabled-looking "Create 0 Seller Hub drafts" button. The server's own
+  // requestedCount/eligibleCount/ineligibleCount are the ONLY source for
+  // every count the dialog displays — never re-derived from the client's
+  // own earlier selection.
+  type EbayPreviewPhase = "loading" | "ready" | "blocked" | "failed";
   const [ebayPreviewOpen, setEbayPreviewOpen] = useState(false);
-  const [ebayPreviewLoading, setEbayPreviewLoading] = useState(false);
+  const [ebayPreviewPhase, setEbayPreviewPhase] = useState<EbayPreviewPhase>("loading");
   const [ebayPreviewError, setEbayPreviewError] = useState("");
-  const [ebayPreviewRows, setEbayPreviewRows] = useState<Array<{
-    draftId: string; fields?: Record<string, string>; completeInSellerHub?: string[]; error?: string;
-  }>>([]);
+  const [ebayPreviewRequestedCount, setEbayPreviewRequestedCount] = useState(0);
+  const [ebayPreviewRows, setEbayPreviewRows] = useState<Array<{ draftId: string; fields: Record<string, string>; completeInSellerHub: string[] }>>([]);
+  const [ebayPreviewBlockers, setEbayPreviewBlockers] = useState<Array<{ draftId: string; reason: string }>>([]);
+  // Required explicit acknowledgement before a PARTIAL submission
+  // (some eligible, some blocked) can be confirmed — never implied by
+  // merely having the dialog open.
+  const [ebayPreviewPartialAck, setEbayPreviewPartialAck] = useState(false);
   const [ebayVisibleBatchIds, setEbayVisibleBatchIds] = useState<Set<string>>(new Set());
   const [ebayBatchStatusById, setEbayBatchStatusById] = useState<Map<string, EbayBatchStatus>>(new Map());
   const [ebayStuckBatches, setEbayStuckBatches] = useState<EbayStuckBatch[]>([]);
@@ -957,35 +970,59 @@ export default function ListingsReviewWorkspace() {
     return [...reasons];
   }, [ebayEligibilityById, eligibleEbayCount]);
 
-  // PHASE 4 — step 1: opens the preview dialog for every currently
+  // CORRECTIVE PASS — step 1: opens the preview dialog for every currently
   // ELIGIBLE selected listing (never the ineligible ones — nothing to
   // preview for a listing that won't be included). Purely read-only: no
-  // batch, task, or upload is created by opening this.
+  // batch, task, or upload is created by opening this. The dialog starts
+  // in the "loading" phase and NEVER shows a row/blocker count — let
+  // alone an enabled submit button — until a genuinely successful,
+  // server-authoritative response has landed; see the phase state machine
+  // below for every other transition.
   async function handleOpenEbayCreatePreview() {
     const ids = [...bulkSelectedIds].filter(id => ebayEligibilityById.get(id)?.eligible);
     if (!ids.length) return;
     setEbayPreviewOpen(true);
-    setEbayPreviewLoading(true);
+    setEbayPreviewPhase("loading");
     setEbayPreviewError("");
+    setEbayPreviewRequestedCount(ids.length);
     setEbayPreviewRows([]);
+    setEbayPreviewBlockers([]);
+    setEbayPreviewPartialAck(false);
     try {
       const response = await fetch("/api/listing-studio/ebay-feed-batches/preview", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftIds: ids }),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) { setEbayPreviewError(body.error || "Could not build a preview."); return; }
-      setEbayPreviewRows(body.previews ?? []);
+      if (!response.ok) { setEbayPreviewError(body.error || "Could not build a preview for these listings."); setEbayPreviewPhase("failed"); return; }
+      const rows = (body.rows ?? []) as Array<{ draftId: string; fields: Record<string, string>; completeInSellerHub: string[] }>;
+      const blockers = (body.blockers ?? []) as Array<{ draftId: string; reason: string }>;
+      setEbayPreviewRequestedCount(body.requestedCount ?? ids.length);
+      setEbayPreviewRows(rows);
+      setEbayPreviewBlockers(blockers);
+      setEbayPreviewPhase(rows.length > 0 ? "ready" : "blocked");
     } catch {
-      setEbayPreviewError("Network error — could not build a preview.");
-    } finally {
-      setEbayPreviewLoading(false);
+      setEbayPreviewError("Network error — could not build a preview for these listings.");
+      setEbayPreviewPhase("failed");
     }
   }
 
-  // PHASE 4 — step 2: the actual, real batch creation, only ever reached
-  // after the preview dialog's own explicit confirmation.
+  // Retries the preview from the same selection — never re-triggers batch
+  // creation, only ever the read-only preview.
+  function handleRetryEbayPreview() {
+    void handleOpenEbayCreatePreview();
+  }
+
+  // CORRECTIVE PASS — step 2: the actual, real batch creation, only ever
+  // reached from the preview dialog's own explicit confirm button, which
+  // is itself only ever enabled in the "ready" phase (see the dialog's
+  // own disabled= expression below) — i.e. only once the server has
+  // confirmed at least one real, valid row exists. Submits exactly the
+  // draft ids that came back as real preview ROWS in this dialog's own
+  // last successful response — never the raw earlier bulk selection —
+  // so the count the user just reviewed and the count actually submitted
+  // can never silently diverge.
   async function handleCreateEbayDrafts() {
-    const ids = [...bulkSelectedIds];
+    const ids = ebayPreviewRows.map(row => row.draftId);
     if (!ids.length || ebayCreatingDrafts) return;
     setEbayCreatingDrafts(true); setEbayCreateError(""); setEbayCreateMessage("");
     try {
@@ -2234,59 +2271,103 @@ export default function ListingsReviewWorkspace() {
       onCancel={() => { setEbayStuckConfirmOpen(false); setEbayDismissTarget(null); }}
     />}
 
-    {/* PHASE 4 — the pre-submission preview + confirmation dialog. Shows
-        exactly which values will transfer to each Seller Hub draft and
-        which fields the user must complete themselves in Seller Hub
-        afterward — never claims full field transfer. The confirmation
-        wording states plainly: this creates drafts, never publishes them,
-        and the user must open Seller Hub to review and list them. */}
+    {/* CORRECTIVE PASS — the pre-submission preview + confirmation dialog,
+        driven entirely by ebayPreviewPhase. Shows exactly which values
+        will transfer to each Seller Hub draft and which fields the user
+        must complete themselves in Seller Hub afterward — never claims
+        full field transfer. The confirmation wording states plainly: this
+        creates drafts, never publishes them, and the user must open
+        Seller Hub to review and list them. The submit button is enabled
+        ONLY in the "ready" phase (at least one real, server-confirmed
+        row) — a loading or failed preview, or one with zero eligible
+        rows, can never show an enabled submit action, and its own count
+        never renders as a bare "0" the moment before that's true. */}
     {ebayPreviewOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !ebayCreatingDrafts) setEbayPreviewOpen(false); }}>
-      <div className="confirm-dialog lr-ebay-preview-dialog" role="alertdialog" aria-modal="true" aria-labelledby="ebay-preview-title">
+      <div className="confirm-dialog lr-ebay-preview-dialog" role="alertdialog" aria-modal="true" aria-labelledby="ebay-preview-title" aria-describedby="ebay-preview-body">
         <button className="dialog-close" type="button" onClick={() => setEbayPreviewOpen(false)} aria-label="Close" disabled={ebayCreatingDrafts}>×</button>
-        <div className="dialog-copy">
-          <h2 id="ebay-preview-title">{`Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? "" : "s"}?`}</h2>
-          <p>
-            This creates {ebayPreviewRows.length === 1 ? "a draft" : "drafts"} in eBay Seller Hub. It does <strong>not</strong> publish{" "}
-            {ebayPreviewRows.length === 1 ? "it" : "them"} — you must open Seller Hub yourself to review and list{" "}
-            {ebayPreviewRows.length === 1 ? "it" : "them"}. Exactly {ebayPreviewRows.length} row{ebayPreviewRows.length === 1 ? "" : "s"} will be uploaded to eBay.
-          </p>
-        </div>
-        {ebayPreviewLoading && <p className="lr-bulk-message" role="status">Building preview…</p>}
-        {ebayPreviewError && <p className="import-select-error" role="alert">{ebayPreviewError}</p>}
-        {!ebayPreviewLoading && ebayPreviewRows.length > 0 && <div className="lr-ebay-preview-list">
-          {ebayPreviewRows.map(row => row.error ? (
-            <div key={row.draftId} className="lr-ebay-preview-row lr-ebay-preview-row-error">
-              <p className="import-select-error">Skipped: {row.error}</p>
-            </div>
-          ) : (
-            <div key={row.draftId} className="lr-ebay-preview-row">
-              <p className="lr-ebay-preview-title">{row.fields?.Title}</p>
-              <dl className="lr-ebay-preview-fields">
-                <div><dt>SKU</dt><dd>{row.fields?.["Custom label (SKU)"]}</dd></div>
-                <div><dt>Category ID</dt><dd>{row.fields?.["Category ID"]}</dd></div>
-                <div><dt>Price</dt><dd>£{row.fields?.Price}</dd></div>
-                <div><dt>Quantity</dt><dd>{row.fields?.Quantity}</dd></div>
-                <div><dt>Condition</dt><dd>{row.fields?.["Condition ID"]}</dd></div>
-                <div><dt>Photo</dt><dd>{row.fields?.["Item photo URL"]}</dd></div>
-              </dl>
-              {row.fields?.Description && <p className="lr-ebay-preview-description">{row.fields.Description}</p>}
-              {row.completeInSellerHub && row.completeInSellerHub.length > 0 && <div className="lr-ebay-preview-complete-note">
-                <strong>Complete in Seller Hub:</strong>
-                <ul>{row.completeInSellerHub.map(note => <li key={note}>{note}</li>)}</ul>
-              </div>}
-            </div>
-          ))}
+
+        {ebayPreviewPhase === "loading" && <div className="dialog-copy">
+          <h2 id="ebay-preview-title">Preparing Seller Hub draft preview…</h2>
+          <p id="ebay-preview-body" className="lr-bulk-message" role="status">Checking {ebayPreviewRequestedCount} listing{ebayPreviewRequestedCount === 1 ? "" : "s"}…</p>
         </div>}
-        <div className="dialog-actions">
-          <button type="button" className="dialog-cancel" onClick={() => setEbayPreviewOpen(false)} disabled={ebayCreatingDrafts}>Cancel</button>
-          <button
-            type="button" className="dialog-confirm"
-            disabled={ebayCreatingDrafts || ebayPreviewLoading || ebayPreviewRows.every(row => row.error)}
-            onClick={handleCreateEbayDrafts}
-          >
-            {ebayCreatingDrafts ? "Creating…" : `Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? "" : "s"}`}
-          </button>
-        </div>
+
+        {ebayPreviewPhase === "failed" && <>
+          <div className="dialog-copy">
+            <h2 id="ebay-preview-title">Preview failed</h2>
+            <p id="ebay-preview-body" className="import-select-error" role="alert">{ebayPreviewError || "Could not build a preview for these listings."}</p>
+          </div>
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setEbayPreviewOpen(false)}>Close</button>
+            <button type="button" className="button-secondary" onClick={handleRetryEbayPreview}>Try preview again</button>
+          </div>
+        </>}
+
+        {(ebayPreviewPhase === "ready" || ebayPreviewPhase === "blocked") && <>
+          <div className="dialog-copy">
+            <h2 id="ebay-preview-title">
+              {ebayPreviewRows.length > 0
+                ? `Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? "" : "s"}?`
+                : "No listings are ready for a Seller Hub draft"}
+            </h2>
+            {ebayPreviewRows.length > 0 && <p id="ebay-preview-body">
+              This creates {ebayPreviewRows.length === 1 ? "a draft" : "drafts"} in eBay Seller Hub. It does <strong>not</strong> publish{" "}
+              {ebayPreviewRows.length === 1 ? "it" : "them"} — you must open Seller Hub yourself to review and list{" "}
+              {ebayPreviewRows.length === 1 ? "it" : "them"}. Exactly {ebayPreviewRows.length} row{ebayPreviewRows.length === 1 ? "" : "s"} will be uploaded to eBay.
+            </p>}
+          </div>
+
+          {ebayPreviewBlockers.length > 0 && <div className="lr-ebay-preview-blockers">
+            <strong>{ebayPreviewRows.length > 0 ? `${ebayPreviewBlockers.length} listing${ebayPreviewBlockers.length === 1 ? "" : "s"} will be skipped:` : "Every selected listing is blocked:"}</strong>
+            <ul>{ebayPreviewBlockers.map(b => <li key={b.draftId}>{b.reason}</li>)}</ul>
+          </div>}
+
+          {ebayPreviewRows.length > 0 && <div className="lr-ebay-preview-list">
+            {ebayPreviewRows.map(row => (
+              <div key={row.draftId} className="lr-ebay-preview-row">
+                <p className="lr-ebay-preview-title">{row.fields.Title}</p>
+                <dl className="lr-ebay-preview-fields">
+                  <div><dt>Action</dt><dd>Draft</dd></div>
+                  <div><dt>SKU</dt><dd>{row.fields["Custom label (SKU)"]}</dd></div>
+                  <div><dt>Category ID</dt><dd>{row.fields["Category ID"]}</dd></div>
+                  <div><dt>Price</dt><dd>£{row.fields.Price}</dd></div>
+                  <div><dt>Quantity</dt><dd>{row.fields.Quantity}</dd></div>
+                  <div><dt>Condition</dt><dd>{row.fields["Condition ID"]}</dd></div>
+                  <div><dt>Photo</dt><dd>{row.fields["Item photo URL"]}</dd></div>
+                </dl>
+                {row.fields.Description && <p className="lr-ebay-preview-description">{row.fields.Description}</p>}
+                {row.completeInSellerHub.length > 0 && <div className="lr-ebay-preview-complete-note">
+                  <strong>Complete in Seller Hub:</strong>
+                  <ul>{row.completeInSellerHub.map(note => <li key={note}>{note}</li>)}</ul>
+                </div>}
+              </div>
+            ))}
+          </div>}
+
+          {/* Explicit acknowledgement required for a PARTIAL submission
+              (some eligible, some blocked) — never implied merely by the
+              dialog being open. Not shown when every selected listing is
+              eligible (nothing partial to acknowledge), nor when NONE are
+              (there is nothing to submit at all). */}
+          {ebayPreviewRows.length > 0 && ebayPreviewBlockers.length > 0 && <label className="lr-ebay-preview-ack">
+            <input type="checkbox" checked={ebayPreviewPartialAck} onChange={event => setEbayPreviewPartialAck(event.target.checked)} />
+            I understand {ebayPreviewBlockers.length} listing{ebayPreviewBlockers.length === 1 ? "" : "s"} will be skipped and only {ebayPreviewRows.length} will be submitted.
+          </label>}
+
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setEbayPreviewOpen(false)} disabled={ebayCreatingDrafts}>Cancel</button>
+            <button
+              type="button" className="dialog-confirm"
+              disabled={
+                ebayCreatingDrafts
+                || ebayPreviewRows.length === 0
+                || (ebayPreviewBlockers.length > 0 && !ebayPreviewPartialAck)
+              }
+              onClick={handleCreateEbayDrafts}
+            >
+              {ebayCreatingDrafts ? "Creating…" : `Create ${ebayPreviewRows.length} Seller Hub draft${ebayPreviewRows.length === 1 ? "" : "s"}`}
+            </button>
+          </div>
+        </>}
       </div>
     </div>}
 

@@ -5,6 +5,7 @@ import { getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForPro
 import { getEbayConnection, getValidEbayAccessToken } from "@/lib/ebay-account/client";
 import { createFeedTask, uploadFeedFile, getFeedTask, getFeedResultFile, feedTaskHasInputFile } from "@/lib/ebay-account/feed-client";
 import { generateFeedDraftCsv, previewFeedDraftRow, type FeedDraftRowInput } from "@/lib/listing-studio/ebay-feed/csv-generator";
+import { assertTemplateContractCurrent } from "@/lib/listing-studio/ebay-feed/template-contract";
 import { parseFeedResultCsv } from "@/lib/listing-studio/ebay-feed/feed-result-parser";
 import { evaluateEbayFeedDraftEligibility } from "@/lib/listing-studio/ebay-feed/feed-draft-eligibility";
 import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
@@ -100,6 +101,14 @@ function mapBatch(row: BatchRow): EbayFeedBatchRecord {
 }
 
 export async function createEbayFeedBatch(ownerId: string, marketplaceDraftIds: string[], productDraftIds: string[], skus: string[]): Promise<{ batchId: string; displayNumber: number }> {
+  // Defence in depth (this task's own explicit safety requirement) — the
+  // caller (the create route) already rejects an empty eligible set with
+  // a 400 before ever reaching this function, and
+  // rpc/listing_studio_create_ebay_feed_batch itself independently raises
+  // NO_DRAFTS for an empty array. This third, redundant check exists so
+  // this function's own contract never depends on either of those staying
+  // correct — it fails loudly and immediately for any future caller.
+  if (marketplaceDraftIds.length === 0) throw new Error("Cannot create a Seller Hub draft batch with zero listings.");
   const response = await supabaseRequest("rpc/listing_studio_create_ebay_feed_batch", {
     method: "POST",
     body: JSON.stringify({ p_owner_id: ownerId, p_marketplace_draft_ids: marketplaceDraftIds, p_product_draft_ids: productDraftIds, p_skus: skus }),
@@ -238,26 +247,112 @@ export async function resolveEbayFeedDraftEligibilityForProducts(ownerId: string
 // headers — see template-contract.ts — and this product's own persisted
 // photo/aspect counts), never an invented or approximate claim.
 
-export type FeedDraftPreview = { fields: Record<string, string>; completeInSellerHub: string[] };
+export type FeedDraftPreviewRow = { draftId: string; fields: Record<string, string>; completeInSellerHub: string[] };
+export type FeedDraftPreviewResult =
+  | { ok: true; row: FeedDraftPreviewRow }
+  | { ok: false; reason: string };
 
-export async function buildFeedDraftPreviewForProduct(ownerId: string, productDraftId: string): Promise<FeedDraftPreview | { error: string }> {
+/**
+ * CORRECTIVE PASS (first live preview attempt blocked every listing,
+ * including a fully-valid SKU 1644 — see this file's own prepareFeedPrimaryPhoto
+ * comment for the actual root cause) — this function is now:
+ *   1. Never throws. Every failure mode — missing draft, already-drafted,
+ *      already in an active batch, any single ineligibility reason, a
+ *      photo-preparation failure, a template problem — returns a precise
+ *      `{ ok: false, reason }`, never an uncaught exception that would
+ *      previously crash the WHOLE multi-listing preview request (see the
+ *      route's own Promise.all) and surface only a generic
+ *      "Could not build a preview" with zero rows for every listing, not
+ *      just the one that actually failed.
+ *   2. Reuses evaluateEbayFeedDraftEligibility — the EXACT SAME function
+ *      the real batch-creation path uses — for every ordinary blocking
+ *      reason (missing price/photo/SKU/category/quantity/condition/
+ *      content-not-ready/account-not-connected), so preview and creation
+ *      can never disagree about why a listing is blocked.
+ *   3. Explicitly checks "already has a genuine Seller Hub draft" and
+ *      "already in an active (non-terminal) Seller Hub batch" BEFORE
+ *      building anything — the legacy Inventory API's own ebay_offer_id
+ *      is never consulted for either check (see this function's own
+ *      "legacy offer never blocks" test).
+ */
+export async function buildFeedDraftPreviewForProduct(ownerId: string, productDraftId: string): Promise<FeedDraftPreviewResult> {
+  try {
+    return await buildFeedDraftPreviewForProductInner(ownerId, productDraftId);
+  } catch (error) {
+    // The outer never-throws boundary — every EXPECTED failure mode is
+    // already handled with a precise reason inside the inner function
+    // below; this only ever catches a genuinely UNEXPECTED exception
+    // (a real infrastructure fault, a bug). Even then, this function must
+    // still resolve rather than reject: the route calls this once per
+    // requested listing inside a Promise.all, and one listing's genuinely
+    // unexpected failure must never blank out every other listing's own
+    // valid preview (the corrective-pass bug this whole function exists
+    // to fix). The real error is logged server-side (safe: an Error's own
+    // message/name only, never a raw response body, header, or secret)
+    // for investigation; the browser only ever sees the generic reason.
+    console.error("[buildFeedDraftPreviewForProduct] unexpected failure", productDraftId, error instanceof Error ? error.message : error);
+    return { ok: false, reason: "This listing's preview could not be built due to an unexpected error." };
+  }
+}
+
+async function buildFeedDraftPreviewForProductInner(ownerId: string, productDraftId: string): Promise<FeedDraftPreviewResult> {
+  try {
+    assertTemplateContractCurrent();
+  } catch {
+    return { ok: false, reason: "The Seller Hub draft template is unavailable." };
+  }
+
   const draft = await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
-  if (!draft) return { error: "No eBay preparation for this listing." };
-  const skuRows = await supabaseRequestAll<{ id: string; sku: string | null }>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=id,sku`);
-  const sku = skuRows[0]?.sku ?? null;
-  if (!sku) return { error: "Missing SKU." };
+  if (!draft) return { ok: false, reason: "The selected eBay listing could not be found." };
+  if (draft.ebayFeedDraftCreatedAt !== null) return { ok: false, reason: "A Seller Hub draft already exists for this listing." };
 
-  const photoUrl = await prepareFeedPrimaryPhoto(ownerId, productDraftId);
-  const totalPhotos = await supabaseRequestAll<{ id: string }>(`listing_draft_images?draft_id=eq.${productDraftId}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=id`);
+  // Active (non-terminal) batch check — a listing already queued/uploaded/
+  // awaiting a result in a still-live batch must not be offered again,
+  // independently of (and never via) the legacy ebay_offer_id column.
+  const activeItems = await supabaseRequestAll<{ id: string }>(
+    `ebay_feed_batch_items?marketplace_draft_id=eq.${draft.id}&status=in.(queued,uploaded,awaiting_result)&select=id`,
+  );
+  if (activeItems.length > 0) return { ok: false, reason: "The selected listing is already in an active Seller Hub draft batch." };
+
+  const [skuRows, connection, imageRows] = await Promise.all([
+    supabaseRequestAll<{ id: string; sku: string | null }>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=id,sku`),
+    getEbayConnection(ownerId),
+    supabaseRequestAll<{ id: string }>(`listing_draft_images?draft_id=eq.${productDraftId}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=id`),
+  ]);
+  const sku = skuRows[0]?.sku ?? null;
+
+  const evaluation = evaluateEbayFeedDraftEligibility({
+    hasEbayPreparation: true,
+    accountUsable: connection?.connectionStatus === "connected",
+    alreadyHasFeedDraft: false, // already checked distinctly above
+    contentReady: draft.readiness.ready,
+    hasValidPrice: draft.pricePence != null && draft.pricePence > 0,
+    hasPhoto: imageRows.length > 0,
+    hasSku: Boolean(sku),
+    hasQuantity: draft.quantity != null,
+    hasCategoryId: Boolean(draft.categoryId),
+    conditionValue: draft.conditionValue,
+  });
+  if (!evaluation.eligible) return { ok: false, reason: evaluation.reasons.join("; ") };
+
+  let photoUrl: string | null;
+  try {
+    photoUrl = await prepareFeedPrimaryPhoto(ownerId, productDraftId);
+  } catch (error) {
+    if (error instanceof StorageBucketMissingError) return { ok: false, reason: "Photo storage is not available right now." };
+    return { ok: false, reason: "The primary photo could not be prepared." };
+  }
+  if (!photoUrl) return { ok: false, reason: "The primary photo could not be prepared — it may not be reachable right now." };
+
   const aspects = flattenAspectsForFeedRow(draft.dynamicData);
   const multiValueAspectNames = Object.entries(draft.dynamicData)
     .filter(([name, entry]) => !name.startsWith("__") && entry && Array.isArray(entry.value) && entry.value.length > 1)
     .map(([name]) => name);
 
   const rowInput: FeedDraftRowInput = {
-    sku, categoryId: draft.categoryId ?? "", title: draft.title ?? "",
-    pricePence: draft.pricePence ?? 0, quantity: draft.quantity ?? 1,
-    primaryPhotoUrl: photoUrl ?? "", conditionValue: draft.conditionValue, description: draft.description ?? "",
+    sku: sku!, categoryId: draft.categoryId!, title: draft.title ?? "",
+    pricePence: draft.pricePence!, quantity: draft.quantity!,
+    primaryPhotoUrl: photoUrl, conditionValue: draft.conditionValue, description: draft.description ?? "",
     aspects,
   };
   const preview = previewFeedDraftRow(rowInput);
@@ -271,16 +366,14 @@ export async function buildFeedDraftPreviewForProduct(ownerId: string, productDr
     "Shipping, returns, and payment policies (not part of this template — Seller Hub applies your account defaults, or you choose them when you publish)",
     "Inventory/warehouse location (not part of this template)",
   ];
-  if (totalPhotos.length > 1) {
-    completeInSellerHub.push(`${totalPhotos.length - 1} additional photo${totalPhotos.length - 1 === 1 ? "" : "s"} — only the main photo transfers (see this pipeline's own disclosed single-photo limitation)`);
-  } else if (totalPhotos.length === 0) {
-    completeInSellerHub.push("Photo — none could be verified as reachable; this draft will be blocked until one is");
+  if (imageRows.length > 1) {
+    completeInSellerHub.push(`${imageRows.length - 1} additional photo${imageRows.length - 1 === 1 ? "" : "s"} — only the main photo transfers (see this pipeline's own disclosed single-photo limitation)`);
   }
   if (multiValueAspectNames.length > 0) {
     completeInSellerHub.push(`Additional values for: ${multiValueAspectNames.join(", ")} — only the first value each transfers (see this pipeline's own disclosed limitation)`);
   }
 
-  return { fields: preview, completeInSellerHub };
+  return { ok: true, row: { draftId: productDraftId, fields: preview, completeInSellerHub } };
 }
 
 // ---------------------------------------------------------------------
@@ -370,11 +463,33 @@ async function handleStageError(batchId: string, claimedBy: string, error: unkno
  * (main) uploaded photo — this pipeline supports a single primary photo
  * per row (see csv-generator.ts's own header on why multi-photo support is
  * deliberately not implemented). Never returns a photo whose reachability
- * wasn't actually verified with a real HEAD request. */
+ * wasn't actually verified with a real HEAD request.
+ *
+ * CORRECTIVE PASS (first live preview attempt) — ROOT CAUSE of "Could not
+ * build a preview for these listings" / 0 rows for EVERY listing,
+ * including SKU 1644 despite having valid title/category/price/quantity/
+ * 8 uploaded photos: this query used to pass `&limit=1` straight into
+ * supabaseRequestAll(), which lib/supabase.ts's own established,
+ * documented regression guard explicitly THROWS on — that function's
+ * entire contract is "fetch every matching row via its own Range-based
+ * pagination", which is inherently incompatible with a caller-supplied
+ * `limit`. Every unit test for this function used a MOCKED
+ * supabaseRequestAll (a bare vi.fn()), so the mock never exercised the
+ * real guard — this was only ever going to surface against genuine
+ * Supabase data, which is exactly what this first live attempt was. Fixed
+ * by using supabaseRequest() directly for this bounded, top-1 query, the
+ * exact pattern this codebase already uses everywhere else for a
+ * `limit=1` lookup (see e.g. lib/investments/refresh.ts,
+ * app/api/yahoo/index/route.ts) — never supabaseRequestAll for a bounded
+ * result. This same bug would equally have broken the real batch
+ * pipeline's own "generating_csv"/"uploading" stages the first time a
+ * real submission was attempted — never actually reached, since preview
+ * caught it first. */
 async function prepareFeedPrimaryPhoto(ownerId: string, productDraftId: string): Promise<string | null> {
-  const images = await supabaseRequestAll<{ id: string; storage_path: string }>(
+  const imagesResponse = await supabaseRequest(
     `listing_draft_images?draft_id=eq.${productDraftId}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=id,storage_path&order=sort_order.asc&limit=1`,
   );
+  const images = await imagesResponse.json() as Array<{ id: string; storage_path: string }>;
   const image = images[0];
   if (!image) return null;
   try {
