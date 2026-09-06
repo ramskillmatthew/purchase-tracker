@@ -1985,11 +1985,39 @@ describe("REQUIREMENT (fourth audit): the ROOT CAUSE fix — retry/reconcile/res
     expect(fn).toContain("setEbayVisibleBatchIds(current => new Set(current).add(batchId));");
   });
 
-  it("handleResumeProcessing also adds the batch id to ebayVisibleBatchIds and calls the existing /process route (never a duplicate task-creating path)", () => {
-    const start = workspaceSource.indexOf("const handleResumeProcessing = useCallback");
+  it("runResumeProcessing also adds the batch id to ebayVisibleBatchIds and calls the existing /process route (never a duplicate task-creating path)", () => {
+    const start = workspaceSource.indexOf("const runResumeProcessing = useCallback");
     const fn = workspaceSource.slice(start, workspaceSource.indexOf("}, []);", start));
     expect(fn).toContain("setEbayVisibleBatchIds(current => new Set(current).add(batchId));");
     expect(fn).toMatch(/fetch\(`\/api\/listing-studio\/ebay-feed-batches\/\$\{batchId\}\/process`/);
+  });
+
+  // CORRECTIVE PASS (fifth real-submission audit) — REQUIREMENT: Resume
+  // processing must never fire on a bare click — it needs its own
+  // confirmation boundary (mirroring Retry/Reconcile) stating plainly
+  // that it contacts eBay directly and may create a real Seller Hub
+  // draft, with no implication one already exists.
+  it("REQUIREMENT: the Resume processing BUTTON opens a confirmation dialog (handleOpenResumeConfirm) rather than firing runResumeProcessing directly", () => {
+    const idx = workspaceSource.indexOf("ebayStalledBatchAction && (");
+    const block = workspaceSource.slice(idx, idx + 400);
+    expect(block).toContain("onClick={() => handleOpenResumeConfirm(ebayStalledBatchAction.batchId)}");
+    expect(block).not.toContain("onClick={() => runResumeProcessing(ebayStalledBatchAction.batchId)}");
+  });
+
+  it("REQUIREMENT: the Resume confirmation dialog explicitly states it contacts eBay directly, may create a real Seller Hub draft, and never implies one already exists", () => {
+    const dialogStart = workspaceSource.indexOf('id="resume-title"');
+    expect(dialogStart).toBeGreaterThan(-1);
+    const dialogBody = workspaceSource.slice(dialogStart, dialogStart + 900);
+    expect(dialogBody).toMatch(/No Seller Hub draft exists for this listing yet/i);
+    expect(dialogBody).toMatch(/contact eBay directly/i);
+    expect(dialogBody).toMatch(/may create a real eBay Feed task/i);
+    expect(dialogBody).toMatch(/never create a second task/i);
+  });
+
+  it("REQUIREMENT: handleConfirmResumeProcessing (the dialog's own confirm button) is the ONLY path that actually calls runResumeProcessing", () => {
+    const confirmFnStart = workspaceSource.indexOf("const handleConfirmResumeProcessing = useCallback");
+    const confirmFn = workspaceSource.slice(confirmFnStart, workspaceSource.indexOf("[resumeConfirmBatchId, runResumeProcessing]);", confirmFnStart));
+    expect(confirmFn).toContain("await runResumeProcessing(batchId);");
   });
 
   it("the retry and create routes both drive MULTIPLE ticks (driveEbayFeedBatchTicks), never a single runEbayFeedBatchProcessTick call, so real progress happens within one request", () => {

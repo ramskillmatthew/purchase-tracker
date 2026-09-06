@@ -1319,7 +1319,7 @@ export default function ListingsReviewWorkspace() {
   // Reconcile now both apply — so a stalled batch stops being stalled for
   // real, not just for one manual click.
   const [resumingBatchId, setResumingBatchId] = useState<string | null>(null);
-  const handleResumeProcessing = useCallback(async (batchId: string) => {
+  const runResumeProcessing = useCallback(async (batchId: string) => {
     setResumingBatchId(batchId);
     setEbayVisibleBatchIds(current => new Set(current).add(batchId));
     try {
@@ -1338,6 +1338,23 @@ export default function ListingsReviewWorkspace() {
       setResumingBatchId(null);
     }
   }, []);
+
+  // CORRECTIVE PASS (fifth real-submission audit) — REQUIREMENT: Resume
+  // processing must never be a bare, unwarned one-click action — unlike
+  // Retry/Reconcile (both already gated behind their own confirm dialog),
+  // Resume previously fired the instant its button was clicked. Resume is
+  // NOT purely cosmetic: for a batch like this one (no ebay_task_id yet),
+  // it can genuinely advance all the way through createTask/uploadFile —
+  // a real, live eBay contact — so the user must see that stated plainly,
+  // with no implication a draft already exists, before it ever fires.
+  const [resumeConfirmBatchId, setResumeConfirmBatchId] = useState<string | null>(null);
+  const handleOpenResumeConfirm = useCallback((batchId: string) => { setResumeConfirmBatchId(batchId); }, []);
+  const handleConfirmResumeProcessing = useCallback(async () => {
+    if (!resumeConfirmBatchId) return;
+    const batchId = resumeConfirmBatchId;
+    setResumeConfirmBatchId(null);
+    await runResumeProcessing(batchId);
+  }, [resumeConfirmBatchId, runResumeProcessing]);
 
   // Stuck-batch dismissal (product spec requirement) — a small × on each
   // stuck eBay batch row opens a real confirmation dialog (never a browser
@@ -2776,7 +2793,7 @@ export default function ListingsReviewWorkspace() {
                 <button type="button" className="button-secondary" onClick={() => handleViewEbayBatchError(ebayBlockingBatchAction.batchId)}>View error</button>
               </>}
               {ebayStalledBatchAction && (
-                <button type="button" className="button" disabled={resumingBatchId === ebayStalledBatchAction.batchId} onClick={() => handleResumeProcessing(ebayStalledBatchAction.batchId)}>
+                <button type="button" className="button" disabled={resumingBatchId === ebayStalledBatchAction.batchId} onClick={() => handleOpenResumeConfirm(ebayStalledBatchAction.batchId)}>
                   {resumingBatchId === ebayStalledBatchAction.batchId ? "Resuming…" : "Resume processing"}
                 </button>
               )}
@@ -2918,6 +2935,37 @@ export default function ListingsReviewWorkspace() {
           <div className="dialog-actions">
             <button type="button" className="dialog-cancel" onClick={() => setReconcileConfirmBatchId(null)} disabled={reconciling}>Cancel</button>
             <button type="button" className="dialog-confirm" onClick={handleConfirmReconcileEbayBatch} disabled={reconciling}>{reconciling ? "Reconciling…" : "Reconcile failed batch"}</button>
+          </div>
+        </div>
+      </div>;
+    })()}
+
+    {/* CORRECTIVE PASS (fifth real-submission audit) — REQUIREMENT: Resume
+        processing must explain, before it ever fires, that it contacts
+        eBay directly and may create a real Seller Hub draft — never an
+        implication that a draft already exists (this batch's own
+        ebay_task_id is still null; a resume from here can genuinely reach
+        createTask/uploadFile for the first time). */}
+    {resumeConfirmBatchId && (() => {
+      const status = ebayBatchStatusById.get(resumeConfirmBatchId);
+      const selectedRow = bulkSelectedIds.size === 1 ? listingsById.get([...bulkSelectedIds][0]) : undefined;
+      const fallbackState = selectedRow?.ebay?.feedBatchState;
+      const displayNumber = status?.displayNumber ?? (fallbackState && fallbackState.kind !== "none" && fallbackState.batchId === resumeConfirmBatchId ? fallbackState.displayNumber : undefined);
+      const resuming = resumingBatchId === resumeConfirmBatchId;
+      return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !resuming) setResumeConfirmBatchId(null); }}>
+        <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="resume-title" aria-describedby="resume-body">
+          <button className="dialog-close" type="button" onClick={() => setResumeConfirmBatchId(null)} aria-label="Close" disabled={resuming}>×</button>
+          <div className="dialog-copy">
+            <h2 id="resume-title">Resume Seller Hub Batch {displayNumber ?? "?"}?</h2>
+            <p id="resume-body">
+              No Seller Hub draft exists for this listing yet. Resuming will <strong>contact eBay directly</strong> to continue this batch —
+              depending on how far it gets, this may create a real eBay Feed task and, eventually, a genuine Seller Hub draft. It will never
+              publish a live listing, and it will never create a second task if one already exists for this batch.
+            </p>
+          </div>
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setResumeConfirmBatchId(null)} disabled={resuming}>Cancel</button>
+            <button type="button" className="dialog-confirm" onClick={handleConfirmResumeProcessing} disabled={resuming}>{resuming ? "Resuming…" : "Resume processing"}</button>
           </div>
         </div>
       </div>;
