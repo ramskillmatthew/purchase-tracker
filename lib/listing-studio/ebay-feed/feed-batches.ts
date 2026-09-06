@@ -197,32 +197,39 @@ export async function cancelEbayFeedBatch(ownerId: string, batchId: string): Pro
 }
 
 // ---------------------------------------------------------------------
-// PHASE 7 — deliberate retry of an already-failed batch. Never called
-// during this corrective task itself (per its own explicit instruction);
-// exists so a genuine, later, user-initiated retry is safe.
+// PHASE 7 — deliberate retry of an already-failed batch, via the single
+// atomic RPC (fifth real-submission audit — REQUIREMENT: replace the
+// older two-step parent/child PATCH transition entirely, never retain it
+// as a fallback, since keeping it would preserve exactly the
+// non-atomic-across-two-requests risk this migration exists to remove).
+// See supabase-ebay-feed-drafts-atomic-retry.sql's own
+// listing_studio_retry_ebay_feed_batch for the full transaction contract
+// (row-locked, owner-checked, status-checked, both tables updated inside
+// ONE function call). This module never calls that RPC's SQL directly
+// over a raw connection — it goes through supabaseRequest exactly like
+// every other RPC in this file, i.e. the server's own service-role
+// client; the browser has no path to this RPC at all (it only ever talks
+// to this app's own /retry route, which calls this function).
 
 export type EbayFeedRetryOutcome = { resumedFromTaskId: string | null; resumedStatus: EbayFeedBatchStatus };
+
+type AtomicRetryRpcRow = { batch_id: string; status: string; attempt_count: number; ebay_task_id: string | null; listing_count: number };
 
 /**
  * Retries the SAME batch row — never creates a new one — preserving
  * Batch #N's own identity, created_at, and running attempt_count exactly
  * (this corrective task's own explicit requirement: "preserve Batch 1
- * history", "preserve attempt count"). Mirrors cancelEbayFeedBatch's own
- * "plain, conditional, atomic PATCH" pattern rather than
- * listing_studio_advance_ebay_feed_batch — a failed batch's claim was
- * already released the moment it failed (see that RPC's own "ALWAYS
- * releases the claim" comment), so there is no live claimed_by token for
- * a retry action to present; reusing that RPC here would always fail with
- * CLAIM_NOT_HELD. The `status=eq.failed` (or `=eq.queued`/`=eq.uploaded`/
- * `=eq.awaiting_result` for the item-level PATCHes) WHERE clause is this
- * function's own concurrency protection: only the FIRST of two
- * simultaneous retry requests actually matches a row (Postgres commits
- * one UPDATE at a time), so a double-click or a second browser tab can
- * never retry the same batch twice.
+ * history", "preserve attempt count"; the RPC itself never writes
+ * attempt_count at all — the claim RPC increments it exactly once per
+ * real claim, so a retry followed by the next tick's own claim bumps it
+ * exactly once, never twice).
  *
  * RECONCILIATION (this corrective task's own explicit requirement — "will
  * first reconcile whether a remote task exists... will not create another
- * task if an existing task already accepted the upload"):
+ * task if an existing task already accepted the upload") happens HERE, in
+ * application code, BEFORE the atomic RPC is ever called — a Postgres
+ * function cannot itself make the real, read-only getFeedTask network
+ * call this decision depends on:
  *   - No ebay_task_id was ever persisted (createTask itself failed, e.g.
  *     SKU 1644's real Batch #1) -> nothing remote exists; safe to restart
  *     the WHOLE pipeline fresh from "queued" (a full re-check of
@@ -239,11 +246,20 @@ export type EbayFeedRetryOutcome = { resumedFromTaskId: string | null; resumedSt
  *       - eBay reports the task still in progress, OR the task can no
  *         longer be found/read at all -> resume at "processing" (poll
  *         again; never re-upload, never re-create).
+ * Once that decision is made, the ACTUAL state transition (both the
+ * parent row and its failed children, atomically, in one transaction) is
+ * delegated entirely to the RPC — this function never writes to
+ * ebay_feed_batches/ebay_feed_batch_items directly for this operation.
  *
  * Never retries a batch that isn't currently 'failed' — a
  * 'completed_with_errors' batch (some rows succeeded) needs its own,
  * different "create a fresh batch for just the failed rows" flow, not
- * built here; a 'completed'/'cancelled' batch has nothing to retry.
+ * built here; a 'completed'/'cancelled' batch has nothing to retry. This
+ * pre-check is a fast, informative-error read; the RPC re-verifies the
+ * SAME condition atomically under its own row lock regardless — the
+ * pre-check can never be trusted alone to make this operation safe, only
+ * to produce a specific, helpful error message before ever making the
+ * getFeedTask call.
  */
 export async function retryEbayFeedBatch(ownerId: string, batchId: string): Promise<EbayFeedRetryOutcome> {
   const batches = await supabaseRequestAll<{ id: string; status: EbayFeedBatchStatus; ebay_task_id: string | null }>(
@@ -253,46 +269,57 @@ export async function retryEbayFeedBatch(ownerId: string, batchId: string): Prom
   if (!batch) throw new Error("This Seller Hub draft batch could not be found.");
   if (batch.status !== "failed") throw new Error(`Only a failed Seller Hub draft batch can be retried (this one is currently "${batch.status}").`);
 
+  let resumeStatus: EbayFeedBatchStatus;
+  let resumedFromTaskId: string | null = null;
+
   if (!batch.ebay_task_id) {
-    const patched = await resumeFailedBatch(ownerId, batchId, "queued", "queued");
-    if (!patched) throw new Error("This batch was already retried (by another request) or is no longer failed.");
-    return { resumedFromTaskId: null, resumedStatus: "queued" };
+    resumeStatus = "queued";
+  } else {
+    const { accessToken } = await getValidEbayAccessToken(ownerId);
+    let remoteStatus: Awaited<ReturnType<typeof getFeedTask>> | null = null;
+    try {
+      remoteStatus = await getFeedTask(accessToken, batch.ebay_task_id);
+    } catch {
+      remoteStatus = null; // task genuinely unreachable/expired — treat like "still in progress" below: never re-create, just resume polling
+    }
+    resumeStatus = remoteStatus && isTerminalFeedTaskStatus(remoteStatus.status) ? "downloading_result" : "processing";
+    resumedFromTaskId = batch.ebay_task_id;
   }
 
-  const { accessToken } = await getValidEbayAccessToken(ownerId);
-  let remoteStatus: Awaited<ReturnType<typeof getFeedTask>> | null = null;
-  try {
-    remoteStatus = await getFeedTask(accessToken, batch.ebay_task_id);
-  } catch {
-    remoteStatus = null; // task genuinely unreachable/expired — treat like "still in progress" below: never re-create, just resume polling
-  }
-
-  const resumeStatus: EbayFeedBatchStatus = remoteStatus && isTerminalFeedTaskStatus(remoteStatus.status) ? "downloading_result" : "processing";
-  // Items that reached eBay before the failure (this only ever happens
-  // once a real task existed) go back to "uploaded" — never "queued" —
-  // so a re-entrant "uploading" stage (should this resume at "processing"
-  // and eBay somehow still shows the task non-terminal indefinitely) is
-  // never mistaken for a batch whose file was never sent.
-  const patched = await resumeFailedBatch(ownerId, batchId, resumeStatus, "uploaded");
-  if (!patched) throw new Error("This batch was already retried (by another request) or is no longer failed.");
-  return { resumedFromTaskId: batch.ebay_task_id, resumedStatus: resumeStatus };
+  const result = await callAtomicRetryRpc(ownerId, batchId, resumeStatus);
+  if (!result) throw new Error("This batch was already retried (by another request) or is no longer failed.");
+  return { resumedFromTaskId, resumedStatus: result.status as EbayFeedBatchStatus };
 }
 
-/** Returns true if the batch row was genuinely still 'failed' (and so was
- * actually patched); false if a concurrent retry already won the race —
- * the caller treats false as "nothing to do", never as a hard error. */
-async function resumeFailedBatch(ownerId: string, batchId: string, batchStatus: EbayFeedBatchStatus, itemStatus: EbayFeedItemStatus): Promise<boolean> {
-  const response = await supabaseRequest(`ebay_feed_batches?id=eq.${batchId}&owner_id=eq.${ownerId}&status=eq.failed`, {
-    method: "PATCH", headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ status: batchStatus, error_code: null, error_message: null, completed_at: null }),
-  });
-  const updated = await response.json() as unknown[];
-  if (!Array.isArray(updated) || updated.length === 0) return false;
-  await supabaseRequest(`ebay_feed_batch_items?batch_id=eq.${batchId}&status=eq.failed`, {
-    method: "PATCH", headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ status: itemStatus, error_code: null, error_message: null, completed_at: null }),
-  });
-  return true;
+/**
+ * The ONE call site for listing_studio_retry_ebay_feed_batch — a single
+ * atomic transaction (row-locked, owner-checked, status-checked, parent
+ * and child updated together) performed entirely inside Postgres. Never
+ * falls back to a non-atomic PATCH sequence on any error: an RPC failure
+ * (including a genuine NOT_RETRYABLE/BATCH_NOT_FOUND rejection) always
+ * propagates as either `null` (a clean, expected rejection the caller
+ * treats as "nothing to do") or a re-thrown Error (a genuinely unexpected
+ * fault) — never silently retried through a different, non-atomic path.
+ *
+ * Returns null for the two rejection reasons that mean "there was
+ * genuinely nothing valid to retry, not a system fault" — BATCH_NOT_FOUND
+ * (owner/id mismatch, or the row is gone) and NOT_RETRYABLE (a concurrent
+ * request already won the race, or the batch is no longer in a retryable
+ * status) — mirroring this function's own previous contract exactly, so
+ * every existing caller's error handling keeps working unchanged.
+ */
+async function callAtomicRetryRpc(ownerId: string, batchId: string, resumeStatus: EbayFeedBatchStatus): Promise<AtomicRetryRpcRow | null> {
+  try {
+    const response = await supabaseRequest("rpc/listing_studio_retry_ebay_feed_batch", {
+      method: "POST",
+      body: JSON.stringify({ p_owner_id: ownerId, p_batch_id: batchId, p_resume_status: resumeStatus }),
+    });
+    const rows = await response.json() as AtomicRetryRpcRow[];
+    return rows[0] ?? null;
+  } catch (error) {
+    if (error instanceof Error && /NOT_RETRYABLE|BATCH_NOT_FOUND/.test(error.message)) return null;
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -308,9 +335,12 @@ async function resumeFailedBatch(ownerId: string, batchId: string, batchStatus: 
 //
 // NO NEW SQL/RPC — deliberately follows this exact module's own
 // established "plain, conditional REST PATCH" pattern (see
-// cancelEbayFeedBatch and resumeFailedBatch above), the same pattern
-// used for every other simple, non-claim-based conditional status
-// update in this pipeline. A single PATCH request's WHERE clause is
+// cancelEbayFeedBatch above) — unlike retryEbayFeedBatch (which now goes
+// through the single atomic listing_studio_retry_ebay_feed_batch RPC
+// precisely because it changes a REAL, in-progress attempt's own state),
+// this reconciliation only ever repairs a row that is ALREADY known
+// stale/inconsistent, so a plain conditional PATCH is sufficient here. A
+// single PATCH request's WHERE clause is
 // evaluated atomically by Postgres against the CURRENT row set at
 // execution time (never a stale snapshot from an earlier SELECT), which
 // is exactly the concurrency-safety property this repair needs — no RPC

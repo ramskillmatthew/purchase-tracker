@@ -107,4 +107,33 @@ describe("POST /api/listing-studio/ebay-feed-batches/[batchId]/retry", () => {
     await retryRoute(req(), params());
     expect(enforceRateLimit).toHaveBeenCalledWith("owner-1", "ebay_feed_batch_retry", expect.any(Number), expect.any(Number));
   });
+
+  // CORRECTIVE PASS (fifth real-submission audit) — REQUIREMENT: the
+  // server derives the owner ID from the authenticated session, never
+  // from anything the browser supplies.
+  it("REQUIREMENT: a request body attempting to supply a different owner id has zero effect — retryEbayFeedBatch is always called with the SESSION's own owner id", async () => {
+    const spoofedRequest = new Request("http://test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerId: "owner-ATTACKER", owner_id: "owner-ATTACKER", p_owner_id: "owner-ATTACKER" }),
+    });
+    await retryRoute(spoofedRequest, params());
+    expect(retryEbayFeedBatch).toHaveBeenCalledWith("owner-1", BATCH_ID);
+    expect(getEbayFeedBatch).toHaveBeenCalledWith("owner-1", BATCH_ID);
+  });
+
+  it("STRUCTURAL: the route never reads the request body at all — there is no owner id for a client to even attempt to supply", () => {
+    const source = require("node:fs").readFileSync("app/api/listing-studio/ebay-feed-batches/[batchId]/retry/route.ts", "utf8") as string;
+    expect(source).not.toMatch(/request\.json\(\)/);
+    expect(source).toContain("_request: Request");
+  });
+
+  // CORRECTIVE PASS (fifth real-submission audit) — REQUIREMENT: Resume
+  // remains a wholly separate /process operation — this route never
+  // triggers it, and vice versa (see the /process route's own test file).
+  it("STRUCTURAL: this route never calls or references the /process endpoint or runEbayFeedBatchProcessTick directly — only driveEbayFeedBatchTicks", () => {
+    const source = require("node:fs").readFileSync("app/api/listing-studio/ebay-feed-batches/[batchId]/retry/route.ts", "utf8") as string;
+    expect(source).not.toContain("/process");
+    expect(source).not.toContain("runEbayFeedBatchProcessTick");
+  });
 });
