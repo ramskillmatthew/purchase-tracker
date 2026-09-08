@@ -9,12 +9,22 @@ export type BulkPolicyApplyResult = { appliedCount: number; skippedCount: number
  * Stage 6 (eBay draft batches) — the "Set eBay shipping policy" bulk
  * control, living in the existing selected-items action bar directly
  * beneath the final listing row (never a page-bottom sticky toolbar).
- * Opens a drop-up panel (this bar sits near the bottom of the viewport, so
- * a drop-up keeps the panel on-screen without needing dynamic positioning
- * logic) listing every active, currently-synced fulfilment policy; applies
- * only to selected listings that have an eBay preparation and no existing
- * draft (see the /ebay-bulk-policy route's own skip rules) and reports
- * exactly how many were applied vs. skipped and why.
+ * Opens an inline panel listing every active, currently-synced fulfilment
+ * policy; applies only to selected listings that have an eBay preparation
+ * and no already-CONFIRMED Seller Hub draft (see the /ebay-bulk-policy
+ * route's own skip rules — deliberately never blocked by a legacy,
+ * unpublished Inventory API offer, and deliberately independent of
+ * whether the listing is also sitting in an active/failed Seller Hub Feed
+ * batch, since assigning a policy is harmless metadata unrelated to
+ * either) and reports exactly how many were applied vs. skipped and why.
+ *
+ * CORRECTIVE PASS (action-bar rebuild) — this used to be an absolutely-
+ * positioned drop-up overlay that could cover the table row behind it.
+ * It is now a normal, statically-positioned block (see globals.css's own
+ * .lr-bulk-ebay-policy-panel comment for the flex-basis technique) that
+ * reserves its own space below the action row instead of floating over
+ * anything. The open/close/outside-click/Escape behaviour below is
+ * unchanged — only its CSS positioning changed.
  *
  * CORRECTIVE PASS — the panel previously had no way to close it once open
  * other than re-clicking the trigger: no visible × control, no outside-

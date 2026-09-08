@@ -1887,7 +1887,14 @@ h1 { font-size: 1.5rem; font-weight: 720; }
    comment); sticky to the BOTTOM of that column, not the viewport, so it
    can never cover the inspector/activity column and never needs a guessed
    layout reservation elsewhere on the page. */
-.lr-bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; min-height: 56px; padding: 10px 14px; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; border: 1px solid var(--lr-border); border-top: 0; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--lr-surface) 97%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(12px); }
+/* CORRECTIVE PASS (action-bar rebuild) — align-items switched from center
+   to flex-start: now that .lr-bulk-bar-actions can grow taller than a
+   single line (the eBay policy panel wraps onto its own full-width line
+   below the buttons — see .lr-bulk-ebay-policy-panel), centering would
+   float "N selected / Clear selection" down into the middle of that
+   taller block instead of keeping it pinned to the top of the row, next
+   to the buttons it's next to on every line that doesn't wrap. */
+.lr-bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; min-height: 56px; padding: 10px 14px; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; border: 1px solid var(--lr-border); border-top: 0; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--lr-surface) 97%, transparent); box-shadow: var(--shadow-lg); backdrop-filter: blur(12px); }
 .lr-bulk-bar-selection { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--lr-muted); font-size: 11px; font-weight: 650; }
 .lr-bulk-bar-selection strong { color: var(--lr-text); font-weight: 700; white-space: nowrap; }
 .lr-bulk-bar-selection .button-secondary { min-height: 28px; padding: 0 9px; font-size: 10px; }
@@ -2815,11 +2822,23 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-ebay-policies .field span.label, .lr-ebay-policies .field > span:first-child { color: var(--lr-muted); font-size: 9px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
 .lr-ebay-policies .input { width: 100%; border-color: var(--lr-border); background: var(--lr-surface); color: var(--lr-text); }
 
-/* Bulk "Set eBay shipping policy" — a drop-UP panel (this control lives in
-   the bulk bar, near the bottom of the viewport) anchored to its trigger
-   button, same card styling as the inspector's own bordered sections. */
-.lr-bulk-ebay-policy { position: relative; display: inline-flex; }
-.lr-bulk-ebay-policy-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; width: 260px; max-width: calc(100vw - 24px); flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--surface); box-shadow: 0 16px 40px rgba(0,0,0,.35); }
+/* Bulk "Set eBay shipping policy" — CORRECTIVE PASS (action-bar rebuild,
+   legacy-offer/blocker audit): this used to be an absolutely-positioned
+   drop-up overlay anchored to its trigger button, which could cover the
+   table row behind it and never reserved its own space in the layout —
+   exactly the "no absolutely positioned buttons / no controls overlaying
+   other controls" defect this pass exists to remove. `display: contents`
+   on the wrapper makes it transparent to layout so the trigger button and
+   the panel become direct flex items of the SAME .lr-bulk-bar-actions row
+   they already live in; the panel's own flex-basis: 100% then forces it
+   onto its own full-width line below every button (a standard flex-wrap
+   technique — never position: absolute, never a negative margin), and
+   `order` keeps it last regardless of where the trigger sits in DOM
+   order. Same bordered-card styling as .lr-ebay-status-panel, so a
+   listing's blocker text and this control never look like two different
+   UI languages. */
+.lr-bulk-ebay-policy { display: contents; }
+.lr-bulk-ebay-policy-panel { position: static; order: 20; flex-basis: 100%; width: 100%; max-width: 100%; margin-top: 6px; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); box-shadow: none; }
 .lr-bulk-ebay-policy-panel .input { width: 100%; }
 .lr-bulk-ebay-policy-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .lr-bulk-ebay-policy-panel-title { color: var(--lr-text); font-size: 11.5px; font-weight: 700; }

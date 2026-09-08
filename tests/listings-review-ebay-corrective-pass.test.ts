@@ -98,8 +98,19 @@ describe("STRUCTURAL — Defect 1: bulk policy popover close affordances", () =>
     expect(bulkPolicySource).toContain('aria-haspopup="dialog"');
   });
 
-  it("the panel is clamped to the viewport width", () => {
-    expect(cssSource).toContain("max-width: calc(100vw - 24px)");
+  // CORRECTIVE PASS (action-bar rebuild) — REPLACES the old "clamped to
+  // the viewport width" check: that property existed only because the
+  // panel used to be an absolutely-positioned floating overlay that could
+  // otherwise overflow the viewport edge. It is now a normal, full-width
+  // block inside its own flex line (see the "no absolutely positioned
+  // overlay" describe block below), which is inherently bounded by its
+  // container — a viewport-relative clamp no longer applies or is needed.
+  it("the panel is a full-width block, never wider than its own row (width: 100%, max-width: 100%) — no viewport-relative sizing", () => {
+    const idx = cssSource.indexOf(".lr-bulk-ebay-policy-panel {");
+    const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+    expect(rule).toContain("width: 100%");
+    expect(rule).toContain("max-width: 100%");
+    expect(rule).not.toContain("100vw");
   });
 });
 
@@ -157,5 +168,52 @@ describe("STRUCTURAL — no publish-capable eBay operation was introduced by thi
 describe("STRUCTURAL — 'Drafts only — never publishes' wording is untouched by this pass", () => {
   it("still present", () => {
     expect(workspaceSource).toContain("Drafts only — never publishes");
+  });
+});
+
+/**
+ * CORRECTIVE PASS (action-bar rebuild — real-submission audit of a live
+ * screenshot showing the "Set eBay shipping policy" popover as an
+ * absolutely-positioned overlay covering the table row). Genuine pixel-
+ * level non-overlap was verified live this session (fresh dev server,
+ * getBoundingClientRect() on "Clear selection"/"Delete"/the panel at
+ * 1536×864, 1280×720, 768×1024 and 375×812 — no overlap at any of the
+ * four); these structural checks exist to catch a regression in the exact
+ * CSS mechanism that produced that verified result, not to reprove it.
+ */
+describe("STRUCTURAL — action-bar rebuild: no absolutely positioned overlay covering other controls", () => {
+  it("the 'Set eBay shipping policy' panel is no longer position: absolute — it reserves real space in the flex flow (flex-basis: 100%, position: static)", () => {
+    const idx = cssSource.indexOf(".lr-bulk-ebay-policy-panel {");
+    const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+    expect(rule).toContain("position: static");
+    expect(rule).toContain("flex-basis: 100%");
+    expect(rule).not.toContain("position: absolute");
+  });
+
+  it("the panel's wrapper uses display: contents so the trigger and panel are direct flex items of .lr-bulk-bar-actions (the flex-basis: 100% wrap technique requires this)", () => {
+    const idx = cssSource.indexOf(".lr-bulk-ebay-policy {");
+    const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+    expect(rule).toContain("display: contents");
+    expect(rule).not.toContain("position: relative");
+  });
+
+  it("the bulk bar top-aligns its children (flex-start), not center — so 'N selected / Clear selection' stays pinned to the top of the row instead of floating into the middle of a taller wrapped panel", () => {
+    const idx = cssSource.indexOf(".lr-bulk-bar {");
+    const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+    expect(rule).toContain("align-items: flex-start");
+  });
+
+  it("no rule in the bulk-bar/policy-panel action area uses a negative margin", () => {
+    for (const selector of [".lr-bulk-bar {", ".lr-bulk-bar-selection {", ".lr-bulk-bar-actions {", ".lr-bulk-ebay-policy-panel {"]) {
+      const idx = cssSource.indexOf(selector);
+      const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+      expect(rule).not.toMatch(/margin[^:]*:\s*-/);
+    }
+  });
+
+  it("long blocker reason text wraps beneath the controls rather than overflowing (overflow-wrap: anywhere on .lr-ebay-status-panel-reasons li)", () => {
+    const idx = cssSource.indexOf(".lr-ebay-status-panel-reasons li {");
+    const rule = cssSource.slice(idx, cssSource.indexOf("}", idx) + 1);
+    expect(rule).toContain("overflow-wrap: anywhere");
   });
 });

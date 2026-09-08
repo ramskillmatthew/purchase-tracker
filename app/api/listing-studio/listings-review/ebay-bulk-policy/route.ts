@@ -52,7 +52,14 @@ export async function POST(request: Request) {
     for (const draftId of uniqueDraftIds) {
       const ebayDraft = (draftsByProduct.get(draftId) ?? []).find(d => d.marketplace === "EBAY_UK");
       if (!ebayDraft) { skipped.push({ draftId, reason: "No eBay preparation for this listing" }); continue; }
-      if (ebayDraft.ebayOfferId !== null) { skipped.push({ draftId, reason: "An eBay draft already exists for this listing" }); continue; }
+      // CORRECTIVE PASS (legacy-offer/blocker audit) — this MUST check the
+      // genuine, confirmed Seller Hub Feed draft flag, never the retired
+      // Inventory API pipeline's own ebayOfferId. A legacy, unpublished
+      // Inventory API offer (ebayOfferId set, ebayFeedDraftCreatedAt still
+      // null) is historical information only — eBay's own docs say it
+      // can't be edited through Seller Hub, and it must never block a
+      // harmless metadata write like a shipping policy assignment.
+      if (ebayDraft.ebayFeedDraftCreatedAt !== null) { skipped.push({ draftId, reason: "A Seller Hub draft already exists for this listing" }); continue; }
       await patchMarketplaceDraft(user.id, ebayDraft.id, { [column]: ebayPolicyId });
       appliedCount += 1;
     }

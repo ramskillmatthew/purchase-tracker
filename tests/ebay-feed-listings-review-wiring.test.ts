@@ -117,6 +117,25 @@ describe("PHASE 9.30/9.31 — the retired legacy pipeline's own historical label
   it("the succeeded-drafts count (driving the Drafts KPI tab and Open Seller Hub Drafts summary) is computed from the Feed pipeline's own item status, never the legacy offerId", () => {
     expect(workspaceSource).toContain('row.ebayWorkflowStatus === "succeeded"');
   });
+
+  // CORRECTIVE PASS (real-submission audit — the "An eBay draft already
+  // exists" blocker defect) — "eligible to have a policy assigned" is a
+  // DIFFERENT question from "eligible to create a NEW Seller Hub draft"
+  // (eligibleEbayCount, which correctly excludes a listing already in an
+  // active/failed batch — right for Create, wrong for a harmless metadata
+  // write like a shipping policy). It must be its own computation, keyed
+  // only off feedDraftCreatedAt, never off feedBatchState or the legacy
+  // offerId.
+  it("eligibleForPolicyCount is a SEPARATE computation from eligibleEbayCount — keyed only off feedDraftCreatedAt, never feedBatchState or the legacy offerId", () => {
+    expect(workspaceSource).toContain("const eligibleForPolicyCount = useMemo(() => {");
+    const idx = workspaceSource.indexOf("const eligibleForPolicyCount = useMemo(() => {");
+    const block = workspaceSource.slice(idx, idx + 500);
+    expect(block).toContain("row.ebay.feedDraftCreatedAt === null");
+    expect(block).not.toContain("feedBatchState");
+    expect(block).not.toMatch(/offerId/i);
+    expect(workspaceSource).toContain("eligibleCount={eligibleForPolicyCount}");
+    expect(workspaceSource).not.toContain("eligibleCount={eligibleEbayCount}");
+  });
 });
 
 describe("PHASE 9 — the retired legacy PER-ITEM retry is genuinely gone from the UI, never a dead button pointing at a 410 route", () => {

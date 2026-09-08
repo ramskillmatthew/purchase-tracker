@@ -1015,6 +1015,26 @@ export default function ListingsReviewWorkspace() {
     [...ebayEligibilityById.values()].filter(result => result.eligible).length,
   [ebayEligibilityById]);
 
+  // CORRECTIVE PASS (legacy-offer/blocker audit) — "eligible to have a
+  // policy assigned" is a DIFFERENT question from "eligible to create a
+  // NEW Seller Hub draft right now" (eligibleEbayCount above, which
+  // deliberately excludes a listing already in an active/failed batch —
+  // exactly right for Create, since you can't create a second draft for
+  // it). Assigning a shipping policy is harmless metadata that has nothing
+  // to do with batch state, and must not be blocked by it, or by a legacy,
+  // unpublished Inventory API offer (see /ebay-bulk-policy route's own
+  // matching fix) — only by a GENUINELY confirmed Seller Hub draft
+  // already existing (ebay_feed_draft_created_at set), since at that
+  // point the policy belongs to eBay's own copy, not this app's.
+  const eligibleForPolicyCount = useMemo(() => {
+    let count = 0;
+    for (const id of bulkSelectedIds) {
+      const row = listingsById.get(id);
+      if (row?.ebay && row.ebay.feedDraftCreatedAt === null) count += 1;
+    }
+    return count;
+  }, [bulkSelectedIds, listingsById]);
+
   // Every DISTINCT blocking reason across every selected-but-ineligible
   // listing, deduplicated — surfaced next to the button/popover instead of
   // an unexplained "Create 0 Seller Hub drafts" (product requirement).
@@ -2736,7 +2756,7 @@ export default function ListingsReviewWorkspace() {
                 leftover, and never more than ONE eBay primary action. */}
             {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>
               <BulkEbayPolicyControl
-                eligibleCount={eligibleEbayCount}
+                eligibleCount={eligibleForPolicyCount}
                 policies={ebayPolicies}
                 onApply={handleApplyBulkEbayPolicy}
               />
