@@ -37,12 +37,21 @@
       "matches": ["https://www.ebay.co.uk/*"],
       "js": ["ebay-content-script.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.ebay.co.uk/lstng*", "https://www.ebay.co.uk/sl/prelist/*"],
+      "js": ["ebay-drafter-content-script.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": ["shared/messages.js", "shared/validation.js", "shared/vinted-fields.js", "shared/queue-state.js", "shared/form-steps.js", "shared/photo-transfer.js"],
       "matches": ["https://www.vinted.co.uk/*"]
+    },
+    {
+      "resources": ["shared/ebay-messages.js", "shared/ebay-queue-state.js", "shared/ebay-fields.js", "shared/ebay-form-steps.js", "shared/ebay-constants.js"],
+      "matches": ["https://www.ebay.co.uk/*"]
     }
   ],
   "icons": {

@@ -2040,7 +2040,11 @@ describe("REQUIREMENT (Phase 7 action-area redesign): exactly one eBay primary a
 
   it("the eBay action group (policy control, Create, Open Seller Hub Drafts) is gated by workflowMarketplaceView === \"EBAY_UK\"", () => {
     const idx = workspaceSource.indexOf("<BulkEbayPolicyControl");
-    const before = workspaceSource.slice(Math.max(0, idx - 300), idx);
+    // Widened from 300 (eBay extension drafter, Phase 7) — a
+    // "Seller Hub Feed fallback" label now sits between the guard
+    // condition and BulkEbayPolicyControl itself; the guard text is
+    // unchanged, just slightly further away in source.
+    const before = workspaceSource.slice(Math.max(0, idx - 600), idx);
     expect(before).toMatch(/marketplaceToggleOptions\.includes\("EBAY_UK"\) && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>/);
   });
 

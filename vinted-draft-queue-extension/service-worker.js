@@ -17,6 +17,14 @@ import { PANEL_TO_WORKER, CONTENT_TO_WORKER, WORKER_TO_CONTENT } from "./shared/
 import * as QueueState from "./shared/queue-state.js";
 import { validateBatchPayload, isValidPairingCodeShape } from "./shared/validation.js";
 import { htmlToPlainText, isAllowedEbayDescriptionUrl } from "./shared/ebay-description.js";
+// eBay Seller Hub extension drafter — a SEPARATE queue, deliberately never
+// importing/calling into the Vinted functions/state above (see this
+// feature's own "do not let eBay messages enter the Vinted processing
+// path" requirement — proven structurally by
+// tests/ebay-extension-message-separation.test.ts).
+import { EBAY_PANEL_TO_WORKER, EBAY_WORKER_TO_CONTENT, EBAY_CONTENT_TO_WORKER, makeEbayMessage } from "./shared/ebay-messages.js";
+import * as EbayQueueState from "./shared/ebay-queue-state.js";
+import { EBAY_EXTENSION_STALL_TIMEOUT_MS } from "./shared/ebay-constants.js";
 
 const DEFAULT_APP_BASE_URL = "http://localhost:3000";
 const VINTED_URL_PATTERN = "https://www.vinted.co.uk/*";
@@ -1626,6 +1634,219 @@ async function clearCompletedEbayImports() {
   return { state: next };
 }
 
+// ============================================================================
+// eBay Seller Hub extension drafter — a SEPARATE queue (see this file's own
+// top-of-file comment). Storage key `ebayDrafterState`, entirely distinct
+// from Vinted's own `state` key and from the read-only importer's
+// `ebayImportState` key — three independent chrome.storage.local
+// namespaces, never sharing a key, so a bug in one can never corrupt
+// another.
+// ============================================================================
+
+const EBAY_LISTING_FORM_PATTERN = /^https:\/\/www\.ebay\.co\.uk\/lstng(?:[/?#]|$)/;
+const EBAY_PRELIST_PATTERN = /^https:\/\/www\.ebay\.co\.uk\/sl\/prelist(?:[/?#]|$)/;
+function isEbayDrafterTab(tab) { return Boolean(tab?.url) && (EBAY_LISTING_FORM_PATTERN.test(tab.url) || EBAY_PRELIST_PATTERN.test(tab.url)); }
+
+async function getEbayState() {
+  const { ebayDrafterState } = await chrome.storage.local.get("ebayDrafterState");
+  return ebayDrafterState || EbayQueueState.createInitialEbayState();
+}
+async function setEbayState(state) { await chrome.storage.local.set({ ebayDrafterState: state }); }
+async function updateEbayState(updater) {
+  const next = updater(await getEbayState());
+  await setEbayState(next);
+  return next;
+}
+
+async function claimEbayBatch(pairingCode) {
+  if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app." };
+  const { appBaseUrl } = await getSettings();
+  let response;
+  try {
+    response = await fetch(`${appBaseUrl}/api/extension/ebay-batch/claim`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairingCode, extensionId: chrome.runtime.id, extensionVersion: chrome.runtime.getManifest().version }),
+    });
+  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).` }; }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) return { error: body.error || "This code is invalid or has expired." };
+  const next = await updateEbayState(s => EbayQueueState.applyEbayClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: new Date().toISOString() }));
+  await fetchEbayBatchPayload();
+  return { state: next };
+}
+
+async function fetchEbayBatchPayload() {
+  const state = await getEbayState();
+  if (!state.pairing?.batchToken) return { error: "No active batch." };
+  const { appBaseUrl } = await getSettings();
+  let response;
+  try {
+    response = await fetch(`${appBaseUrl}/api/extension/ebay-batch`, { headers: { Authorization: `Bearer ${state.pairing.batchToken}` } });
+  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).` }; }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) return { error: body.error || "Could not load this batch." };
+  const next = await updateEbayState(s => EbayQueueState.applyEbayBatchPayload(s, body, new Date().toISOString()));
+  return { state: next };
+}
+
+async function downloadPhotoForEbayContentScript(itemId, position) {
+  const state = await getEbayState();
+  if (!state.pairing?.batchToken) return { ok: false, reason: "NOT_FOUND: no active eBay batch." };
+  const item = state.batch?.items?.find(i => i.itemId === itemId);
+  if (!item) return { ok: false, reason: `NOT_FOUND: item ${itemId} is not part of the active eBay batch.` };
+  const photo = (item.photos || []).find(p => p.position === position);
+  if (!photo) return { ok: false, reason: `NOT_FOUND: no photo at position ${position} for this item.` };
+
+  const { appBaseUrl } = await getSettings();
+  // Mirrors resolvePhotoUrl's own origin-lock reasoning exactly (see that
+  // function's own extensive comment above) — the eBay batch photo route
+  // lives at a DIFFERENT path (/ebay-batch/photos/...) than Vinted's own,
+  // so an eBay photo path can never be resolved against — or replayed
+  // against — the Vinted route, or vice versa.
+  if (!/^\/api\/extension\/ebay-batch\/photos\/[0-9a-f-]{36}\/(0|[1-9][0-9]*)$/i.test(photo.path)) {
+    return { ok: false, reason: "PHOTO_URL_INVALID: the photo path returned by the app did not match the expected eBay batch route shape." };
+  }
+  let photoUrl;
+  try { photoUrl = new URL(photo.path, `${appBaseUrl}/`).toString(); }
+  catch { return { ok: false, reason: "PHOTO_URL_INVALID: could not resolve the photo path against the configured App URL." }; }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(photoUrl, { headers: { Authorization: `Bearer ${state.pairing.batchToken}` }, signal: controller.signal });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return { ok: false, reason: error?.name === "AbortError" ? `PHOTO_FETCH_TIMEOUT: photo ${position} did not respond within ${FETCH_TIMEOUT_MS / 1000}s.` : `NETWORK: could not download photo ${position} (${error?.name || "Error"}).` };
+  }
+  clearTimeout(timeoutId);
+  if (response.redirected || !response.ok) return { ok: false, reason: `HTTP_${response.status}: could not download photo ${position}.` };
+
+  let buffer;
+  try { buffer = await response.arrayBuffer(); }
+  catch (error) { return { ok: false, reason: `NETWORK: could not read photo ${position} (${error?.name || "Error"}).` }; }
+  if (!buffer.byteLength) return { ok: false, reason: `EMPTY: photo ${position} response body was empty.` };
+  if (buffer.byteLength > MAX_PHOTO_BYTES) return { ok: false, reason: `TOO_LARGE: photo ${position} (${buffer.byteLength} bytes) exceeds the ${MAX_PHOTO_BYTES}-byte limit.` };
+  const mimeType = (response.headers.get("content-type") || "").split(";")[0].trim();
+  if (!ALLOWED_PHOTO_MIME_TYPES.has(mimeType)) return { ok: false, reason: `INVALID_MIME: photo ${position} had content type "${mimeType || "unknown"}".` };
+
+  return { ok: true, position, fileName: photo.fileName, mimeType, base64: arrayBufferToBase64(buffer) };
+}
+
+/**
+ * Phase 8 (duplicate protection) — the ONE gate every dispatch path goes
+ * through. Re-sending an item that is already queued/in-flight/waiting-
+ * for-review FOCUSES the existing tab instead of opening a second one —
+ * "re-sending the same operation focuses/resumes it rather than opening
+ * another form." A genuinely FAILED item requires the explicit Retry
+ * action (EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM), never a plain re-send.
+ */
+async function startEbayItem(itemId) {
+  const state = await getEbayState();
+  const item = state.batch?.items?.find(i => i.itemId === itemId);
+  if (!item) return { error: "This item is not part of the active eBay batch." };
+  if (EbayQueueState.isEbayItemAlreadyActive(state, itemId)) {
+    if (state.batch.ebayTabId) { await chrome.tabs.update(state.batch.ebayTabId, { active: true }).catch(() => {}); }
+    return { state, alreadyActive: true };
+  }
+  await updateEbayState(s => EbayQueueState.applyEbayItemAttemptStarting(s, itemId, nowIso()));
+  dispatchEbayItem(itemId).catch(error => console.warn("eBay drafter: dispatch failed —", error?.message || error));
+  return { state: await getEbayState() };
+}
+
+async function ensureEbayTab() {
+  const state = await getEbayState();
+  if (state.batch?.ebayTabId) {
+    try {
+      const tab = await chrome.tabs.get(state.batch.ebayTabId);
+      if (isEbayDrafterTab(tab)) return tab.id;
+    } catch { /* tab is gone — fall through to opening a fresh one */ }
+  }
+  const tab = await chrome.tabs.create({ url: "https://www.ebay.co.uk/sl/prelist/suggest?sr=shstart", active: true });
+  await new Promise(resolve => {
+    const listener = (tabId, info) => { if (tabId === tab.id && info.status === "complete") { chrome.tabs.onUpdated.removeListener(listener); resolve(); } };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+  await updateEbayState(s => EbayQueueState.applyEbaySelectedTab(s, tab.id));
+  return tab.id;
+}
+
+async function dispatchEbayItem(itemId) {
+  const tabId = await ensureEbayTab();
+  const state = await getEbayState();
+  const item = state.batch?.items?.find(i => i.itemId === itemId);
+  if (!item) return;
+  await updateEbayState(s => EbayQueueState.applyEbayItemStatus(s, itemId, { status: EbayQueueState.EBAY_ITEM_STATUSES.FILLING }, nowIso()));
+  chrome.tabs.sendMessage(tabId, makeEbayMessage(EBAY_WORKER_TO_CONTENT.EBAY_FILL_LISTING, { item }), () => {
+    // A missing-receiver error here (chrome.runtime.lastError) means the
+    // content script wasn't ready yet — the item's own watchdog
+    // (findStalledEbayItem, driven by the 1-minute alarm this queue
+    // shares with Vinted's own tick) will notice no progress was ever
+    // reported and surface a clear, retryable failure, never a silent hang.
+    void chrome.runtime.lastError;
+  });
+}
+
+async function reportEbayItemResult(itemId, status, extra = {}) {
+  const nowIsoValue = nowIso();
+  let next;
+  if (status === "waiting_for_review") next = await updateEbayState(s => EbayQueueState.applyEbayItemWaitingForReview(s, itemId, nowIsoValue));
+  else if (status === "failed") next = await updateEbayState(s => EbayQueueState.applyEbayItemFailed(s, itemId, extra.errorCode ?? null, extra.errorMessage ?? null, nowIsoValue));
+  else next = await updateEbayState(s => EbayQueueState.applyEbayItemStatus(s, itemId, { status, currentStep: extra.currentStep ?? null }, nowIsoValue));
+
+  const { appBaseUrl } = await getSettings();
+  await fetch(`${appBaseUrl}/api/extension/ebay-batch/items/${itemId}/result`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${(await getEbayState()).pairing?.batchToken ?? ""}` },
+    body: JSON.stringify({
+      status, errorCode: extra.errorCode ?? null, errorMessage: extra.errorMessage ?? null,
+      currentStep: extra.currentStep ?? null, detail: extra.detail ?? null,
+      photosRequested: extra.photosRequested ?? null, photosUploaded: extra.photosUploaded ?? null, photosFailed: extra.photosFailed ?? null,
+    }),
+  }).catch(() => {}); // best-effort — the LOCAL queue state above is always the durable source of truth for this extension's own UI; a failed report is caught by the app's own polling instead
+  return next;
+}
+
+async function retryEbayItem(itemId) {
+  const next = await updateEbayState(s => EbayQueueState.applyRetryEbayItem(s, itemId));
+  return { state: next };
+}
+async function cancelEbayItem(itemId) {
+  const next = await updateEbayState(s => EbayQueueState.applyCancelEbayItem(s, itemId));
+  return { state: next };
+}
+async function clearEbayBatch() {
+  const current = await getEbayState();
+  if (current.batch && !EbayQueueState.allEbayItemsTerminal(current.batch.items)) return { error: "Cannot clear a batch that is still in progress." };
+  return { state: await setEbayState(EbayQueueState.createInitialEbayState()) || EbayQueueState.createInitialEbayState() };
+}
+
+async function handleEbayMessage(message, sender) {
+  switch (message?.type) {
+    case EBAY_PANEL_TO_WORKER.EBAY_GET_STATE: return { state: await getEbayState(), settings: await getSettings() };
+    case EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH: return claimEbayBatch(message.pairingCode);
+    case EBAY_PANEL_TO_WORKER.EBAY_START_ITEM: return startEbayItem(message.itemId);
+    case EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM: return retryEbayItem(message.itemId);
+    case EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM: return cancelEbayItem(message.itemId);
+    case EBAY_PANEL_TO_WORKER.EBAY_CLEAR_BATCH: return clearEbayBatch();
+    case EBAY_CONTENT_TO_WORKER.EBAY_ITEM_STEP_PROGRESS: return { state: await reportEbayItemResult(message.itemId, message.status, message) };
+    case EBAY_CONTENT_TO_WORKER.EBAY_ITEM_RESULT: return { state: await reportEbayItemResult(message.itemId, message.ok ? "waiting_for_review" : "failed", message) };
+    case EBAY_CONTENT_TO_WORKER.EBAY_REQUEST_PHOTO: return downloadPhotoForEbayContentScript(message.itemId, message.position);
+    default: return { error: "Unknown eBay message type." };
+  }
+}
+
+/** Watchdog + restart recovery for the eBay queue — driven by the SAME 1-minute alarm Vinted's own triggerTick already uses (see the alarm listener at the bottom of this file), never a second timer. */
+async function triggerEbayTick() {
+  const stalled = EbayQueueState.findStalledEbayItem(await getEbayState(), nowIso(), EBAY_EXTENSION_STALL_TIMEOUT_MS);
+  if (stalled) {
+    await reportEbayItemResult(stalled.itemId, "failed", { errorCode: "STALLED", errorMessage: "No progress was reported for this item within the expected time — it may have been interrupted by a browser restart or a page navigation." });
+  }
+}
+
+async function bootResumeEbay() {
+  await updateEbayState(s => EbayQueueState.resumeEbayAfterRestart(s));
+}
+
 // ---- Message handling -----------------------------------------------------------
 
 async function handleMessage(message, sender) {
@@ -1715,6 +1936,13 @@ async function handleMessage(message, sender) {
  * returning `true` synchronously (done below) so the async response above
  * is never dropped.
  */
+// Mirrors this file's own dispatch-once-and-only-once pattern below,
+// scoped to eBay message types (see this file's own top comment on why
+// this is a completely separate listener function, never a branch inside
+// handleMessage) — proven structurally by
+// tests/ebay-extension-message-separation.test.ts.
+const EBAY_MESSAGE_TYPES = new Set([...Object.values(EBAY_PANEL_TO_WORKER), ...Object.values(EBAY_CONTENT_TO_WORKER)]);
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   let responded = false;
   const respond = payload => {
@@ -1725,7 +1953,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.warn("Vinted Draft Queue: sendResponse failed —", error?.message || error);
     }
   };
-  handleMessage(message, sender).then(respond).catch(error => respond({ error: String(error?.message || error) }));
+  const handler = EBAY_MESSAGE_TYPES.has(message?.type) ? handleEbayMessage : handleMessage;
+  handler(message, sender).then(respond).catch(error => respond({ error: String(error?.message || error) }));
   return true; // keep the message channel open for the async response above
 });
 
@@ -1759,6 +1988,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => {});
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
   bootResume();
+  bootResumeEbay();
 });
-chrome.runtime.onStartup.addListener(() => { bootResume(); });
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === ALARM_NAME) triggerTick(); });
+chrome.runtime.onStartup.addListener(() => { bootResume(); bootResumeEbay(); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === ALARM_NAME) { triggerTick(); triggerEbayTick(); } });

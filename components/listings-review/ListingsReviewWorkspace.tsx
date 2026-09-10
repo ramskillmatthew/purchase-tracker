@@ -406,6 +406,16 @@ export default function ListingsReviewWorkspace() {
   const [sendToExtensionRunning, setSendToExtensionRunning] = useState(false);
   const [sendToExtensionError, setSendToExtensionError] = useState("");
   const [sendToExtensionRejected, setSendToExtensionRejected] = useState<RejectedExportListing[]>([]);
+  // eBay Seller Hub extension drafter — deliberately MUCH simpler state
+  // than the Vinted box/pairing-code infrastructure above: this milestone
+  // only ever sends ONE listing at a time (no multi-batch box grid needed
+  // yet), and stops before any save, so there is no in-app polling of
+  // "how many drafts completed" to track either — the pairing code is
+  // shown once, and the extension's own side panel owns everything after
+  // that.
+  const [sendToEbayExtensionRunning, setSendToEbayExtensionRunning] = useState(false);
+  const [sendToEbayExtensionError, setSendToEbayExtensionError] = useState("");
+  const [ebayExtensionPairingCode, setEbayExtensionPairingCode] = useState<string | null>(null);
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -1676,6 +1686,37 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
+  /**
+   * eBay Seller Hub extension drafter — the app-side half of "Send to eBay
+   * extension" (Phase 7): creates a short-lived, single-use eBay extension
+   * batch and shows the resulting pairing code. Everything after this —
+   * opening Seller Hub, filling the form, uploading photos — happens
+   * entirely in the extension's own side panel, in the user's normal
+   * browser profile, once they enter the code there. This function never
+   * opens a tab, never injects a content script, and never contacts eBay
+   * itself — it only talks to this app's own API. REQUIREMENT: never
+   * blocked by the legacy Inventory API offer (the create-batch route's
+   * own readiness check never reads ebay_offer_id at all).
+   */
+  async function handleSendToEbayExtension(marketplaceDraftId: string) {
+    if (sendToEbayExtensionRunning) return;
+    setSendToEbayExtensionRunning(true);
+    setSendToEbayExtensionError("");
+    setEbayExtensionPairingCode(null);
+    try {
+      const response = await fetch("/api/listing-studio/ebay-extension-batches", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ marketplaceDraftIds: [marketplaceDraftId] }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setSendToEbayExtensionError(body.error || "Could not send this listing to the eBay extension."); return; }
+      setEbayExtensionPairingCode(body.pairingCode);
+    } catch {
+      setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
+    } finally {
+      setSendToEbayExtensionRunning(false);
+    }
+  }
+
   // Multi-batch support — requires the exact immutable batch id; cancels
   // ONLY that one batch. Leaves every other batch's state completely
   // untouched — there is no "cancel the user's current batch" concept
@@ -2748,6 +2789,27 @@ export default function ListingsReviewWorkspace() {
             >
               {sendToExtensionRunning ? "Preparing batch…" : `Send ${bulkCount} to extension`}
             </button>}
+            {/* eBay Seller Hub extension drafter (Phase 7) — the PRIMARY
+                eBay action: never the ambiguous Vinted wording "Send to
+                extension", never shown in Vinted mode, never more than one
+                listing (this milestone's own scope). The pre-existing
+                Seller Hub Feed group is relabelled "Seller Hub Feed
+                fallback" below it — kept, never deleted, never the primary
+                workflow any more. */}
+            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount === 1 && (() => {
+              const onlyId = [...bulkSelectedIds][0];
+              const row = listingsById.get(onlyId);
+              if (!row?.ebay) return null;
+              return <button
+                type="button"
+                className="button"
+                disabled={sendToEbayExtensionRunning}
+                title="Opens eBay Seller Hub in the Chrome extension, fills in the listing form and uploads photos — stops before Save draft, never publishes anything"
+                onClick={() => handleSendToEbayExtension(row.ebay!.marketplaceDraftId)}
+              >
+                {sendToEbayExtensionRunning ? "Preparing…" : "Send to eBay extension"}
+              </button>;
+            })()}
             {/* Stage 6 (eBay draft batches) — sibling eBay actions, same
                 design language, entirely independent of the Vinted button
                 above (creating eBay drafts never touches Vinted state, and
@@ -2755,6 +2817,10 @@ export default function ListingsReviewWorkspace() {
                 active selected workflow is eBay — never a Vinted-mode
                 leftover, and never more than ONE eBay primary action. */}
             {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>
+              {/* REQUIREMENT (Phase 7): the Feed workflow is now clearly
+                  labelled as a secondary/legacy area, never the primary
+                  eBay action — "Send to eBay extension" above is that. */}
+              <span className="lr-feed-fallback-label">Seller Hub Feed fallback</span>
               <BulkEbayPolicyControl
                 eligibleCount={eligibleForPolicyCount}
                 policies={ebayPolicies}
@@ -2780,6 +2846,25 @@ export default function ListingsReviewWorkspace() {
             </>}
           </div>
         </div>}
+        {/* eBay Seller Hub extension drafter (Phase 7) — shown once, right
+            after a successful "Send to eBay extension" click. Everything
+            after this point (opening Seller Hub, filling the form,
+            uploading photos) happens in the extension's own side panel —
+            this app never drives that itself. */}
+        {ebayExtensionPairingCode && (
+          <div className="lr-ebay-status-panel" role="status">
+            <p className="lr-ebay-status-panel-title">Ready for the eBay extension</p>
+            <p className="lr-ebay-status-panel-body">
+              Open the extension&apos;s side panel, select the eBay tab, and enter this code: <strong>{ebayExtensionPairingCode}</strong>
+            </p>
+          </div>
+        )}
+        {sendToEbayExtensionError && (
+          <div className="lr-ebay-status-panel" role="status">
+            <p className="lr-ebay-status-panel-title">Could not send to the eBay extension</p>
+            <p className="lr-ebay-status-panel-body">{sendToEbayExtensionError}</p>
+          </div>
+        )}
         {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && !ebayBatchingAvailable && (
           <div className="lr-ebay-status-panel" role="status">
             <p className="lr-ebay-status-panel-title">Seller Hub draft database upgrade required</p>

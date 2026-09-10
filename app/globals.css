@@ -1906,6 +1906,13 @@ h1 { font-size: 1.5rem; font-weight: 720; }
    now only ever holds a small, fixed set of short action buttons, so
    wrapping here is a rare safety net, not the normal case. */
 .lr-bulk-bar-actions { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+/* eBay Seller Hub extension drafter (Phase 7) — marks the pre-existing
+   Seller Hub Feed controls as a secondary/legacy area, never implying
+   they're the primary eBay action any more (that's "Send to eBay
+   extension"). flex-basis: 100% + order pushes it onto its own line
+   directly above the Feed button group, mirroring the same non-absolute
+   flex-wrap technique .lr-bulk-ebay-policy-panel already uses. */
+.lr-feed-fallback-label { flex-basis: 100%; margin-top: 4px; color: var(--lr-muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .lr-bulk-bar-actions .button { background: var(--lr-violet); border-color: var(--lr-violet); }
 .lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { min-height: 36px; padding: 0 14px; font-size: 11px; white-space: nowrap; }
 
