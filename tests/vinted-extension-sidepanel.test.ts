@@ -157,7 +157,7 @@ describe("side panel — 'Check saved draft again' for a SAVE_DRAFT_UNCONFIRMED 
 
     expect(checkButton.disabled).toBe(true);
     expect(checkButton.textContent).toBe("Checking…");
-    expect(sentTypes.filter(t => ![PANEL_TO_WORKER.GET_STATE, "EBAY_GET_IMPORT_STATE"].includes(t))).toEqual([PANEL_TO_WORKER.CHECK_SAVED_DRAFT]);
+    expect(sentTypes.filter(t => ![PANEL_TO_WORKER.GET_STATE, "EBAY_GET_IMPORT_STATE", "EBAY_GET_STATE"].includes(t))).toEqual([PANEL_TO_WORKER.CHECK_SAVED_DRAFT]);
 
     resolveCheck({ found: false });
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -757,7 +757,11 @@ describe("Option 4 redesign — safeguards and scope protection", () => {
   });
 
   it("REGRESSION: the redesign never introduces a new message type — PANEL_TO_WORKER usage in sidepanel.js is a subset of the existing shared contract", () => {
-    const usedTypes = Array.from(sidepanelJs.matchAll(/PANEL_TO_WORKER\.([A-Z_]+)/g)).map(m => m[1]);
+    // (?<!EBAY_) — the eBay Seller Hub extension drafter's own, deliberately
+    // SEPARATE EBAY_PANEL_TO_WORKER contract (see shared/ebay-messages.js)
+    // is out of scope for this check; matching bare "PANEL_TO_WORKER." would
+    // otherwise also match "EBAY_PANEL_TO_WORKER." as a substring.
+    const usedTypes = Array.from(sidepanelJs.matchAll(/(?<!EBAY_)PANEL_TO_WORKER\.([A-Z_]+)/g)).map(m => m[1]);
     const knownTypes = Object.keys(PANEL_TO_WORKER);
     for (const used of usedTypes) expect(knownTypes).toContain(used);
   });

@@ -17,6 +17,11 @@ import {
   computeProgressSummary, ITEM_STATUSES, isVintedTabLostPause, VINTED_TAB_LOST_MESSAGE,
   SAVE_DRAFT_UNCONFIRMED_ERROR_CODE, isManualReloadPause, MANUAL_RELOAD_WARNING_MESSAGE,
 } from "./shared/queue-state.js";
+// eBay Seller Hub extension drafter — a SEPARATE view/state, never sharing
+// a message type or a chrome.storage.local key with the Vinted queue above
+// (see shared/ebay-messages.js's own top comment).
+import { EBAY_PANEL_TO_WORKER } from "./shared/ebay-messages.js";
+import { EBAY_ITEM_STATUSES } from "./shared/ebay-queue-state.js";
 
 const IN_FLIGHT_STATUSES = new Set([ITEM_STATUSES.PREPARING, ITEM_STATUSES.FILLING, ITEM_STATUSES.SAVING]);
 // Follow-up correction (native browser reload-confirmation bug) — mirrors
@@ -29,6 +34,20 @@ const TERMINAL_ITEM_STATUSES = new Set([ITEM_STATUSES.COMPLETED, ITEM_STATUSES.F
 const els = {
   vintedTab: document.getElementById("vinted-tab"),
   ebayTab: document.getElementById("ebay-tab"),
+  ebayDrafterTab: document.getElementById("ebay-drafter-tab"),
+  ebayDrafterView: document.getElementById("ebay-drafter-view"),
+  ebayDrafterPairingPanel: document.getElementById("ebay-drafter-pairing-panel"),
+  ebayDrafterPairingCode: document.getElementById("ebay-drafter-pairing-code"),
+  ebayDrafterPairingError: document.getElementById("ebay-drafter-pairing-error"),
+  ebayDrafterClaimButton: document.getElementById("ebay-drafter-claim-button"),
+  ebayDrafterEmptyState: document.getElementById("ebay-drafter-empty-state"),
+  ebayDrafterItemCard: document.getElementById("ebay-drafter-item-card"),
+  ebayDrafterItemTitle: document.getElementById("ebay-drafter-item-title"),
+  ebayDrafterItemStatus: document.getElementById("ebay-drafter-item-status"),
+  ebayDrafterItemError: document.getElementById("ebay-drafter-item-error"),
+  ebayDrafterStart: document.getElementById("ebay-drafter-start"),
+  ebayDrafterRetry: document.getElementById("ebay-drafter-retry"),
+  ebayDrafterCancel: document.getElementById("ebay-drafter-cancel"),
   ebayView: document.getElementById("ebay-view"),
   ebayReadCurrent: document.getElementById("ebay-read-current"),
   ebayReadError: document.getElementById("ebay-read-error"),
@@ -732,14 +751,99 @@ els.retryManualReload.addEventListener("click", async () => {
 
 function selectAssistantTab(tab) {
   const ebay = tab === "ebay";
-  document.body.classList.toggle("ebay-mode", ebay);
+  const ebayDrafter = tab === "ebay-drafter";
+  document.body.classList.toggle("ebay-mode", ebay || ebayDrafter);
   els.ebayView.hidden = !ebay;
-  els.vintedTab.classList.toggle("is-active", !ebay);
+  els.ebayDrafterView.hidden = !ebayDrafter;
+  els.vintedTab.classList.toggle("is-active", !ebay && !ebayDrafter);
   els.ebayTab.classList.toggle("is-active", ebay);
-  els.vintedTab.setAttribute("aria-selected", String(!ebay));
+  els.ebayDrafterTab.classList.toggle("is-active", ebayDrafter);
+  els.vintedTab.setAttribute("aria-selected", String(!ebay && !ebayDrafter));
   els.ebayTab.setAttribute("aria-selected", String(ebay));
-  chrome.storage.local.set({ assistantTab: ebay ? "ebay" : "vinted" });
+  els.ebayDrafterTab.setAttribute("aria-selected", String(ebayDrafter));
+  chrome.storage.local.set({ assistantTab: ebayDrafter ? "ebay-drafter" : ebay ? "ebay" : "vinted" });
 }
+
+// ---- eBay Seller Hub extension drafter — side panel wiring (Phase 7/10) --
+
+const EBAY_DRAFTER_STATUS_LABELS = {
+  [EBAY_ITEM_STATUSES.QUEUED]: "Queued for eBay extension",
+  [EBAY_ITEM_STATUSES.PREPARING]: "Opening Seller Hub",
+  [EBAY_ITEM_STATUSES.FILLING]: "Filling details",
+  [EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW]: "Waiting for review",
+  [EBAY_ITEM_STATUSES.FAILED]: "Failed",
+  [EBAY_ITEM_STATUSES.CANCELLED]: "Cancelled",
+};
+
+function ebayDrafterStatusLabel(item) {
+  if (!item) return "Ready for eBay";
+  if (item.status === EBAY_ITEM_STATUSES.FILLING && item.currentStep === "UPLOAD_PHOTOS" && item.photosRequested) {
+    return `Uploading photos ${item.photosUploaded ?? 0}/${item.photosRequested}`;
+  }
+  return EBAY_DRAFTER_STATUS_LABELS[item.status] ?? item.status;
+}
+
+function renderEbayDrafterState(state = { pairing: null, batch: null }) {
+  const paired = Boolean(state.pairing?.batchToken);
+  els.ebayDrafterPairingPanel.hidden = paired;
+  const item = state.batch?.items?.[0] ?? null;
+  els.ebayDrafterEmptyState.hidden = !paired || Boolean(item);
+  els.ebayDrafterItemCard.hidden = !paired || !item;
+  if (!item) return;
+
+  els.ebayDrafterItemTitle.textContent = item.title || "eBay listing";
+  els.ebayDrafterItemStatus.textContent = ebayDrafterStatusLabel(item);
+  const failed = item.status === EBAY_ITEM_STATUSES.FAILED;
+  els.ebayDrafterItemError.hidden = !failed;
+  els.ebayDrafterItemError.textContent = failed ? (item.errorMessage || "This listing could not be filled.") : "";
+
+  const inFlight = item.status === EBAY_ITEM_STATUSES.PREPARING || item.status === EBAY_ITEM_STATUSES.FILLING;
+  els.ebayDrafterStart.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
+  els.ebayDrafterStart.disabled = inFlight;
+  els.ebayDrafterRetry.hidden = !failed;
+  els.ebayDrafterCancel.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
+}
+
+els.ebayDrafterTab.addEventListener("click", () => selectAssistantTab("ebay-drafter"));
+
+els.ebayDrafterClaimButton.addEventListener("click", async () => {
+  const pairingCode = els.ebayDrafterPairingCode.value.trim();
+  els.ebayDrafterPairingError.hidden = true;
+  if (!pairingCode) return;
+  els.ebayDrafterClaimButton.disabled = true;
+  try {
+    const result = await send(EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, { pairingCode });
+    if (result.error) { els.ebayDrafterPairingError.textContent = result.error; els.ebayDrafterPairingError.hidden = false; return; }
+    els.ebayDrafterPairingCode.value = "";
+    if (result.state) renderEbayDrafterState(result.state);
+  } finally {
+    els.ebayDrafterClaimButton.disabled = false;
+  }
+});
+
+els.ebayDrafterStart.addEventListener("click", async () => {
+  const state = (await send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)).state;
+  const item = state?.batch?.items?.[0];
+  if (!item) return;
+  const result = await send(EBAY_PANEL_TO_WORKER.EBAY_START_ITEM, { itemId: item.itemId });
+  if (result.state) renderEbayDrafterState(result.state);
+});
+
+els.ebayDrafterRetry.addEventListener("click", async () => {
+  const state = (await send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)).state;
+  const item = state?.batch?.items?.[0];
+  if (!item) return;
+  const result = await send(EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM, { itemId: item.itemId });
+  if (result.state) renderEbayDrafterState(result.state);
+});
+
+els.ebayDrafterCancel.addEventListener("click", async () => {
+  const state = (await send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)).state;
+  const item = state?.batch?.items?.[0];
+  if (!item) return;
+  const result = await send(EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM, { itemId: item.itemId });
+  if (result.state) renderEbayDrafterState(result.state);
+});
 
 const EBAY_STATUS_LABELS = { waiting: "Waiting", imported: "Imported", failed: "Failed" };
 function renderEbayImportState(state = {}) {
@@ -815,9 +919,12 @@ els.ebayReadCurrent.addEventListener("click", async () => {
 chrome.storage.onChanged.addListener(changes => {
   if (changes.state) render(changes.state.newValue ?? { pairing: null, batch: null });
   if (changes.ebayImportState) renderEbayImportState(changes.ebayImportState.newValue);
+  if (changes.ebayDrafterState) renderEbayDrafterState(changes.ebayDrafterState.newValue);
 });
 
-chrome.storage.local.get("assistantTab").then(({ assistantTab }) => selectAssistantTab(assistantTab === "ebay" ? "ebay" : "vinted"));
+chrome.storage.local.get("assistantTab").then(({ assistantTab }) =>
+  selectAssistantTab(assistantTab === "ebay-drafter" ? "ebay-drafter" : assistantTab === "ebay" ? "ebay" : "vinted"));
 send("EBAY_GET_IMPORT_STATE").then(result => renderEbayImportState(result.state));
+send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE).then(result => renderEbayDrafterState(result.state));
 loadSettings();
 refresh();

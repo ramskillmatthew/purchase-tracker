@@ -54,4 +54,13 @@ describe("eBay/Vinted message type separation", () => {
     expect(source).toContain('chrome.storage.local.get("state")');
     expect(source).toContain('chrome.storage.local.get("ebayImportState")');
   });
+
+  it("STRUCTURAL: the side panel has its own 'eBay Drafter' tab, entirely separate from the Vinted and eBay-importer tabs", () => {
+    const html = read("sidepanel.html");
+    expect(html).toContain('id="ebay-drafter-tab"');
+    expect(html).toContain('id="ebay-drafter-view"');
+    const js = read("sidepanel.js");
+    expect(js).toContain('EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH');
+    expect(js).toContain('EBAY_PANEL_TO_WORKER.EBAY_START_ITEM');
+  });
 });
