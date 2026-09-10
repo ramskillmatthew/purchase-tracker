@@ -1,6 +1,6 @@
 import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
 import { verifyBatchToken, extractBearerToken, BatchTokenError } from "@/lib/listing-studio/extension-batch-tokens";
-import { ebayExtensionItemResultRequestSchema, isTerminalEbayExtensionItemStatus, type EbayExtensionBatchItemStatus } from "@/lib/listing-studio/ebay-extension-batch-schema";
+import { ebayExtensionItemResultRequestSchema, isTerminalEbayExtensionItemStatus, isEbayExtensionBatchClosingItemStatus, type EbayExtensionBatchItemStatus } from "@/lib/listing-studio/ebay-extension-batch-schema";
 import { extensionCorsPreflight, extensionCorsJson, extensionSafeApiError } from "@/lib/listing-studio/extension-cors";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 
@@ -73,8 +73,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
       method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify(patchBody),
     });
 
+    // CORRECTIVE PASS (safety review, Defect 2's application-layer half) —
+    // deliberately isEbayExtensionBatchClosingItemStatus here, NEVER
+    // isTerminalEbayExtensionItemStatus (which includes
+    // 'waiting_for_review'). Marking the batch 'completed' the moment an
+    // item merely reaches waiting_for_review would flip it out of the
+    // create-batch RPC's own `status not in ('completed', ...)` conflict
+    // filter — silently reopening the duplicate-send hole this migration's
+    // database-level unique index and conflict check both exist to close.
+    // A batch only auto-closes once every item is genuinely failed/
+    // cancelled; a waiting_for_review item keeps its batch open (and
+    // therefore keeps blocking a second send) until the operation is
+    // explicitly cancelled or (a later milestone) confirmed saved.
     const allItems = await supabaseRequestAll<{ status: EbayExtensionBatchItemStatus }>(`ebay_extension_batch_items?batch_id=eq.${batchId}&select=status`);
-    if (allItems.length > 0 && allItems.every(i => isTerminalEbayExtensionItemStatus(i.status))) {
+    if (allItems.length > 0 && allItems.every(i => isEbayExtensionBatchClosingItemStatus(i.status))) {
       await supabaseRequest(`ebay_extension_batches?id=eq.${batchId}&status=in.(pending_claim,claimed,in_progress)`, {
         method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "completed", completed_at: nowIso }),
       }).catch(() => {});

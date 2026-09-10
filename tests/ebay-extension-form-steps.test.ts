@@ -2,8 +2,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { JSDOM } from "jsdom";
 import {
-  mapConditionToOptionText, stepSetTitle, stepSetPrice, stepSetQuantity, stepSetSku,
+  stepSetTitle, stepSetPrice, stepSetQuantity, stepSetSku,
   stepVerifyPopulatedFields, inspectEbayPageState, setNativeValue,
+  stepWaitForManualCondition, MANUAL_CONDITION_TIMEOUT_MS,
 } from "../vinted-draft-queue-extension/shared/ebay-form-steps.js";
 
 function makeFormFixture() {
@@ -27,15 +28,42 @@ const ITEM = {
   itemId: "item-1", title: "On Running Cloud 5", description: "desc", pricePence: 3500, quantity: 1, sku: "1644",
 };
 
-describe("eBay drafter form steps — REQUIREMENT: condition mapping never invents a fake UK Seller Hub tier", () => {
-  it("maps this app's condition vocabulary onto the REAL, live-verified Seller Hub option text", () => {
-    expect(mapConditionToOptionText("Used – Very Good")).toBe("Pre-owned - Good");
-    expect(mapConditionToOptionText("New with tags")).toBe("New with box");
-    expect(mapConditionToOptionText("Used – Like New")).toBe("Pre-owned - Excellent");
+describe("eBay drafter form steps — REQUIREMENT (condition-safety review): condition is NEVER auto-selected — always waits for a human", () => {
+  it("no automatic condition-mapping function exists anywhere in this file", () => {
+    const source = require("node:fs").readFileSync("vinted-draft-queue-extension/shared/ebay-form-steps.js", "utf8") as string;
+    expect(source).not.toMatch(/function\s+mapConditionToOptionText/);
+    expect(source).not.toContain("CONDITION_TO_OPTION_TEXT");
   });
 
-  it("falls back to the SAFE, closest real option for anything unmapped — never a guessed/invented tier", () => {
-    expect(mapConditionToOptionText("Some future condition string")).toBe("Pre-owned - Good");
+  it("stepWaitForManualCondition never clicks a condition option — it only detects the Select Condition page and waits for the human to reach the real form themselves", () => {
+    const source = require("node:fs").readFileSync("vinted-draft-queue-extension/shared/ebay-form-steps.js", "utf8") as string;
+    const fnStart = source.indexOf("export async function stepWaitForManualCondition");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}\n", fnStart));
+    expect(fnBody).not.toContain("safeClick");
+    expect(fnBody).not.toMatch(/condition-button|Pre-owned|New with/);
+  });
+
+  it("REQUIREMENT: on the real 'Select condition' page, it reports a clear message telling the human to choose themselves, then waits (never fails immediately)", async () => {
+    const dom = new JSDOM(`<h1>Select condition</h1>`, { url: "https://www.ebay.co.uk/sl/prelist/identify?caty=95672" });
+    const doc = dom.window.document;
+    const location = dom.window.location;
+    const reports: Array<[string, unknown]> = [];
+    // Resolve the wait quickly by flipping the URL to the real form shortly after — mirrors a human clicking Continue.
+    setTimeout(() => { dom.reconfigure({ url: "https://www.ebay.co.uk/lstng?draftId=1&mode=AddItem" }); }, 50);
+    const result = await stepWaitForManualCondition({ doc, location }, (status: string, extra: unknown) => reports.push([status, extra]));
+    expect(result.ok).toBe(true);
+    expect(reports.some(([, extra]) => (extra as { currentStep?: string })?.currentStep === "SELECT_CONDITION_MANUAL")).toBe(true);
+    expect(reports.some(([, extra]) => /select the closest matching condition yourself/i.test((extra as { detail?: string })?.detail || ""))).toBe(true);
+  });
+
+  it("times out (fails, never guesses) if no human ever selects a condition — using a genuinely human-scale timeout, not a form-filling one", () => {
+    expect(MANUAL_CONDITION_TIMEOUT_MS).toBeGreaterThanOrEqual(5 * 60 * 1000);
+  });
+
+  it("REQUIREMENT: skips straight through (a safe no-op) if already on the real form — never re-shows the manual-selection message for an already-selected condition", async () => {
+    const dom = new JSDOM(``, { url: "https://www.ebay.co.uk/lstng?draftId=1&mode=AddItem" });
+    const result = await stepWaitForManualCondition({ doc: dom.window.document, location: dom.window.location });
+    expect(result).toEqual({ ok: true, alreadySelected: true });
   });
 });
 

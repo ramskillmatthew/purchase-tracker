@@ -124,8 +124,27 @@ export const EBAY_EXTENSION_BATCH_ITEM_STATUSES = ["queued", "preparing", "filli
 export type EbayExtensionBatchItemStatus = typeof EBAY_EXTENSION_BATCH_ITEM_STATUSES[number];
 
 const TERMINAL_ITEM_STATUSES: readonly EbayExtensionBatchItemStatus[] = ["waiting_for_review", "failed", "cancelled"];
+/** Answers "has this ITEM stopped making automated progress" — used for UI/step-detail purposes (clearing a stale "Uploading photo…" line once nothing more will happen automatically). Deliberately NOT the same question as isEbayExtensionBatchClosingStatus below — see that function's own comment for why conflating the two was a real bug. */
 export function isTerminalEbayExtensionItemStatus(status: EbayExtensionBatchItemStatus): boolean {
   return (TERMINAL_ITEM_STATUSES as string[]).includes(status);
+}
+
+// CORRECTIVE PASS (safety review — Defect 2's application-layer half) — a
+// SEPARATE, narrower question from isTerminalEbayExtensionItemStatus above:
+// "has this item's protection against a duplicate send genuinely ended".
+// The original code used isTerminalEbayExtensionItemStatus (which includes
+// 'waiting_for_review') to decide when to mark the PARENT BATCH
+// 'completed' — but a batch marked 'completed' falls out of the create-
+// batch RPC's own `b.status not in ('completed', ...)` conflict filter,
+// which would have silently reopened the exact duplicate-send hole the
+// database-level unique index and the RPC's own conflict check both exist
+// to close. Only 'failed' and 'cancelled' genuinely end an item's
+// protection — 'waiting_for_review' means a real, populated Seller Hub tab
+// is still open and must keep blocking a second send until the operation
+// is explicitly cancelled or (a later milestone) confirmed saved.
+const BATCH_CLOSING_ITEM_STATUSES: readonly EbayExtensionBatchItemStatus[] = ["failed", "cancelled"];
+export function isEbayExtensionBatchClosingItemStatus(status: EbayExtensionBatchItemStatus): boolean {
+  return (BATCH_CLOSING_ITEM_STATUSES as string[]).includes(status);
 }
 
 export const ebayExtensionItemResultRequestSchema = z.object({

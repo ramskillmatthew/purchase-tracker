@@ -48,7 +48,7 @@ export function applyEbayClaim(state, { batchId, batchToken, expiresAt, claimedA
 // from the app.
 const QUEUE_CONTROLLED_FIELDS = [
   "status", "attemptCount", "errorCode", "errorMessage",
-  "startedAt", "completedAt", "lastProgressAt", "currentStep", "lastCompletedStep",
+  "startedAt", "completedAt", "lastProgressAt", "currentStep", "lastCompletedStep", "stepDetail",
   "photosRequested", "photosUploaded", "photosFailed",
 ];
 
@@ -73,7 +73,7 @@ export function applyEbayBatchPayload(state, payload, nowIso) {
             status: EBAY_ITEM_STATUSES.QUEUED, attemptCount: 0,
             errorCode: null, errorMessage: null,
             startedAt: null, completedAt: null, lastProgressAt: null,
-            currentStep: null, lastCompletedStep: null,
+            currentStep: null, lastCompletedStep: null, stepDetail: null,
             photosRequested: null, photosUploaded: null, photosFailed: null,
           };
     });
@@ -120,7 +120,7 @@ export function applyEbayItemAttemptStarting(state, itemId, nowIso) {
     status: EBAY_ITEM_STATUSES.PREPARING,
     attemptCount: item.attemptCount + 1,
     startedAt: item.startedAt ?? nowIso,
-    errorCode: null, errorMessage: null, currentStep: null, lastCompletedStep: null,
+    errorCode: null, errorMessage: null, currentStep: null, lastCompletedStep: null, stepDetail: null,
     photosRequested: null, photosUploaded: null, photosFailed: null,
   }, nowIso);
 }
@@ -133,14 +133,14 @@ export function applyEbayItemAttemptStarting(state, itemId, nowIso) {
  */
 export function applyEbayItemWaitingForReview(state, itemId, nowIso) {
   return applyEbayItemStatus(state, itemId, {
-    status: EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW, completedAt: nowIso, errorCode: null, errorMessage: null, currentStep: null,
+    status: EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW, completedAt: nowIso, errorCode: null, errorMessage: null, currentStep: null, stepDetail: null,
   }, nowIso);
 }
 
 export function applyEbayItemFailed(state, itemId, errorCode, errorMessage, nowIso, lastCompletedStep) {
   const item = state.batch?.items?.find(i => i.itemId === itemId);
   return applyEbayItemStatus(state, itemId, {
-    status: EBAY_ITEM_STATUSES.FAILED, errorCode, errorMessage, completedAt: nowIso, currentStep: null,
+    status: EBAY_ITEM_STATUSES.FAILED, errorCode, errorMessage, completedAt: nowIso, currentStep: null, stepDetail: null,
     lastCompletedStep: lastCompletedStep !== undefined ? lastCompletedStep : (item?.lastCompletedStep ?? null),
   }, nowIso);
 }

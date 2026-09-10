@@ -116,22 +116,43 @@ export async function stepSelectCategorySuggestion({ doc, location }, categoryNa
   return { ok: true, alreadySelected: false };
 }
 
-export async function stepSelectCondition({ doc, location }, conditionOptionText) {
+// CORRECTIVE PASS (condition-safety review) — this extension NEVER selects
+// a condition automatically, for any item, ever. Live evidence (category
+// 95672 "Trainers"): eBay UK Seller Hub offers exactly six condition
+// options for this category — "New with box", "New without box", "New
+// with defects", "Pre-owned - Excellent" ("Like new, no visible flaws or
+// signs of use"), "Pre-owned - Good" ("Gently used with moderate signs of
+// wear and/or visible flaws"), "Pre-owned - Fair" ("Significantly visible
+// flaws, heavy signs of use..."). There is no "Very Good" tier. Any
+// automatic mapping from this app's own condition vocabulary onto one of
+// these six is a genuine judgement call with a real misrepresentation
+// risk in one direction (mapping "Very Good" to "Excellent" would claim
+// "no visible flaws" for an item that may have some) — exactly the
+// "silently upgrade the item's condition" this review explicitly
+// prohibits. Rather than pick a side, this step stops and requires the
+// human to choose. The Select Condition page is reachable ONLY as a gate
+// before the real Complete-your-listing form even exists (eBay's own
+// wizard architecture — condition is not a re-editable field on the final
+// form), so this step cannot skip ahead and fill in the rest of the form
+// first; it waits, with a long, human-scale timeout (never a false
+// "stalled" failure just because a person hasn't looked at their screen
+// yet), for the human to make the selection and click Continue themselves
+// — detected the same honest way every other stage detects arrival at the
+// real form: isOnSellerHubListingForm(location) becoming true.
+export const MANUAL_CONDITION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — a human-scale wait, not a form-filling one
+
+export async function stepWaitForManualCondition({ doc, location }, report = () => {}) {
   if (isOnSellerHubListingForm(location)) return { ok: true, alreadySelected: true };
   const heading = await waitFor(() => doc.querySelector("h1, h2")?.textContent?.trim() === "Select condition" ? true : null);
   if (!heading) return { ok: false, reason: buildFieldTimeoutReason({ step: "SELECT_CONDITION", field: "condition", cause: "the Select condition page did not appear" }) };
-  const options = findByRole(doc.body, "button", { name: conditionOptionText });
-  const unique = requireUnique(options, `condition option "${conditionOptionText}"`);
-  if (!unique.ok) return { ok: false, reason: unique.reason };
-  safeClick(unique.element, "SELECT_CONDITION");
-  const continueBtn = await waitFor(() => {
-    const matches = findByRole(doc.body, "button", { name: "Continue" });
-    return matches.find(el => !el.disabled) ?? null;
+  report("filling", {
+    currentStep: "SELECT_CONDITION_MANUAL",
+    detail: "This app has no 'Very Good' equivalent verified for eBay's Seller Hub — select the closest matching condition yourself, then click Continue.",
   });
-  if (!continueBtn) return { ok: false, reason: buildFieldTimeoutReason({ step: "SELECT_CONDITION", field: "condition", cause: "Continue never became enabled" }) };
-  safeClick(continueBtn, "SELECT_CONDITION");
-  const arrived = await waitFor(() => isOnSellerHubListingForm(location), { timeoutMs: STEP_TIMEOUT_MS * 2 });
-  if (!arrived) return { ok: false, reason: buildFieldTimeoutReason({ step: "SELECT_CONDITION", field: "condition", cause: "the Complete your listing form did not appear" }) };
+  const arrived = await waitFor(() => isOnSellerHubListingForm(location), { timeoutMs: MANUAL_CONDITION_TIMEOUT_MS, intervalMs: 500 });
+  if (!arrived) {
+    return { ok: false, reason: buildFieldTimeoutReason({ step: "SELECT_CONDITION", field: "condition", cause: "no condition was selected within the allowed time — reopen and retry when ready" }) };
+  }
   return { ok: true, alreadySelected: false };
 }
 
@@ -386,29 +407,6 @@ export function detectCaptchaOrVerification(doc) {
 
 // ---- Orchestrator ----------------------------------------------------
 
-const CONDITION_TO_OPTION_TEXT = {
-  // Maps this app's OWN condition vocabulary (lib/listing-studio/ebay-feed/
-  // feed-condition.js's own ConditionEnum-adjacent strings) to the REAL
-  // Seller Hub UI option text VERIFIED live this session. eBay's UK
-  // Seller Hub does not expose a "Very Good" tier as its own wording —
-  // "Pre-owned - Good" ("Gently used with moderate signs of wear") is the
-  // closest genuine match, a deliberate mapping decision, not a verified
-  // 1:1 label match. Falls through to "Pre-owned - Good" for anything not
-  // explicitly listed, rather than ever guessing a NEW/box-condition tier
-  // for a used item.
-  "New with tags": "New with box",
-  "New without tags": "New without box",
-  "New with defects": "New with defects",
-  "Used – Like New": "Pre-owned - Excellent",
-  "Used – Excellent": "Pre-owned - Excellent",
-  "Used – Very Good": "Pre-owned - Good",
-  "Used – Good": "Pre-owned - Good",
-  "Used – Acceptable": "Pre-owned - Fair",
-};
-export function mapConditionToOptionText(conditionValue) {
-  return CONDITION_TO_OPTION_TEXT[conditionValue] ?? "Pre-owned - Good";
-}
-
 /** Read-only page-state check — used by the service worker to decide whether a tab needs a fresh navigation before dispatching an item, without ever resetting anything itself (mirrors form-steps.js's own inspectPageState/PAGE_STATE convention). */
 export function inspectEbayPageState(doc, location) {
   if (detectCaptchaOrVerification(doc)) return "captcha";
@@ -445,8 +443,10 @@ export async function runEbayItem(item, report, deps) {
     const category = await stepSelectCategorySuggestion(deps, item.categoryName);
     if (!category.ok) return { ok: false, errorCode: "SELECT_CATEGORY", errorMessage: category.reason };
 
-    report("preparing", { currentStep: "SELECT_CONDITION" });
-    const condition = await stepSelectCondition(deps, mapConditionToOptionText(item.conditionValue));
+    // CORRECTIVE PASS (condition-safety review) — never auto-selected; see
+    // stepWaitForManualCondition's own extensive comment for why.
+    report("preparing", { currentStep: "SELECT_CONDITION_MANUAL" });
+    const condition = await stepWaitForManualCondition(deps, report);
     if (!condition.ok) return { ok: false, errorCode: "SELECT_CONDITION", errorMessage: condition.reason };
   }
 

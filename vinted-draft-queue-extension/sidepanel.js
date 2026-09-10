@@ -780,6 +780,15 @@ function ebayDrafterStatusLabel(item) {
   if (item.status === EBAY_ITEM_STATUSES.FILLING && item.currentStep === "UPLOAD_PHOTOS" && item.photosRequested) {
     return `Uploading photos ${item.photosUploaded ?? 0}/${item.photosRequested}`;
   }
+  // CORRECTIVE PASS (condition-safety review) — condition is never
+  // auto-selected; this surfaces the extension's own clear "please choose
+  // yourself" message (see shared/ebay-form-steps.js's
+  // stepWaitForManualCondition) instead of the generic "Opening Seller
+  // Hub" label, which would leave the human with no idea why nothing is
+  // happening.
+  if (item.currentStep === "SELECT_CONDITION_MANUAL") {
+    return item.stepDetail || "Select the item's condition yourself in the eBay tab, then click Continue";
+  }
   return EBAY_DRAFTER_STATUS_LABELS[item.status] ?? item.status;
 }
 

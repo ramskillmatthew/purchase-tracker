@@ -1792,7 +1792,7 @@ async function reportEbayItemResult(itemId, status, extra = {}) {
   let next;
   if (status === "waiting_for_review") next = await updateEbayState(s => EbayQueueState.applyEbayItemWaitingForReview(s, itemId, nowIsoValue));
   else if (status === "failed") next = await updateEbayState(s => EbayQueueState.applyEbayItemFailed(s, itemId, extra.errorCode ?? null, extra.errorMessage ?? null, nowIsoValue));
-  else next = await updateEbayState(s => EbayQueueState.applyEbayItemStatus(s, itemId, { status, currentStep: extra.currentStep ?? null }, nowIsoValue));
+  else next = await updateEbayState(s => EbayQueueState.applyEbayItemStatus(s, itemId, { status, currentStep: extra.currentStep ?? null, stepDetail: extra.detail ?? null, photosRequested: extra.photosRequested ?? null, photosUploaded: extra.photosUploaded ?? null, photosFailed: extra.photosFailed ?? null }, nowIsoValue));
 
   const { appBaseUrl } = await getSettings();
   await fetch(`${appBaseUrl}/api/extension/ebay-batch/items/${itemId}/result`, {
