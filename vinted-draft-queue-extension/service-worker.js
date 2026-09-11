@@ -1658,8 +1658,32 @@ async function updateEbayState(updater) {
   return next;
 }
 
+// CORRECTIVE PASS (pairing failure review) — REQUIREMENT: "the API must
+// distinguish user-correctable invalid/expired codes from internal
+// failures... must not be displayed as 'invalid or expired'." The claim
+// route (app/api/extension/ebay-batch/claim/route.ts) deliberately returns
+// the SAME generic message for every wrong-code/expired/already-claimed
+// case — status 400, always — a genuine, pre-existing anti-oracle security
+// design (see that route's own doc comment) that must NOT be weakened by
+// this pass. But that route's ONLY use of 400 is that deliberate generic
+// case: every genuine internal failure (rate limit, auth, an uncaught
+// exception) goes through safeApiError with a DIFFERENT status (429, 401,
+// 500). The real bug fixed here was purely CLIENT-side: this function used
+// to treat every non-OK response identically
+// (`body.error || "invalid or expired"`), so a response whose JSON body
+// didn't parse, or simply didn't carry the app's own more specific message,
+// silently fell back to the SAME misleading "invalid or expired" text even
+// for a genuine server/network problem. Branching on the STATUS CODE (not
+// guessing from message text) is what actually distinguishes them, without
+// touching the route's own deliberately-undifferentiated 400 response.
+function classifyEbayClaimFailure(response, body) {
+  if (response.status === 400) return { kind: "code_rejected", message: body.error || "This code is invalid or has expired." };
+  if (response.status === 429) return { kind: "server_failure", message: body.error || "Too many attempts — wait a moment and try again." };
+  return { kind: "server_failure", message: body.error || `The app reported a problem (status ${response.status}). Try again in a moment.` };
+}
+
 async function claimEbayBatch(pairingCode) {
-  if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app." };
+  if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app.", errorKind: "code_rejected" };
   const { appBaseUrl } = await getSettings();
   let response;
   try {
@@ -1667,9 +1691,9 @@ async function claimEbayBatch(pairingCode) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairingCode, extensionId: chrome.runtime.id, extensionVersion: chrome.runtime.getManifest().version }),
     });
-  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).` }; }
+  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).`, errorKind: "connection_failure" }; }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) return { error: body.error || "This code is invalid or has expired." };
+  if (!response.ok) { const failure = classifyEbayClaimFailure(response, body); return { error: failure.message, errorKind: failure.kind }; }
   const next = await updateEbayState(s => EbayQueueState.applyEbayClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: new Date().toISOString() }));
   await fetchEbayBatchPayload();
   return { state: next };

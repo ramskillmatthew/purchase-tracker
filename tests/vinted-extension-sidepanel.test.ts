@@ -1005,3 +1005,186 @@ describe("blank eBay Drafter panel review — visible build/version marker", () 
     expect((document.getElementById("build-version") as HTMLElement).textContent).toBe(`v${manifest.version}`);
   });
 });
+
+// ============================================================================
+// CORRECTIVE PASS (pairing failure review) — Phase 4 (narrow side-panel
+// overflow) and Phase 5 (visible/truthful pairing states). JSDOM has no
+// real box-model/layout engine, so "renders correctly at 320/360/400/520px"
+// cannot be literally measured here — these are STRUCTURAL assertions over
+// the real sidepanel.css text, the same disclosed-limitation approach this
+// project uses everywhere a real browser layout can't be executed. Genuine
+// visual confirmation at those widths requires the user's own real Chrome
+// side panel.
+// ============================================================================
+
+describe("pairing failure review — narrow side-panel CSS (Phase 4)", () => {
+  it("REGRESSION: the permanent safety banner WRAPS instead of being ellipsis-clipped — the exact reported bug ('Fills Seller Hub, stops before Save draft — never publishes' cut off)", () => {
+    const ruleIdx = sidepanelCss.indexOf(".safety-banner span:last-child");
+    const rule = sidepanelCss.slice(ruleIdx, sidepanelCss.indexOf("}", ruleIdx) + 1);
+    expect(rule).not.toContain("white-space: nowrap");
+    expect(rule).not.toContain("text-overflow: ellipsis");
+    expect(rule).toContain("overflow-wrap: anywhere");
+  });
+
+  it("REGRESSION: the header's brand name has min-width:0 — without it a flex item's default min-width:auto refuses to shrink below its own text, silently defeating text-overflow:ellipsis and overflowing the row (now crowded further by the build-version badge)", () => {
+    const ruleIdx = sidepanelCss.indexOf(".brand-name {");
+    const rule = sidepanelCss.slice(ruleIdx, sidepanelCss.indexOf("}", ruleIdx) + 1);
+    expect(rule).toContain("min-width: 0");
+  });
+
+  it("REGRESSION: the three-way tab switcher uses a three-column grid with minmax(0, 1fr) tracks — the exact reported imbalance (a leftover two-column grid from before the eBay Drafter tab existed, wrapping the third tab onto its own half-width row)", () => {
+    const ruleIdx = sidepanelCss.indexOf(".assistant-tabs {");
+    const rule = sidepanelCss.slice(ruleIdx, sidepanelCss.indexOf("}", ruleIdx) + 1);
+    expect(rule).toContain("grid-template-columns: repeat(3, minmax(0, 1fr))");
+    expect(rule).not.toContain("1fr 1fr");
+  });
+
+  it("REGRESSION: pairing instructions and panel titles are defensively wrap-safe (max-width:100%, overflow-wrap:anywhere) — the exact reported bug ('Enter the code shown after clicking…' cut off)", () => {
+    for (const selector of [".panel-subtitle {", ".panel-title {", ".panel-title-sm {", ".error-text {"]) {
+      const ruleIdx = sidepanelCss.indexOf(selector);
+      expect(ruleIdx, selector).toBeGreaterThan(-1);
+      const rule = sidepanelCss.slice(ruleIdx, sidepanelCss.indexOf("}", ruleIdx) + 1);
+      expect(rule, selector).toContain("max-width: 100%");
+      expect(rule, selector).toContain("overflow-wrap: anywhere");
+    }
+  });
+
+  it("every grid layout in the file uses minmax(0, ...) tracks, never a bare 1fr that could force its track wider than its content allows to shrink", () => {
+    // Strip /* ... */ comments first — this file's own explanatory prose
+    // (documenting the OLD, now-fixed rule) literally contains the string
+    // `grid-template-columns: 1fr 1fr` as a quoted example, which must not
+    // false-positive against the real, live declarations below it.
+    const withoutComments = sidepanelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    const bareFrTracks = withoutComments.match(/grid-template-columns:\s*(?:repeat\(\d+,\s*)?1fr(?:\s+1fr)*/g) ?? [];
+    expect(bareFrTracks).toEqual([]);
+  });
+
+  it("no horizontal scrollbar is ever introduced as the 'normal' solution — overflow-x:hidden is a defensive backstop only, not the primary fix (the primary fix is the wrapping/shrinking rules above)", () => {
+    expect(sidepanelCss).toMatch(/html,\s*body\s*\{\s*overflow-x:\s*hidden;?\s*\}/);
+  });
+});
+
+describe("pairing failure review — visible, truthful pairing states (Phase 5)", () => {
+  it("REQUIREMENT (entering code / connecting): while a claim request is in flight, the button reads 'Connecting…', both the button and the code input are disabled, and no premature error shows", async () => {
+    let resolveClaim!: (value: unknown) => void;
+    const claimPromise = new Promise(resolve => { resolveClaim = resolve; });
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) return claimPromise;
+      return {};
+    }));
+
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "ABCD2345";
+    button.click();
+    await Promise.resolve();
+
+    expect(button.disabled).toBe(true);
+    expect(input.disabled).toBe(true);
+    expect(button.textContent).toBe("Connecting…");
+    expect((document.getElementById("ebay-drafter-pairing-error") as HTMLElement).hidden).toBe(true);
+
+    resolveClaim({ error: "This code is invalid or has expired.", errorKind: "code_rejected" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+
+  it("REQUIREMENT (invalid/expired code — code_rejected): shows the danger-toned message, preserves the entered code (never clears it on a recoverable error), and the button reverts to 'Connect extension' (retyping, not retrying, is the fix)", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) return { error: "This code is invalid or has expired.", errorKind: "code_rejected" };
+      return {};
+    }));
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "WRONGCODE";
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const error = document.getElementById("ebay-drafter-pairing-error") as HTMLElement;
+    expect(error.hidden).toBe(false);
+    expect(error.textContent).toBe("This code is invalid or has expired.");
+    expect(error.classList.contains("tone-warning")).toBe(false);
+    expect(input.value).toBe("WRONGCODE"); // never cleared on error
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Connect extension");
+  });
+
+  it("REQUIREMENT (connection/server failure): shows a WARNING-toned (not danger-toned) message, distinguishable from a rejected code, preserves the entered code, and the button becomes 'Try again' — the clearly-labelled retry action for a transport/server failure", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) return { error: "Could not reach the app (TypeError).", errorKind: "connection_failure" };
+      return {};
+    }));
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "ABCD2345";
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const error = document.getElementById("ebay-drafter-pairing-error") as HTMLElement;
+    expect(error.hidden).toBe(false);
+    expect(error.classList.contains("tone-warning")).toBe(true);
+    expect(input.value).toBe("ABCD2345"); // never cleared — the code was never the problem
+    expect(button.textContent).toBe("Try again");
+  });
+
+  it("REQUIREMENT (server_failure is styled the same recoverable way as connection_failure — both are 'retry', not 'retype')", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) return { error: "The app reported a problem (status 500). Try again in a moment.", errorKind: "server_failure" };
+      return {};
+    }));
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "ABCD2345";
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect((document.getElementById("ebay-drafter-pairing-error") as HTMLElement).classList.contains("tone-warning")).toBe(true);
+    expect(button.textContent).toBe("Try again");
+  });
+
+  it("a successful claim clears the code, clears any prior error, and re-enables the button/input", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) return { state: pairedEbayDrafterState() };
+      return {};
+    }));
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "ABCD2345";
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(input.value).toBe("");
+    expect(button.disabled).toBe(false);
+    expect(input.disabled).toBe(false);
+    expect(button.textContent).toBe("Connect extension");
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+
+  it("REQUIREMENT: retrying after a transport failure does not corrupt anything visible — a second, successful attempt still reaches the normal connected state", async () => {
+    let attempt = 0;
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: ebayDrafterState() };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH) {
+        attempt += 1;
+        return attempt === 1 ? { error: "Could not reach the app.", errorKind: "connection_failure" } : { state: pairedEbayDrafterState() };
+      }
+      return {};
+    }));
+    const input = document.getElementById("ebay-drafter-pairing-code") as HTMLInputElement;
+    const button = document.getElementById("ebay-drafter-claim-button") as HTMLButtonElement;
+    input.value = "ABCD2345";
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(button.textContent).toBe("Try again");
+
+    button.click(); // the code is still in the input — this IS the retry action
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(attempt).toBe(2);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+});

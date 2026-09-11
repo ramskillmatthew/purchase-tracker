@@ -899,18 +899,47 @@ els.ebayDrafterTab.addEventListener("click", () => selectAssistantTab("ebay-draf
 
 els.ebayDrafterErrorRetry.addEventListener("click", () => initEbayDrafterState());
 
+// CORRECTIVE PASS (pairing failure review) — REQUIREMENT: the pairing
+// control must always show one explicit state (entering a code /
+// connecting / a rejected code / a connection failure / a server failure),
+// never guess from raw message text. Reads the errorKind
+// claimEbayBatch/service-worker.js now classifies (by HTTP status, not by
+// parsing message text — see that function's own comment), and reflects
+// it as a distinct, labelled style so "your code was wrong" and "the app
+// had a problem" are never visually confused. The entered code is NEVER
+// cleared on any error path (only on genuine success) — a recoverable
+// failure must never make the user retype it — and the button becomes
+// "Try again" (not a fresh, unlabelled "Connect extension") specifically
+// after a connection/server failure, since that IS the retry action.
 els.ebayDrafterClaimButton.addEventListener("click", async () => {
   const pairingCode = els.ebayDrafterPairingCode.value.trim();
   els.ebayDrafterPairingError.hidden = true;
+  els.ebayDrafterPairingError.classList.remove("tone-danger", "tone-warning");
   if (!pairingCode) return;
   els.ebayDrafterClaimButton.disabled = true;
+  els.ebayDrafterPairingCode.disabled = true;
+  els.ebayDrafterClaimButton.textContent = "Connecting…";
   try {
     const result = await send(EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, { pairingCode });
-    if (result.error) { els.ebayDrafterPairingError.textContent = result.error; els.ebayDrafterPairingError.hidden = false; return; }
+    if (result.error) {
+      els.ebayDrafterPairingError.textContent = result.error;
+      els.ebayDrafterPairingError.hidden = false;
+      // "code_rejected" (the deliberate, undifferentiated wrong/expired/
+      // already-claimed bucket — see service-worker.js's own comment on
+      // why that stays merged) vs "connection_failure"/"server_failure" —
+      // a genuinely different situation, styled and labelled differently
+      // so the user knows whether retyping or just retrying is the fix.
+      const isTransportOrServerFailure = result.errorKind === "connection_failure" || result.errorKind === "server_failure";
+      els.ebayDrafterPairingError.classList.add(isTransportOrServerFailure ? "tone-warning" : "tone-danger");
+      els.ebayDrafterClaimButton.textContent = isTransportOrServerFailure ? "Try again" : "Connect extension";
+      return;
+    }
     els.ebayDrafterPairingCode.value = "";
+    els.ebayDrafterClaimButton.textContent = "Connect extension";
     if (result.state) renderEbayDrafterState(result.state);
   } finally {
     els.ebayDrafterClaimButton.disabled = false;
+    els.ebayDrafterPairingCode.disabled = false;
   }
 });
 

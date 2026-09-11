@@ -132,7 +132,14 @@ button, input { font: inherit; color: inherit; }
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
 .brand-mark.is-connected { background: var(--primary-soft); color: var(--primary-strong); border-color: color-mix(in srgb, var(--primary) 40%, var(--line-strong)); }
-.brand-name { margin: 0; overflow: hidden; font-size: 15px; font-weight: 750; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+/* CORRECTIVE PASS (narrow side-panel review) — min-width: 0 is REQUIRED
+   here: without it a flex item's default min-width:auto refuses to shrink
+   below its own text's natural width, so text-overflow:ellipsis silently
+   never engages and the whole header row overflows instead. flex: 1 1
+   auto lets the name take the remaining space (and shrink first) so the
+   fixed-width badges beside it (brand-mark, build-version, connection
+   badge, settings icon) are never squeezed themselves. */
+.brand-name { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; font-size: 15px; font-weight: 750; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
 /* CORRECTIVE PASS (blank eBay Drafter panel review) — the always-visible build marker (see sidepanel.html's own comment). */
 .build-version-badge { flex: 0 0 auto; white-space: nowrap; }
 
@@ -173,24 +180,36 @@ button, input { font: inherit; color: inherit; }
 .icon-button svg, .brand-mark svg { width: 17px; height: 17px; }
 
 /* ---------------------------------------------------------------------
- * Safety banner — one line, permanent, never repeated elsewhere.
+ * Safety banner — permanent, never repeated elsewhere. CORRECTIVE PASS
+ * (narrow side-panel review) — this used to force its text onto one line
+ * and ELLIPSIZE it (overflow:hidden + text-overflow:ellipsis +
+ * white-space:nowrap), silently clipping the reassurance text at narrow
+ * widths ("Fills Seller Hub, stops before Save draft — never publishes").
+ * A safety statement being silently truncated is exactly the wrong thing
+ * to clip. It now wraps onto as many lines as it needs instead — align-
+ * items switches from `center` to `flex-start` so the icon stays pinned
+ * to the first line's cap-height rather than vertically centering against
+ * a now-taller, multi-line block.
  * ------------------------------------------------------------------- */
 .safety-banner {
   display: inline-flex;
   align-self: flex-start;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 14px;
   border: 1px solid color-mix(in srgb, var(--safe) 35%, var(--line));
-  border-radius: var(--radius-pill);
+  /* A full pill radius only reads correctly on a single line — now that
+     this can wrap to 2-3 lines at narrow widths, a modest rounded
+     rectangle looks right at any line count. */
+  border-radius: var(--radius-lg);
   background: var(--safe-soft);
   color: var(--safe);
   font-size: 12px;
   font-weight: 650;
   max-width: 100%;
 }
-.safety-banner .safety-icon { width: 15px; height: 15px; flex: 0 0 auto; }
-.safety-banner span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.safety-banner .safety-icon { width: 15px; height: 15px; margin-top: 1px; flex: 0 0 auto; }
+.safety-banner span:last-child { min-width: 0; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------------
  * Cards
@@ -202,9 +221,13 @@ button, input { font: inherit; color: inherit; }
   background: var(--surface);
 }
 .panel-label { margin: 0 0 var(--space-3); color: var(--muted); font-size: 12.5px; font-weight: 650; }
-.panel-title { margin: 0 0 4px; font-size: 17px; font-weight: 750; letter-spacing: -.01em; }
-.panel-title-sm { margin: 0; font-size: 14px; font-weight: 700; }
-.panel-subtitle { margin: 0 0 var(--space-4); color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.panel-title { margin: 0 0 4px; max-width: 100%; overflow-wrap: anywhere; font-size: 17px; font-weight: 750; letter-spacing: -.01em; }
+.panel-title-sm { margin: 0; max-width: 100%; overflow-wrap: anywhere; font-size: 14px; font-weight: 700; }
+/* CORRECTIVE PASS (narrow side-panel review) — wraps by default already
+   (no white-space:nowrap here), but this is the exact class the reported
+   clipped sentence ("Enter the code shown after clicking…") uses — made
+   explicit and defensive rather than relying on the browser default alone. */
+.panel-subtitle { margin: 0 0 var(--space-4); max-width: 100%; overflow-wrap: anywhere; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .muted-text { color: var(--muted); font-size: 12px; }
 
 /* App URL row. */
@@ -287,7 +310,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 .code-input::placeholder { color: var(--subtle); font-weight: 700; }
 .code-input:focus-visible { outline: none; border-color: var(--primary); box-shadow: var(--shadow-glow-primary); }
-.error-text { margin: 0 0 var(--space-3); padding: 8px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger); font-size: 12px; font-weight: 600; }
+.error-text { margin: 0 0 var(--space-3); max-width: 100%; overflow-wrap: anywhere; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger); font-size: 12px; font-weight: 600; }
+/* CORRECTIVE PASS (pairing failure review) — a REJECTED code (the
+   deliberate, undifferentiated wrong/expired/already-claimed bucket)
+   stays the default danger red; a CONNECTION/SERVER failure (a genuinely
+   different situation — retrying, not retyping, is the fix) uses the
+   warning tone instead, so the two are never visually confused. */
+.error-text.tone-warning { background: var(--warning-soft); color: var(--warning); }
 
 .reassurance-list { display: flex; flex-direction: column; gap: var(--space-3); margin: var(--space-4) 0 0; padding: 0; list-style: none; }
 .reassurance-list li { display: flex; align-items: center; gap: var(--space-3); }
@@ -366,8 +395,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .progress-percent-row { display: flex; justify-content: flex-end; margin-top: 6px; }
 .progress-percent { color: var(--muted); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-2); margin-top: var(--space-4); }
-.stat-grid:has(#stat-box-failed:not([hidden])) { grid-template-columns: repeat(3, 1fr); }
+.stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-4); }
+.stat-grid:has(#stat-box-failed:not([hidden])) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .stat-box {
   display: flex;
   flex-direction: column;
@@ -598,8 +627,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 @container (max-width: 380px) {
   .panel { padding-left: var(--space-3); padding-right: var(--space-3); }
   .panel-card, .empty-state { padding: var(--space-3); }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: var(--space-2); }
-  .stat-grid:has(#stat-box-failed:not([hidden])) { grid-template-columns: repeat(2, 1fr); }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+  .stat-grid:has(#stat-box-failed:not([hidden])) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .queue-table-header, .queue-item { grid-template-columns: 16px minmax(0, 1fr) minmax(64px, auto) 20px; gap: 6px; padding-left: var(--space-3); padding-right: var(--space-3); }
   .queue-table-header { font-size: 9.5px; }
   .brand-name { font-size: 14px; }
@@ -616,10 +645,21 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 /* Never allow horizontal scrolling regardless of width. */
 html, body { overflow-x: hidden; }
 /* Listing Assistant tool switcher. The original Vinted UI remains the
-   default view; eBay is an additive surface with no shared queue controls. */
+   default view; eBay is an additive surface with no shared queue controls.
+   CORRECTIVE PASS (narrow side-panel review) — this was still
+   `grid-template-columns: 1fr 1fr`, a fixed TWO-column track left over
+   from before the eBay Drafter tab existed: with three tab buttons and
+   only two explicit columns, the third ("eBay Drafter") wrapped onto its
+   own row, occupying only half the width — visibly lopsided, not the
+   "legible and balanced" three-way switcher this is meant to be.
+   `minmax(0, 1fr)` (not bare `1fr`) is required on each track for the
+   same reason `min-width: 0` is required on a flex item: a grid item's
+   own default min-width is `auto` (its content's natural width), which
+   can force a track wider than its fair 1fr share and overflow the row —
+   `minmax(0, ...)` explicitly allows each tab to shrink to fit. */
 .assistant-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   padding: 4px;
   margin: 4px 0 18px;
   border: 1px solid var(--border, #2b3040);
@@ -628,13 +668,26 @@ html, body { overflow-x: hidden; }
 }
 
 .assistant-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
   min-height: 44px;
+  padding: 4px 6px;
   border: 0;
   border-radius: 9px;
   background: transparent;
   color: #9299ad;
   font: inherit;
   font-weight: 700;
+  text-align: center;
+  /* Three real English labels ("Vinted Drafts", "eBay Importer", "eBay
+     Drafter") in three even tracks genuinely cannot all stay on one text
+     line at ~320px without shrinking below a readable size — wrapping the
+     LABEL onto two lines here is the correct trade-off, never a smaller
+     font. */
+  white-space: normal;
+  line-height: 1.2;
   cursor: pointer;
 }
 
@@ -669,7 +722,7 @@ body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view):n
 .ebay-queue-actions .button-sm { min-height: 46px; padding-inline: 14px; }
 .ebay-queue-progress { display: grid; gap: 12px; }
 .ebay-queue-list { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
-.ebay-queue-list li { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid #292e3d; }
+.ebay-queue-list li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid #292e3d; }
 .ebay-queue-list .queue-dot { width: 8px; height: 8px; border-radius: 50%; background: #7c6cf2; }
 .ebay-queue-list li.is-imported .queue-dot { background: #26dc86; }
 .ebay-queue-list li.is-failed .queue-dot { background: #ff526c; }
@@ -681,7 +734,7 @@ body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view):n
 .ebay-preview-heading { display: flex; gap: 12px; align-items: flex-start; }
 .ebay-preview-heading .status-dot { flex: none; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: #26dc86; }
 .ebay-preview-heading h2 { margin: 4px 0 0; color: #fff; font-size: 18px; line-height: 1.35; }
-.ebay-preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0; }
+.ebay-preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .ebay-preview-grid div { padding: 12px; border: 1px solid #2a3040; border-radius: 10px; background: #11141d; }
 .ebay-preview-grid dt { color: #818aa2; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .ebay-preview-grid dd { margin: 5px 0 0; color: #fff; font-weight: 700; overflow-wrap: anywhere; }
