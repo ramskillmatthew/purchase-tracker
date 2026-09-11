@@ -133,6 +133,8 @@ button, input { font: inherit; color: inherit; }
 }
 .brand-mark.is-connected { background: var(--primary-soft); color: var(--primary-strong); border-color: color-mix(in srgb, var(--primary) 40%, var(--line-strong)); }
 .brand-name { margin: 0; overflow: hidden; font-size: 15px; font-weight: 750; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+/* CORRECTIVE PASS (blank eBay Drafter panel review) — the always-visible build marker (see sidepanel.html's own comment). */
+.build-version-badge { flex: 0 0 auto; white-space: nowrap; }
 
 .header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
 .connection-badge {
@@ -637,7 +639,16 @@ html, body { overflow-x: hidden; }
 }
 
 .assistant-tab.is-active { background: #5849b8; color: #fff; }
-body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view) { display: none !important; }
+/* CORRECTIVE PASS (blank eBay Drafter panel review) — ROOT CAUSE of the
+   first real extension test's blank eBay Drafter tab. This rule predates
+   the eBay Drafter view (#ebay-drafter-view, added later) and only ever
+   excluded the eBay IMPORTER view (#ebay-view) from being force-hidden
+   while body.ebay-mode is set — but selectAssistantTab() sets ebay-mode
+   for EITHER tab (`ebay || ebayDrafter`). Selecting "eBay Drafter" added
+   ebay-mode, and this rule then hid #ebay-drafter-view itself with
+   `!important`, overriding its own correctly-cleared `hidden` attribute —
+   a pure CSS bug, no JavaScript exception required to reproduce it. */
+body.ebay-mode .panel > :not(.app-header):not(.assistant-tabs):not(#ebay-view):not(#ebay-drafter-view) { display: none !important; }
 .ebay-view { display: grid; gap: 18px; }
 .ebay-view[hidden] { display: none; }
 .ebay-safety { margin: 0; width: max-content; max-width: 100%; }

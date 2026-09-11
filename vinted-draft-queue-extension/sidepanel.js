@@ -36,6 +36,10 @@ const els = {
   ebayTab: document.getElementById("ebay-tab"),
   ebayDrafterTab: document.getElementById("ebay-drafter-tab"),
   ebayDrafterView: document.getElementById("ebay-drafter-view"),
+  ebayDrafterLoadingState: document.getElementById("ebay-drafter-loading-state"),
+  ebayDrafterErrorState: document.getElementById("ebay-drafter-error-state"),
+  ebayDrafterErrorMessage: document.getElementById("ebay-drafter-error-message"),
+  ebayDrafterErrorRetry: document.getElementById("ebay-drafter-error-retry"),
   ebayDrafterPairingPanel: document.getElementById("ebay-drafter-pairing-panel"),
   ebayDrafterPairingCode: document.getElementById("ebay-drafter-pairing-code"),
   ebayDrafterPairingError: document.getElementById("ebay-drafter-pairing-error"),
@@ -65,6 +69,7 @@ const els = {
   ebayClearCompleted: document.getElementById("ebay-clear-completed"),
   ebayQueueError: document.getElementById("ebay-queue-error"),
   brandMark: document.getElementById("brand-mark"),
+  buildVersion: document.getElementById("build-version"),
   connectionBadge: document.getElementById("connection-badge"),
   connectionBadgeLabel: document.getElementById("connection-badge-label"),
   settingsToggle: document.getElementById("settings-toggle"),
@@ -130,6 +135,15 @@ const els = {
   cancelButton: document.getElementById("cancel-button"),
   clearButton: document.getElementById("clear-button"),
 };
+
+// CORRECTIVE PASS (blank eBay Drafter panel review) — set synchronously,
+// before any async/message-passing code runs. chrome.runtime.getManifest()
+// is always available in an extension page and cannot fail the way
+// chrome.runtime.sendMessage can (no service-worker round trip involved),
+// so this line succeeding or failing is itself a genuine diagnostic signal
+// distinct from every other state below: if the panel ever shows "Loading
+// build…" past this point, this script did not finish executing at all.
+els.buildVersion.textContent = `v${chrome.runtime.getManifest().version}`;
 
 function send(type, payload = {}) {
   return chrome.runtime.sendMessage({ type, ...payload });
@@ -792,40 +806,98 @@ function ebayDrafterStatusLabel(item) {
   return EBAY_DRAFTER_STATUS_LABELS[item.status] ?? item.status;
 }
 
+// CORRECTIVE PASS (blank eBay Drafter panel review) — REQUIRED UI BEHAVIOUR:
+// this tab must always show loading, a real pairing-or-batch state, or a
+// specific visible error — never a blank area. showEbayDrafterError is the
+// ONE place that puts the panel into its error state, always clearing
+// every OTHER state section first so nothing stale is ever left showing
+// alongside it.
+function showEbayDrafterError(message) {
+  els.ebayDrafterLoadingState.hidden = true;
+  els.ebayDrafterPairingPanel.hidden = true;
+  els.ebayDrafterEmptyState.hidden = true;
+  els.ebayDrafterItemCard.hidden = true;
+  els.ebayDrafterErrorMessage.textContent = message;
+  els.ebayDrafterErrorState.hidden = false;
+}
+
+// CORRECTIVE PASS (blank eBay Drafter panel review) — the whole body is now
+// an error boundary: a JavaScript exception anywhere in here (a malformed
+// stored/pushed state, a future field-shape change, anything) is caught
+// and shown as a specific, visible, recoverable error instead of silently
+// aborting mid-render and leaving whatever was already hidden still
+// hidden — which is exactly how the panel went blank in the first place
+// (see sidepanel.css's own matching CSS-side fix for the actual root cause
+// of that specific report; this is the independent, general-purpose
+// safety net REQUIRED regardless of root cause).
 function renderEbayDrafterState(state = { pairing: null, batch: null }) {
-  const paired = Boolean(state.pairing?.batchToken);
-  els.ebayDrafterPairingPanel.hidden = paired;
-  const item = state.batch?.items?.[0] ?? null;
-  els.ebayDrafterEmptyState.hidden = !paired || Boolean(item);
-  els.ebayDrafterItemCard.hidden = !paired || !item;
-  if (!item) return;
+  try {
+    els.ebayDrafterLoadingState.hidden = true;
+    els.ebayDrafterErrorState.hidden = true;
 
-  els.ebayDrafterItemTitle.textContent = item.title || "eBay listing";
-  els.ebayDrafterItemStatus.textContent = ebayDrafterStatusLabel(item);
-  const failed = item.status === EBAY_ITEM_STATUSES.FAILED;
-  els.ebayDrafterItemError.hidden = !failed;
-  els.ebayDrafterItemError.textContent = failed ? (item.errorMessage || "This listing could not be filled.") : "";
+    const paired = Boolean(state.pairing?.batchToken);
+    els.ebayDrafterPairingPanel.hidden = paired;
+    const item = state.batch?.items?.[0] ?? null;
+    els.ebayDrafterEmptyState.hidden = !paired || Boolean(item);
+    els.ebayDrafterItemCard.hidden = !paired || !item;
+    if (!item) return;
 
-  const inFlight = item.status === EBAY_ITEM_STATUSES.PREPARING || item.status === EBAY_ITEM_STATUSES.FILLING;
-  const cancelled = item.status === EBAY_ITEM_STATUSES.CANCELLED;
-  els.ebayDrafterStart.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
-  els.ebayDrafterStart.disabled = inFlight;
-  // CORRECTIVE PASS 6 (retry truthfulness review) — no Retry button; a
-  // failed item shows a plain instruction to retry from Listings Review
-  // instead (see sidepanel.html's own comment on why).
-  els.ebayDrafterRetryInstructions.hidden = !failed;
-  // LIFECYCLE FIX (stale-batch review) — Cancel is available in EVERY
-  // non-terminal state, not just 'queued': a mid-fill or (especially) a
-  // 'waiting_for_review' operation is exactly what a real, atomic,
-  // lock-releasing cancel is for. It does a genuine server-side cancel
-  // (see service-worker.js's cancelEbayItem), never a local status flip.
-  els.ebayDrafterCancel.hidden = failed || cancelled;
-  els.ebayDrafterCancel.textContent = item.status === EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW
-    ? "Cancel — discard this Seller Hub form"
-    : "Cancel this listing";
+    els.ebayDrafterItemTitle.textContent = item.title || "eBay listing";
+    els.ebayDrafterItemStatus.textContent = ebayDrafterStatusLabel(item);
+    const failed = item.status === EBAY_ITEM_STATUSES.FAILED;
+    els.ebayDrafterItemError.hidden = !failed;
+    els.ebayDrafterItemError.textContent = failed ? (item.errorMessage || "This listing could not be filled.") : "";
+
+    const inFlight = item.status === EBAY_ITEM_STATUSES.PREPARING || item.status === EBAY_ITEM_STATUSES.FILLING;
+    const cancelled = item.status === EBAY_ITEM_STATUSES.CANCELLED;
+    els.ebayDrafterStart.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
+    els.ebayDrafterStart.disabled = inFlight;
+    // CORRECTIVE PASS 6 (retry truthfulness review) — no Retry button; a
+    // failed item shows a plain instruction to retry from Listings Review
+    // instead (see sidepanel.html's own comment on why).
+    els.ebayDrafterRetryInstructions.hidden = !failed;
+    // LIFECYCLE FIX (stale-batch review) — Cancel is available in EVERY
+    // non-terminal state, not just 'queued': a mid-fill or (especially) a
+    // 'waiting_for_review' operation is exactly what a real, atomic,
+    // lock-releasing cancel is for. It does a genuine server-side cancel
+    // (see service-worker.js's cancelEbayItem), never a local status flip.
+    els.ebayDrafterCancel.hidden = failed || cancelled;
+    els.ebayDrafterCancel.textContent = item.status === EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW
+      ? "Cancel — discard this Seller Hub form"
+      : "Cancel this listing";
+  } catch (error) {
+    console.error("eBay Drafter: failed to render state —", error);
+    showEbayDrafterError("Something went wrong showing this panel. Try again, or reload the extension from chrome://extensions if this keeps happening.");
+  }
+}
+
+// CORRECTIVE PASS (blank eBay Drafter panel review) — the ONE entry point
+// for loading eBay Drafter state, used both at page load and by the error
+// state's own "Try again" button. Shows a genuine loading state
+// immediately (never a blank gap while the message round-trip is in
+// flight), and — unlike the bare, uncaught `send(...).then(...)` this
+// replaces — turns a rejected promise (e.g. "Could not establish
+// connection. Receiving end does not exist." — a real, common failure
+// right after the service worker restarts, such as immediately after an
+// extension reload) into a specific, visible, recoverable error rather
+// than silently never rendering anything at all.
+function initEbayDrafterState() {
+  els.ebayDrafterErrorState.hidden = true;
+  els.ebayDrafterPairingPanel.hidden = true;
+  els.ebayDrafterEmptyState.hidden = true;
+  els.ebayDrafterItemCard.hidden = true;
+  els.ebayDrafterLoadingState.hidden = false;
+  send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)
+    .then(result => renderEbayDrafterState(result.state))
+    .catch(error => {
+      console.error("eBay Drafter: could not load state —", error);
+      showEbayDrafterError("Could not connect to the extension's background service. Try again, or reload the extension from chrome://extensions if this keeps happening.");
+    });
 }
 
 els.ebayDrafterTab.addEventListener("click", () => selectAssistantTab("ebay-drafter"));
+
+els.ebayDrafterErrorRetry.addEventListener("click", () => initEbayDrafterState());
 
 els.ebayDrafterClaimButton.addEventListener("click", async () => {
   const pairingCode = els.ebayDrafterPairingCode.value.trim();
@@ -947,6 +1019,6 @@ chrome.storage.onChanged.addListener(changes => {
 chrome.storage.local.get("assistantTab").then(({ assistantTab }) =>
   selectAssistantTab(assistantTab === "ebay-drafter" ? "ebay-drafter" : assistantTab === "ebay" ? "ebay" : "vinted"));
 send("EBAY_GET_IMPORT_STATE").then(result => renderEbayImportState(result.state));
-send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE).then(result => renderEbayDrafterState(result.state));
+initEbayDrafterState();
 loadSettings();
 refresh();

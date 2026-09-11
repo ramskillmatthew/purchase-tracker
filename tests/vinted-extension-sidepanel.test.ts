@@ -19,6 +19,8 @@ import path from "node:path";
 import { JSDOM } from "jsdom";
 import { PANEL_TO_WORKER } from "../vinted-draft-queue-extension/shared/messages.js";
 import { ITEM_STATUSES, SAVE_DRAFT_UNCONFIRMED_ERROR_CODE, SAVE_DRAFT_UNCONFIRMED_MESSAGE } from "../vinted-draft-queue-extension/shared/queue-state.js";
+import { EBAY_PANEL_TO_WORKER } from "../vinted-draft-queue-extension/shared/ebay-messages.js";
+import { EBAY_ITEM_STATUSES } from "../vinted-draft-queue-extension/shared/ebay-queue-state.js";
 
 const SIDEPANEL_HTML = readFileSync(path.resolve("vinted-draft-queue-extension/sidepanel.html"), "utf8");
 
@@ -79,7 +81,14 @@ async function loadSidepanel(sendMessageHandler: (type: string, payload: Record<
   const onChangedListeners: Array<(changes: any) => void> = [];
   const sendMessage = vi.fn(async (message: any) => sendMessageHandler(message.type, message));
   const chromeMock: any = {
-    runtime: { sendMessage },
+    runtime: {
+      sendMessage,
+      // CORRECTIVE PASS (blank eBay Drafter panel review) — sidepanel.js
+      // now reads this synchronously at import time for the visible build
+      // marker (see its own top comment). Read from the REAL manifest.json
+      // so this mock can never silently drift out of sync with it.
+      getManifest: () => JSON.parse(readFileSync(path.resolve("vinted-draft-queue-extension/manifest.json"), "utf8")),
+    },
     storage: {
       local: {
         get: vi.fn(async () => ({ settings: { appBaseUrl: "http://test-app.local" } })),
@@ -99,7 +108,15 @@ async function loadSidepanel(sendMessageHandler: (type: string, payload: Record<
     for (const fn of onChangedListeners) fn({ state: { newValue: state } });
   }
 
-  return { dom, document: dom.window.document, sendMessage, fireStorageChanged };
+  // CORRECTIVE PASS (blank eBay Drafter panel review) — the eBay Drafter's
+  // OWN storage key (ebayDrafterState), separate from Vinted's `state`
+  // above (see shared/ebay-messages.js's own top comment on why these are
+  // deliberately never shared).
+  function fireEbayDrafterStorageChanged(state: unknown) {
+    for (const fn of onChangedListeners) fn({ ebayDrafterState: { newValue: state } });
+  }
+
+  return { dom, document: dom.window.document, sendMessage, fireStorageChanged, fireEbayDrafterStorageChanged };
 }
 
 afterEach(() => {
@@ -798,5 +815,193 @@ describe("Option 4 redesign — CSS structural guarantees (verified live in Chro
   it("the dark palette is fixed (not adaptive to the OS light/dark preference) — no `color-scheme: light dark` remains from the old panel", () => {
     expect(sidepanelCss).not.toContain("color-scheme: light dark");
     expect(sidepanelCss).toContain("color-scheme: dark");
+  });
+});
+
+// ============================================================================
+// CORRECTIVE PASS (blank eBay Drafter panel review) — the first real
+// extension test failed before pairing: the eBay Drafter tab was selected,
+// but its entire content area rendered blank (no pairing field, no Start
+// button, no queue, no status, no error). Root cause, found by reading the
+// REAL sidepanel.css (not a fixture): `body.ebay-mode .panel > :not(...)`
+// force-hid #ebay-drafter-view itself with `!important` — that selector
+// predates the eBay Drafter view and only ever excluded the eBay IMPORTER
+// view (#ebay-view). selectAssistantTab() sets ebay-mode for EITHER tab,
+// so selecting "eBay Drafter" always triggered this. Fixed at the CSS
+// level (the actual trigger) AND with a JS error boundary around every
+// render path (the general-purpose safety net REQUIRED regardless of root
+// cause — a JavaScript exception, a malformed stored state, or a rejected
+// chrome.runtime.sendMessage call, e.g. immediately after an extension
+// reload, must never leave the panel blank either).
+// ============================================================================
+
+// These tests care only about the eBay Drafter view — Vinted's OWN initial
+// PANEL_TO_WORKER.GET_STATE is fed a safe, minimal, never-paired state so
+// its own render()/renderHeader() (a pre-existing path, unrelated to this
+// pass's fix, that assumes a real state object) never throws and pollutes
+// these tests with an unrelated unhandled rejection.
+function withVintedFallback(ebayHandler: (type: string, message: Record<string, unknown>) => unknown) {
+  return (type: string, message: Record<string, unknown>) =>
+    (type === PANEL_TO_WORKER.GET_STATE ? { state: { pairing: null, batch: null } } : ebayHandler(type, message));
+}
+
+function ebayDrafterState(overrides: Record<string, unknown> = {}) {
+  return { pairing: null, batch: null, ...overrides };
+}
+
+function pairedEbayDrafterState(itemOverrides: Record<string, unknown> | null = {}) {
+  return {
+    pairing: { batchToken: "token-1", batchId: "batch-1", expiresAt: "2026-08-05T10:30:00.000Z" },
+    batch: {
+      batchId: "batch-1",
+      items: itemOverrides === null ? [] : [{
+        itemId: "item-1", queuePosition: 0, title: "On Running Cloud 5", sku: "1644",
+        status: EBAY_ITEM_STATUSES.QUEUED, errorCode: null, errorMessage: null,
+        currentStep: null, stepDetail: null, photosRequested: null, photosUploaded: null, photosFailed: null,
+        ...itemOverrides,
+      }],
+    },
+  };
+}
+
+// The complete set of eBay Drafter view sections that ever explain its
+// content — loading, error, pairing form, empty state, or the item card.
+// REQUIREMENT: at least one of these must be visible at all times once the
+// view has ever rendered anything at all.
+const EBAY_DRAFTER_CONTENT_SECTION_IDS = [
+  "ebay-drafter-loading-state", "ebay-drafter-error-state",
+  "ebay-drafter-pairing-panel", "ebay-drafter-empty-state", "ebay-drafter-item-card",
+];
+
+function visibleEbayDrafterSections(document: Document): string[] {
+  return EBAY_DRAFTER_CONTENT_SECTION_IDS.filter(id => {
+    const el = document.getElementById(id) as HTMLElement | null;
+    return el && !el.hidden;
+  });
+}
+
+describe("blank eBay Drafter panel review — the panel can never render with zero visible content sections", () => {
+  it("REGRESSION (the exact reported bug): a fresh, never-paired load shows the pairing panel — never a fully blank view", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: ebayDrafterState() } : {})));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-pairing-panel"]);
+    const pairingPanel = document.getElementById("ebay-drafter-pairing-panel") as HTMLElement;
+    expect(pairingPanel.querySelector("#ebay-drafter-pairing-code")).not.toBeNull();
+    expect(pairingPanel.querySelector("#ebay-drafter-claim-button")).not.toBeNull();
+  });
+
+  it("a paired batch with no items shows the empty state", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState(null) } : {})));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-empty-state"]);
+  });
+
+  it("a paired batch with a real item shows the item card", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState() } : {})));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+    expect((document.getElementById("ebay-drafter-item-title") as HTMLElement).textContent).toBe("On Running Cloud 5");
+  });
+
+  it("REGRESSION: a rejected chrome.runtime.sendMessage (e.g. 'Could not establish connection' right after an extension reload) shows the error state with a retry action — never a blank panel", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) throw new Error("Could not establish connection. Receiving end does not exist.");
+      return {};
+    }));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-error-state"]);
+    const retryButton = document.getElementById("ebay-drafter-error-retry") as HTMLButtonElement;
+    expect(retryButton).not.toBeNull();
+    expect((document.getElementById("ebay-drafter-error-message") as HTMLElement).textContent).not.toBe("");
+  });
+
+  it("REGRESSION: clicking 'Try again' after an error re-fetches state and recovers to a normal, non-blank view once the connection succeeds", async () => {
+    let attempt = 0;
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) {
+        attempt += 1;
+        if (attempt === 1) throw new Error("Could not establish connection. Receiving end does not exist.");
+        return { state: ebayDrafterState() };
+      }
+      return {};
+    }));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-error-state"]);
+
+    (document.getElementById("ebay-drafter-error-retry") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(attempt).toBe(2);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-pairing-panel"]);
+  });
+
+  it("REGRESSION: a malformed pushed state (chrome.storage.onChanged firing ebayDrafterState: null) shows the error state — never an uncaught exception, never a blank panel", async () => {
+    const { document, fireEbayDrafterStorageChanged } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState() } : {})));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]); // sane initial load
+
+    fireEbayDrafterStorageChanged(null);
+
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-error-state"]);
+  });
+
+  it("REGRESSION: a genuine JavaScript exception mid-render (e.g. a future field-shape change) is caught and shows the error state — the general-purpose error boundary, independent of the specific CSS root cause fixed above", async () => {
+    const { document, fireEbayDrafterStorageChanged } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: ebayDrafterState() } : {})));
+
+    // A property access that throws — proves the try/catch genuinely
+    // catches an exception raised WHILE rendering, not just a pre-checked
+    // null/undefined shape.
+    const throwingItem: Record<string, unknown> = {};
+    Object.defineProperty(throwingItem, "title", { get() { throw new Error("simulated field-shape exception"); } });
+    fireEbayDrafterStorageChanged({ pairing: { batchToken: "t" }, batch: { items: [throwingItem] } });
+
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-error-state"]);
+  });
+
+  it("switching tabs away and back never loses or blanks the already-rendered eBay Drafter content", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState() } : {})));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+
+    (document.getElementById("vinted-tab") as HTMLButtonElement).click();
+    (document.getElementById("ebay-drafter-tab") as HTMLButtonElement).click();
+
+    expect((document.getElementById("ebay-drafter-view") as HTMLElement).hidden).toBe(false);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+
+  it("clicking each of the three tabs repeatedly always leaves exactly one view visible, never zero and never more than one", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState() } : {})));
+    const order = ["ebay-tab", "ebay-drafter-tab", "vinted-tab", "ebay-drafter-tab", "ebay-tab", "vinted-tab"];
+    for (const id of order) {
+      (document.getElementById(id) as HTMLButtonElement).click();
+      const ebayDrafterHidden = (document.getElementById("ebay-drafter-view") as HTMLElement).hidden;
+      const ebayHidden = (document.getElementById("ebay-view") as HTMLElement).hidden;
+      // Vinted's own view has no single wrapping id in this markup — its
+      // visibility is the logical complement of the other two tabs.
+      expect([ebayDrafterHidden, ebayHidden].filter(hidden => !hidden).length).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe("blank eBay Drafter panel review — the CSS root cause is regression-guarded", () => {
+  it("REGRESSION: the ebay-mode force-hide rule excludes BOTH eBay views, never just the importer's", () => {
+    const ruleMatch = sidepanelCss.match(/body\.ebay-mode \.panel > :not\([^{]+\)\s*\{\s*display:\s*none\s*!important;\s*\}/);
+    expect(ruleMatch).not.toBeNull();
+    const rule = ruleMatch![0];
+    expect(rule).toContain(":not(#ebay-view)");
+    expect(rule).toContain(":not(#ebay-drafter-view)");
+  });
+});
+
+describe("blank eBay Drafter panel review — visible build/version marker", () => {
+  it("REQUIREMENT: the panel shows the real installed extension's manifest version, proving which build Chrome is running", async () => {
+    const manifest = JSON.parse(readFileSync(path.resolve("vinted-draft-queue-extension/manifest.json"), "utf8"));
+    const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: ebayDrafterState() } : {})));
+    expect((document.getElementById("build-version") as HTMLElement).textContent).toBe(`v${manifest.version}`);
+  });
+
+  it("the marker is set synchronously at script start — before any message-passing round trip — so it reads correctly even when EBAY_GET_STATE itself fails", async () => {
+    const manifest = JSON.parse(readFileSync(path.resolve("vinted-draft-queue-extension/manifest.json"), "utf8"));
+    const { document } = await loadSidepanel(withVintedFallback(type => {
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) throw new Error("Could not establish connection.");
+      return {};
+    }));
+    expect((document.getElementById("build-version") as HTMLElement).textContent).toBe(`v${manifest.version}`);
   });
 });

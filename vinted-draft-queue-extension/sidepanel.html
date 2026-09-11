@@ -12,6 +12,15 @@
       <div class="brand">
         <span id="brand-mark" class="brand-mark">TA</span>
         <h1 class="brand-name" title="Listing Assistant">Listing Assistant</h1>
+        <!-- CORRECTIVE PASS (blank eBay Drafter panel review) — a visible
+             build marker, always present regardless of which tab is
+             active, so a future report can prove which build Chrome is
+             actually running rather than a stale cached one. Set from
+             chrome.runtime.getManifest().version at script start (see
+             sidepanel.js's own top comment) — if this still reads
+             "Loading build…" the side panel's script never ran at all,
+             which is itself diagnostic. -->
+        <span id="build-version" class="muted-text build-version-badge" title="Extension build version">Loading build…</span>
       </div>
       <div class="header-actions">
         <span id="connection-badge" class="connection-badge" role="status">
@@ -40,6 +49,23 @@
         <svg class="safety-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 3.75 4.9v4.6c0 4 2.7 6.9 6.25 8 3.55-1.1 6.25-4 6.25-8V4.9L10 2.5Z" stroke="currentColor" stroke-width="1.4"/><path d="M7.4 10.1l1.9 1.9 3.3-3.9" stroke="currentColor" stroke-width="1.4"/></svg>
         <span>Fills Seller Hub, stops before Save draft — never publishes</span>
       </div>
+
+      <!-- CORRECTIVE PASS (blank eBay Drafter panel review) — REQUIRED UI
+           BEHAVIOUR: this tab must always show one of loading / a real
+           pairing-or-batch state / a specific visible error — never an
+           empty area. See sidepanel.js's initEbayDrafterState and
+           showEbayDrafterError for the state machine that guarantees this
+           (an error boundary around every render, not just the pure CSS
+           fix above). -->
+      <section id="ebay-drafter-loading-state" class="empty-state" hidden>
+        <p class="empty-title">Loading…</p>
+        <p class="empty-subtitle">Connecting to the extension's background service.</p>
+      </section>
+
+      <section id="ebay-drafter-error-state" class="alert-banner tone-danger" role="alert" hidden>
+        <p id="ebay-drafter-error-message" class="alert-text">Something went wrong showing this panel.</p>
+        <button id="ebay-drafter-error-retry" class="button-outline button-sm" type="button">Try again</button>
+      </section>
 
       <section id="ebay-drafter-pairing-panel" class="panel-card" hidden>
         <h2 class="panel-title">Connect to Listings Review</h2>
