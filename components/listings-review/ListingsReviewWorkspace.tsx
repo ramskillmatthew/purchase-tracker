@@ -423,6 +423,13 @@ export default function ListingsReviewWorkspace() {
   // abandon it without waiting out the pairing window.
   const [ebayExtensionBatchId, setEbayExtensionBatchId] = useState<string | null>(null);
   const [ebayExtensionCancelling, setEbayExtensionCancelling] = useState(false);
+  // CORRECTIVE PASS 6 (retry truthfulness review) — the create route's own
+  // server-derived isRetry flag (true only when the RPC found a genuinely
+  // 'failed' prior item for this exact listing and linked it as lineage —
+  // see supabase-ebay-extension-batches.sql's own comment). Never guessed
+  // client-side; this is honest, post-hoc framing of what the server
+  // actually did, shown in the pairing-code panel below.
+  const [ebayExtensionIsRetry, setEbayExtensionIsRetry] = useState(false);
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -1711,6 +1718,7 @@ export default function ListingsReviewWorkspace() {
     setSendToEbayExtensionError("");
     setEbayExtensionPairingCode(null);
     setEbayExtensionBatchId(null);
+    setEbayExtensionIsRetry(false);
     try {
       const response = await fetch("/api/listing-studio/ebay-extension-batches", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ marketplaceDraftIds: [marketplaceDraftId] }),
@@ -1719,6 +1727,13 @@ export default function ListingsReviewWorkspace() {
       if (!response.ok) { setSendToEbayExtensionError(body.error || "Could not send this listing to the eBay extension."); return; }
       setEbayExtensionPairingCode(body.pairingCode);
       setEbayExtensionBatchId(body.batchId ?? null);
+      // CORRECTIVE PASS 6 (retry truthfulness review) — this SAME action IS
+      // "Try again with eBay extension" whenever the server found a
+      // genuinely failed prior attempt for this listing (isRetry, derived
+      // server-side — never guessed here). A failed item is already
+      // excluded from the create RPC's own conflict check, so this send
+      // works exactly like a first send; only the panel copy differs.
+      setEbayExtensionIsRetry(Boolean(body.isRetry));
     } catch {
       setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
     } finally {
@@ -1746,6 +1761,7 @@ export default function ListingsReviewWorkspace() {
       }
       setEbayExtensionPairingCode(null);
       setEbayExtensionBatchId(null);
+      setEbayExtensionIsRetry(false);
       setSendToEbayExtensionError("");
     } catch {
       setSendToEbayExtensionError("Network error — could not cancel this send.");
@@ -2890,7 +2906,14 @@ export default function ListingsReviewWorkspace() {
             this app never drives that itself. */}
         {ebayExtensionPairingCode && (
           <div className="lr-ebay-status-panel" role="status">
-            <p className="lr-ebay-status-panel-title">Ready for the eBay extension</p>
+            <p className="lr-ebay-status-panel-title">{ebayExtensionIsRetry ? "Retrying with the eBay extension" : "Ready for the eBay extension"}</p>
+            {/* CORRECTIVE PASS 6 (retry truthfulness review) — honest,
+                post-hoc framing: this is a genuine new attempt (a fresh
+                batch, a fresh item id) linked to the listing's previous
+                failed one, never a resend of the old failed operation. */}
+            {ebayExtensionIsRetry && (
+              <p className="lr-ebay-status-panel-body">A previous eBay extension attempt for this listing failed. This is a fresh attempt.</p>
+            )}
             <p className="lr-ebay-status-panel-body">
               Open the extension&apos;s side panel, select the eBay tab, and enter this code: <strong>{ebayExtensionPairingCode}</strong>
             </p>

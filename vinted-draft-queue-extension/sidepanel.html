@@ -63,9 +63,18 @@
           </div>
         </div>
         <p id="ebay-drafter-item-error" class="error-text" role="alert" hidden></p>
+        <!-- CORRECTIVE PASS 6 (retry truthfulness review) — there is no
+             Retry button here any more. The extension has no owner
+             session, only a batch-scoped token, so it cannot securely
+             create a fresh, authenticated app batch itself — a client-only
+             "Retry" here could only ever flip local state and replay a
+             report against the OLD, now-permanently-terminal item id,
+             which never actually retried anything. A real retry needs a
+             fresh batch and a fresh item id, created through the
+             authenticated app instead. -->
+        <p id="ebay-drafter-retry-instructions" class="ebay-preview-note" hidden>This attempt failed and can&apos;t be retried here. Go to Listings Review in the app and use &quot;Try again with eBay extension&quot;.</p>
         <div class="ebay-queue-actions">
           <button id="ebay-drafter-start" class="button-primary button-block" type="button">Send to eBay Seller Hub</button>
-          <button id="ebay-drafter-retry" class="button-primary button-block" type="button" hidden>Retry</button>
           <button id="ebay-drafter-cancel" class="button-outline button-sm" type="button" hidden>Cancel</button>
         </div>
         <p class="ebay-preview-note">Stops after the form is filled and photos are uploaded. Review it in the eBay tab, then click Save draft yourself.</p>

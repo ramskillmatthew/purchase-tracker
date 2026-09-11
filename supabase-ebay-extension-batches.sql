@@ -72,6 +72,51 @@
 -- The lock order (parent, then child) and service-role-only grants from
 -- CORRECTIVE PASS 4 are unchanged.
 --
+-- CORRECTIVE PASS 6 (retry truthfulness review) — the previously-reported
+-- extension-side "Retry" button (sidepanel.js's ebay-drafter-retry,
+-- service-worker.js's retryEbayItem) was a FIFTH defect: it only flipped
+-- the extension's own LOCAL queue state for a failed item back to 'queued'
+-- and re-dispatched it, which then re-reported 'preparing' against the
+-- SAME server-side item id — an id that is now (CORRECTIVE PASS 5)
+-- PERMANENTLY terminal once 'failed'. The database row never moved; the
+-- button lied about retrying. Fixed by:
+--   1. Removing that button and its whole client-only retry path entirely
+--      (vinted-draft-queue-extension/sidepanel.html,
+--      vinted-draft-queue-extension/sidepanel.js,
+--      vinted-draft-queue-extension/service-worker.js,
+--      vinted-draft-queue-extension/shared/ebay-messages.js,
+--      vinted-draft-queue-extension/shared/ebay-queue-state.js) — the
+--      extension has no owner session, only a batch-scoped token, so it
+--      cannot securely create a fresh, authenticated app batch itself. A
+--      failed item's card now shows a plain instruction to return to
+--      Listings Review instead.
+--   2. A real retry now means a FRESH batch and a FRESH
+--      ebay_extension_batch_items row, created through the authenticated
+--      app (components/listings-review/ListingsReviewWorkspace.tsx's
+--      existing "Send to eBay extension" action, unchanged in shape) —
+--      which already calls listing_studio_create_ebay_extension_batch, the
+--      SAME owner-scoped advisory lock + conflict-check + create-time
+--      cleanup this whole file has hardened across passes 2-5. Two
+--      consequences fall out of reusing that exact path rather than a new
+--      one: (a) the old failed row is NEVER reset or overwritten — nothing
+--      in the create RPC ever writes to an existing item row, only reads
+--      it; (b) a double-click can never create two fresh batches for the
+--      same listing — the SAME advisory lock + partial unique index that
+--      already prevents a duplicate send in general applies identically
+--      here, with no new code needed.
+--   3. Attempt lineage: the create RPC now derives retry_of_item_id
+--      itself (see its own comment below and
+--      ebay_extension_batch_items.retry_of_item_id's own column comment)
+--      — the most recent 'failed' item for this owner+listing, if any.
+--      Entirely server-derived, never supplied by a caller, so a client
+--      can never claim false lineage; it only ever READS the old row.
+--   4. 'queued' -> 'failed' added to the transition whitelist — verified
+--      against the real extension code path (see the transition table's
+--      own comment below), not assumed: a tab-creation or message-dispatch
+--      failure before the content script's first "preparing" report is a
+--      real, reachable case, and the item's local watchdog reports
+--      'failed' directly while the server-side row is still 'queued'.
+--
 -- Two real defects were found in the original draft, both fixed below:
 --
 -- DEFECT 1 (inconsistent empty batches) — the original RPC set
@@ -235,6 +280,21 @@ create table if not exists public.ebay_extension_batch_items (
   started_at timestamptz,
   completed_at timestamptz,
 
+  -- CORRECTIVE PASS 6 (retry truthfulness review) — attempt lineage.
+  -- NULL for a first attempt; for a retry, points at the PREVIOUS attempt's
+  -- own row for the same listing. Populated ONLY by
+  -- listing_studio_create_ebay_extension_batch itself (see that function's
+  -- own comment), which looks up the most recent genuinely 'failed' item
+  -- for this owner+listing — never supplied by a caller, never written by
+  -- any other path. Deliberately `on delete set null`, NOT cascade: the
+  -- OLD failed row is immutable history (this column is the only thing
+  -- that ever references it going forward); if that old row is ever
+  -- removed for an unrelated reason, the lineage link simply disappears —
+  -- the NEW row itself must never be deleted just because its ancestor was.
+  retry_of_item_id uuid
+    references public.ebay_extension_batch_items (id)
+    on delete set null,
+
   unique (batch_id, marketplace_draft_id),
   unique (batch_id, queue_position)
 );
@@ -268,7 +328,7 @@ create or replace function public.listing_studio_create_ebay_extension_batch(
   p_expires_at timestamptz,
   p_marketplace_draft_ids uuid[]
 )
-returns table(batch_id uuid, display_number integer)
+returns table(batch_id uuid, display_number integer, retry_of_item_id uuid)
 language plpgsql
 set search_path = public, pg_temp
 as $$
@@ -280,6 +340,7 @@ declare
   v_conflicting_draft uuid;
   v_inserted_count integer;
   v_distinct_count integer;
+  v_retry_of_item_id uuid;
 begin
   -- ---- Basic argument validation — BEFORE anything touches the tables. ----
   if p_owner_id is null then
@@ -398,6 +459,27 @@ begin
     raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH' using errcode = 'P0002';
   end if;
 
+  -- CORRECTIVE PASS 6 (retry truthfulness review) — attempt lineage,
+  -- entirely SERVER-DERIVED, never supplied by the caller: the most recent
+  -- item for this owner+listing that is genuinely 'failed' right now
+  -- (across any of this listing's past batches), if one exists. Because
+  -- the conflict check above already requires every OTHER item for this
+  -- listing to be 'failed' or 'cancelled' before reaching here, and a
+  -- 'cancelled' item was a deliberate user action rather than an attempt
+  -- that failed, this deliberately matches on 'failed' only — a genuine
+  -- retry. The OLD row is only ever READ here, never written to: it stays
+  -- immutable, retained history (review requirement "the previous failed
+  -- record is never reset or overwritten"). NULL for a genuine first
+  -- attempt, or a resend following an explicit cancellation.
+  select bi.id into v_retry_of_item_id
+  from public.ebay_extension_batch_items bi
+  join public.ebay_extension_batches b on b.id = bi.batch_id
+  where bi.marketplace_draft_id = v_marketplace_draft_id
+    and b.owner_id = p_owner_id
+    and bi.status = 'failed'
+  order by b.created_at desc
+  limit 1;
+
   -- Sequential-within-a-run numbering — safe under the advisory lock above
   -- (see supabase-listing-studio.sql's own identical pattern/comment for
   -- the full reasoning on why "lowest free gap" was deliberately rejected
@@ -415,8 +497,8 @@ begin
   -- plus an explicit count check immediately after, so a future edit that
   -- reintroduces a SELECT-based multi-row insert here inherits the same
   -- rollback-on-mismatch protection rather than silently losing it.
-  insert into public.ebay_extension_batch_items (batch_id, marketplace_draft_id, product_draft_id, queue_position)
-  values (v_batch_id, v_marketplace_draft_id, v_product_draft_id, 0);
+  insert into public.ebay_extension_batch_items (batch_id, marketplace_draft_id, product_draft_id, queue_position, retry_of_item_id)
+  values (v_batch_id, v_marketplace_draft_id, v_product_draft_id, 0, v_retry_of_item_id);
 
   get diagnostics v_inserted_count = row_count;
   if v_inserted_count <> 1 then
@@ -425,6 +507,7 @@ begin
 
   batch_id := v_batch_id;
   display_number := v_display_number;
+  retry_of_item_id := v_retry_of_item_id;
   return next;
 end;
 $$;
@@ -717,10 +800,27 @@ begin
   -- report is refused — covers every backward step (filling -> preparing,
   -- preparing -> queued, waiting_for_review -> filling/preparing — the
   -- last already caught by the guard above) and every out-of-order skip
-  -- (queued -> filling, queued -> waiting_for_review, queued -> failed).
+  -- (queued -> filling, queued -> waiting_for_review).
+  --
+  -- CORRECTIVE PASS 6 (retry truthfulness review) — 'queued' -> 'failed' IS
+  -- included, verified against the real extension code path rather than
+  -- assumed: vinted-draft-queue-extension/service-worker.js's startEbayItem
+  -- sets the item's LOCAL status to 'preparing' before any server report is
+  -- sent, then dispatchEbayItem() opens/reuses the eBay tab and dispatches
+  -- EBAY_FILL_LISTING to the content script — the SERVER only ever learns
+  -- 'preparing' once the content script's own first step
+  -- (shared/ebay-form-steps.js's report("preparing", ...)) actually runs.
+  -- If tab creation or message dispatch fails silently before that (a real,
+  -- possible path — see dispatchEbayItem's own comment on a missing-
+  -- receiver chrome.runtime.lastError), the item's local watchdog
+  -- (findStalledEbayItem) is the ONLY thing that ever reports anything for
+  -- it, and it reports 'failed' directly — while the server-side row is
+  -- still 'queued'. Rejecting that report would strand the item
+  -- server-side forever. See this file's own top comment for the full
+  -- writeup.
   if p_status <> v_item_status then
     v_transition_allowed :=
-      (v_item_status = 'queued' and p_status = 'preparing')
+      (v_item_status = 'queued' and p_status in ('preparing', 'failed'))
       or (v_item_status = 'preparing' and p_status in ('filling', 'failed'))
       or (v_item_status = 'filling' and p_status in ('waiting_for_review', 'failed'));
 

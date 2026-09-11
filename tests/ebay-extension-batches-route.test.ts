@@ -180,4 +180,50 @@ describe("POST /api/listing-studio/ebay-extension-batches", () => {
     const statuses = [first.status, second.status].sort();
     expect(statuses).toEqual([200, 409]);
   });
+
+  // ---- CORRECTIVE PASS 6 (retry truthfulness review) ----------------------
+
+  it("REQUIREMENT (first-attempt failure / not a retry): retry_of_item_id: null from the RPC surfaces as isRetry: false", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([{ batch_id: "batch-1", display_number: 1, retry_of_item_id: null }])));
+    const response = await createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.isRetry).toBe(false);
+  });
+
+  it("REQUIREMENT (retry after failure): a non-null retry_of_item_id from the RPC (the server-derived lineage — see the migration's own coverage of exactly how it's computed) surfaces honestly as isRetry: true — never guessed by the route itself", async () => {
+    const OLD_FAILED_ITEM_ID = "44444444-4444-4444-8444-444444444444";
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([{ batch_id: "batch-2", display_number: 2, retry_of_item_id: OLD_FAILED_ITEM_ID }])));
+    const response = await createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.batchId).toBe("batch-2");
+    expect(body.isRetry).toBe(true);
+  });
+
+  it("REQUIREMENT (new item identity): a retry's response carries only the NEW batch's own id — never the old failed item's id in any client-visible field", async () => {
+    const OLD_FAILED_ITEM_ID = "44444444-4444-4444-8444-444444444444";
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([{ batch_id: "batch-2", display_number: 2, retry_of_item_id: OLD_FAILED_ITEM_ID }])));
+    const response = await createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] }));
+    const body = await response.json();
+    expect(JSON.stringify(body)).not.toContain(OLD_FAILED_ITEM_ID);
+  });
+
+  it("REQUIREMENT (double retry): two concurrent retry attempts for the same listing can never both succeed — the SAME advisory-lock-serialized RPC call this file's own concurrent-create test already proves for a first send applies identically here (retry is not a second code path)", async () => {
+    let calls = 0;
+    supabaseRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith("rpc/")) {
+        calls += 1;
+        if (calls === 1) return new Response(JSON.stringify([{ batch_id: "batch-2", display_number: 2, retry_of_item_id: "44444444-4444-4444-8444-444444444444" }]));
+        throw rpcError("DRAFT_ALREADY_IN_ACTIVE_BATCH");
+      }
+      return new Response(JSON.stringify([]));
+    });
+    const [first, second] = await Promise.all([
+      createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] })),
+      createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] })),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([200, 409]);
+  });
 });

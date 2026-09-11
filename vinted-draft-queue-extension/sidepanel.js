@@ -46,7 +46,7 @@ const els = {
   ebayDrafterItemStatus: document.getElementById("ebay-drafter-item-status"),
   ebayDrafterItemError: document.getElementById("ebay-drafter-item-error"),
   ebayDrafterStart: document.getElementById("ebay-drafter-start"),
-  ebayDrafterRetry: document.getElementById("ebay-drafter-retry"),
+  ebayDrafterRetryInstructions: document.getElementById("ebay-drafter-retry-instructions"),
   ebayDrafterCancel: document.getElementById("ebay-drafter-cancel"),
   ebayView: document.getElementById("ebay-view"),
   ebayReadCurrent: document.getElementById("ebay-read-current"),
@@ -810,7 +810,10 @@ function renderEbayDrafterState(state = { pairing: null, batch: null }) {
   const cancelled = item.status === EBAY_ITEM_STATUSES.CANCELLED;
   els.ebayDrafterStart.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
   els.ebayDrafterStart.disabled = inFlight;
-  els.ebayDrafterRetry.hidden = !failed;
+  // CORRECTIVE PASS 6 (retry truthfulness review) — no Retry button; a
+  // failed item shows a plain instruction to retry from Listings Review
+  // instead (see sidepanel.html's own comment on why).
+  els.ebayDrafterRetryInstructions.hidden = !failed;
   // LIFECYCLE FIX (stale-batch review) — Cancel is available in EVERY
   // non-terminal state, not just 'queued': a mid-fill or (especially) a
   // 'waiting_for_review' operation is exactly what a real, atomic,
@@ -844,14 +847,6 @@ els.ebayDrafterStart.addEventListener("click", async () => {
   const item = state?.batch?.items?.[0];
   if (!item) return;
   const result = await send(EBAY_PANEL_TO_WORKER.EBAY_START_ITEM, { itemId: item.itemId });
-  if (result.state) renderEbayDrafterState(result.state);
-});
-
-els.ebayDrafterRetry.addEventListener("click", async () => {
-  const state = (await send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)).state;
-  const item = state?.batch?.items?.[0];
-  if (!item) return;
-  const result = await send(EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM, { itemId: item.itemId });
   if (result.state) renderEbayDrafterState(result.state);
 });
 

@@ -234,14 +234,15 @@ describe("cancellation race review — the new item-result RPC's own transaction
 // transition table. See supabase-ebay-extension-batches.sql's own top
 // comment.
 describe("state-transition guard review — the explicit forward-only transition table (SQL structure)", () => {
-  it("the whitelist is EXACTLY the three permitted forward transitions — no more, no fewer", () => {
+  it("the whitelist is EXACTLY the three permitted current-statuses' forward transitions — no more, no fewer (CORRECTIVE PASS 6: 'queued' also permits 'failed' — see the retry-truthfulness review's own evidence, checked separately below)", () => {
     const tableIdx = reportBody.indexOf("v_transition_allowed :=");
     const tableEnd = reportBody.indexOf(";", tableIdx);
     const table = reportBody.slice(tableIdx, tableEnd);
-    expect(table).toContain("v_item_status = 'queued' and p_status = 'preparing'");
+    expect(table).toContain("v_item_status = 'queued' and p_status in ('preparing', 'failed')");
     expect(table).toContain("v_item_status = 'preparing' and p_status in ('filling', 'failed')");
     expect(table).toContain("v_item_status = 'filling' and p_status in ('waiting_for_review', 'failed')");
-    // Exactly two 'or' joins between exactly three disjuncts — nothing extra.
+    // Exactly two 'or' joins between exactly three disjuncts (one per
+    // current-status) — nothing extra.
     expect((table.match(/\bor\b/gi) ?? []).length).toBe(2);
     expect((table.match(/v_item_status = '\w+' and p_status/g) ?? []).length).toBe(3);
   });
@@ -595,5 +596,29 @@ describe("cancellation race review — the rewritten item-result route is a thin
     expect(source).not.toContain("isEbayExtensionBatchClosingItemStatus");
     expect(source).not.toContain("supabaseRequestAll");
     expect(source).toContain("rpc/listing_studio_report_ebay_extension_item_result");
+  });
+
+  // CORRECTIVE PASS 6 (retry truthfulness review) — a stale message
+  // targeting the OLD, now-permanently-failed item id, arriving AFTER a
+  // retry has already created a brand-new item id for the same listing.
+  // The old id's own terminal guard (unchanged — see the state-transition
+  // guard review's own coverage) refuses it regardless of what the new
+  // retry item is doing; the two item ids are otherwise completely
+  // independent rows.
+  it("REQUIREMENT (stale old-item message after retry): a late report against the OLD failed item id is refused — it can never resurrect the old row, and it has no effect on the NEW retry item (a different row entirely)", async () => {
+    const OLD_ITEM_ID = "55555555-5555-4555-8555-555555555555";
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: OLD_ITEM_ID, item_status: "failed", batch_status: "completed", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const { POST } = await import("@/app/api/extension/ebay-batch/items/[itemId]/result/route");
+    const { signBatchToken } = await import("@/lib/listing-studio/extension-batch-tokens");
+    const token = await signBatchToken(BATCH_UUID, 3600);
+    const response = await POST(new Request("http://test", {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ status: "waiting_for_review" }),
+    }), { params: Promise.resolve({ itemId: OLD_ITEM_ID }) });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: OLD_ITEM_ID, status: "failed", duplicate: true });
   });
 });

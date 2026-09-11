@@ -48,7 +48,7 @@ describe("eBay extension batch migration — Defect 1 (inconsistent empty batche
   it("REQUIREMENT: the child item is inserted with a single-row INSERT ... VALUES, never INSERT ... SELECT (the exact shape that let the original defect insert fewer rows than the parent claimed)", () => {
     const itemsInsertIdx = fnBody.indexOf("insert into public.ebay_extension_batch_items");
     const itemsInsertStatement = fnBody.slice(itemsInsertIdx, fnBody.indexOf(";", itemsInsertIdx));
-    expect(itemsInsertStatement).toContain("values (v_batch_id, v_marketplace_draft_id, v_product_draft_id, 0)");
+    expect(itemsInsertStatement).toContain("values (v_batch_id, v_marketplace_draft_id, v_product_draft_id, 0, v_retry_of_item_id)");
     expect(itemsInsertStatement).not.toMatch(/insert into public\.ebay_extension_batch_items[^;]*select/i);
   });
 
@@ -150,5 +150,139 @@ describe("eBay extension batch migration — application-layer half of Defect 2'
     // It calls the RPC, not any direct table read/write of its own.
     expect(source).toContain("rpc/listing_studio_report_ebay_extension_item_result");
     expect(source).not.toMatch(/supabaseRequestAll/);
+  });
+});
+
+// ---- CORRECTIVE PASS 6 (retry truthfulness review) -------------------------
+//
+// A real retry is a FRESH batch and a FRESH ebay_extension_batch_items row,
+// created through the authenticated app's existing create-batch flow — the
+// old failed row is retained, immutable history, never reset or
+// overwritten. Attempt lineage (retry_of_item_id) is derived entirely
+// server-side by the create RPC itself: the most recent genuinely 'failed'
+// item for this owner+listing, if any. See this file's own top comment.
+describe("retry truthfulness review — the retry_of_item_id lineage column", () => {
+  it("exists on ebay_extension_batch_items, nullable, referencing the same table, ON DELETE SET NULL (never CASCADE — the new row must never be deleted just because its ancestor was)", () => {
+    const colIdx = sql.indexOf("retry_of_item_id uuid");
+    expect(colIdx).toBeGreaterThan(-1);
+    const colBlock = sql.slice(colIdx, sql.indexOf(",", sql.indexOf("on delete set null", colIdx)));
+    expect(colBlock).toContain("references public.ebay_extension_batch_items (id)");
+    expect(colBlock).toContain("on delete set null");
+    expect(colBlock).not.toContain("on delete cascade");
+  });
+});
+
+describe("retry truthfulness review — the create RPC derives lineage itself, server-side only", () => {
+  it("returns retry_of_item_id in its RETURNS TABLE — never accepted as an input parameter (a caller can never claim false lineage)", () => {
+    const signatureIdx = sql.indexOf("create or replace function public.listing_studio_create_ebay_extension_batch(");
+    const returnsIdx = sql.indexOf("returns table(", signatureIdx);
+    const paramList = sql.slice(signatureIdx, sql.indexOf(")", sql.indexOf("uuid[]", signatureIdx)) + 1);
+    const returnsList = sql.slice(returnsIdx, sql.indexOf(")", returnsIdx));
+    expect(paramList).not.toContain("retry_of_item_id");
+    expect(paramList).not.toContain("p_retry_of_item_id");
+    expect(returnsList).toContain("retry_of_item_id uuid");
+  });
+
+  it("REQUIREMENT: matches only a genuinely 'failed' prior item for THIS owner and THIS exact listing — never 'cancelled' (an explicit cancel is not a failure), never another owner's item", () => {
+    const lookupIdx = fnBody.indexOf("select bi.id into v_retry_of_item_id");
+    const lookupEnd = fnBody.indexOf("limit 1;", lookupIdx) + "limit 1;".length;
+    expect(lookupIdx).toBeGreaterThan(-1);
+    const lookup = fnBody.slice(lookupIdx, lookupEnd);
+    expect(lookup).toContain("bi.marketplace_draft_id = v_marketplace_draft_id");
+    expect(lookup).toContain("b.owner_id = p_owner_id");
+    expect(lookup).toContain("bi.status = 'failed'");
+    expect(lookup).not.toContain("cancelled");
+    expect(lookup).toContain("order by b.created_at desc");
+  });
+
+  it("REQUIREMENT: the lineage lookup runs AFTER the conflict check (so it only ever executes once this send is genuinely eligible) and under the SAME owner-scoped advisory lock as everything else — a double-click retry is serialized exactly like any other create-batch call, never able to compute lineage from a half-finished concurrent create", () => {
+    const advisoryLockIdx = fnBody.indexOf("pg_advisory_xact_lock");
+    const conflictIdx = fnBody.indexOf("DRAFT_ALREADY_IN_ACTIVE_BATCH");
+    const lookupIdx = fnBody.indexOf("select bi.id into v_retry_of_item_id");
+    const insertIdx = fnBody.indexOf("insert into public.ebay_extension_batch_items");
+    expect(advisoryLockIdx).toBeGreaterThan(-1);
+    expect(advisoryLockIdx).toBeLessThan(conflictIdx);
+    expect(conflictIdx).toBeLessThan(lookupIdx);
+    expect(lookupIdx).toBeLessThan(insertIdx);
+  });
+
+  it("REQUIREMENT: the old row is only ever READ for lineage — never written to. The create RPC's only UPDATE statements on ebay_extension_batch_items are the pre-existing stale-batch cleanup ones, scoped to queued/preparing/filling only, never 'failed'", () => {
+    const updateStatements = [...fnBody.matchAll(/update public\.ebay_extension_batch_items[\s\S]*?;/g)].map(m => m[0]);
+    expect(updateStatements.length).toBeGreaterThan(0); // the stale-cleanup update still exists
+    for (const statement of updateStatements) {
+      expect(statement).not.toContain("status = 'failed'");
+      expect(statement).toContain("bi.status in ('queued', 'preparing', 'filling')");
+    }
+  });
+
+  it("the new item row always gets a genuinely FRESH identity — the INSERT never specifies an explicit id, relying on the table's own gen_random_uuid() default, and retry_of_item_id is populated on the INSERT itself from the server-derived variable", () => {
+    const insertIdx = fnBody.indexOf("insert into public.ebay_extension_batch_items");
+    const insertEnd = fnBody.indexOf(";", insertIdx);
+    const insertStatement = fnBody.slice(insertIdx, insertEnd);
+    expect(insertStatement).not.toMatch(/\bid\b\s*,/); // column list never includes id
+    expect(insertStatement).toContain("retry_of_item_id");
+    expect(insertStatement).toContain("v_retry_of_item_id");
+    expect(sql).toContain("id uuid primary key default gen_random_uuid()");
+  });
+});
+
+describe("retry truthfulness review — 'queued' -> 'failed' is a permitted transition (failure before the first 'preparing' report)", () => {
+  it("REQUIREMENT: verified against the real extension code path, not assumed — the whitelist includes it", () => {
+    const reportFnStart = sql.indexOf("create or replace function public.listing_studio_report_ebay_extension_item_result");
+    const reportFnBody = sql.slice(reportFnStart, sql.indexOf("\n$$;", reportFnStart));
+    expect(reportFnBody).toContain("v_item_status = 'queued' and p_status in ('preparing', 'failed')");
+  });
+
+  it("the evidence is documented right alongside the transition table itself, naming the exact extension code path that can fail before any 'preparing' report ever reaches the server", () => {
+    const reportFnStart = sql.indexOf("create or replace function public.listing_studio_report_ebay_extension_item_result");
+    const reportFnBody = sql.slice(reportFnStart, sql.indexOf("\n$$;", reportFnStart));
+    expect(reportFnBody).toContain("startEbayItem");
+    expect(reportFnBody).toContain("dispatchEbayItem");
+    expect(reportFnBody).toContain("findStalledEbayItem");
+  });
+});
+
+describe("retry truthfulness review — the extension-side Retry button and its client-only mechanism are gone", () => {
+  it("no EBAY_RETRY_ITEM message type, no retryEbayItem handler, no ebay-drafter-retry button, no applyRetryEbayItem state function", () => {
+    const messages = readFileSync("vinted-draft-queue-extension/shared/ebay-messages.js", "utf8");
+    const serviceWorker = readFileSync("vinted-draft-queue-extension/service-worker.js", "utf8");
+    const sidepanelHtml = readFileSync("vinted-draft-queue-extension/sidepanel.html", "utf8");
+    const sidepanelJs = readFileSync("vinted-draft-queue-extension/sidepanel.js", "utf8");
+    const queueState = readFileSync("vinted-draft-queue-extension/shared/ebay-queue-state.js", "utf8");
+
+    expect(messages).not.toMatch(/EBAY_RETRY_ITEM:\s*"EBAY_RETRY_ITEM"/);
+    expect(serviceWorker).not.toMatch(/async function retryEbayItem/);
+    expect(serviceWorker).not.toMatch(/EBAY_PANEL_TO_WORKER\.EBAY_RETRY_ITEM/);
+    expect(sidepanelHtml).not.toContain('id="ebay-drafter-retry"');
+    expect(sidepanelJs).not.toMatch(/ebayDrafterRetry\.addEventListener/);
+    expect(queueState).not.toMatch(/export function applyRetryEbayItem/);
+  });
+
+  it("REQUIREMENT: a failed item's card shows a plain instruction to retry from Listings Review instead of a non-functional button", () => {
+    const sidepanelHtml = readFileSync("vinted-draft-queue-extension/sidepanel.html", "utf8");
+    expect(sidepanelHtml).toContain('id="ebay-drafter-retry-instructions"');
+    expect(sidepanelHtml.toLowerCase()).toContain("listings review");
+    const sidepanelJs = readFileSync("vinted-draft-queue-extension/sidepanel.js", "utf8");
+    expect(sidepanelJs).toContain("ebayDrafterRetryInstructions.hidden = !failed");
+  });
+});
+
+describe("retry truthfulness review — the app-side 'Try again with eBay extension' action", () => {
+  const workspaceSource = readFileSync("components/listings-review/ListingsReviewWorkspace.tsx", "utf8");
+  const routeSource = readFileSync("app/api/listing-studio/ebay-extension-batches/route.ts", "utf8");
+
+  it("REQUIREMENT: retry reuses the SAME authenticated create-batch route as a first send — never a second, separate endpoint (so it inherits the exact same advisory lock / conflict-check / cleanup protections)", () => {
+    expect(routeSource).toContain("rpc/listing_studio_create_ebay_extension_batch");
+    // Only ONE POST handler in this route file — retry is not a second path.
+    expect((routeSource.match(/export async function POST/g) ?? []).length).toBe(1);
+  });
+
+  it("the route surfaces the RPC's own server-derived isRetry flag honestly — never guessed or set by the client", () => {
+    expect(routeSource).toContain("isRetry: created.retry_of_item_id !== null");
+  });
+
+  it("the app UI shows honest, server-derived retry framing — never a client-side guess", () => {
+    expect(workspaceSource).toContain("setEbayExtensionIsRetry(Boolean(body.isRetry))");
+    expect(workspaceSource).toContain("Retrying with the eBay extension");
   });
 });

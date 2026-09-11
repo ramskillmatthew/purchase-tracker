@@ -17,7 +17,10 @@ export const EBAY_PANEL_TO_WORKER = Object.freeze({
   // relaxation doesn't need a new message type.
   EBAY_START_ITEM: "EBAY_START_ITEM",
   EBAY_CANCEL_ITEM: "EBAY_CANCEL_ITEM",
-  EBAY_RETRY_ITEM: "EBAY_RETRY_ITEM",
+  // CORRECTIVE PASS 6 (retry truthfulness review) — deliberately no
+  // EBAY_RETRY_ITEM here any more. A failed item is permanently terminal
+  // for its own id; a real retry is a fresh batch/item created through the
+  // authenticated app, which this side panel has no session for.
   EBAY_CLEAR_BATCH: "EBAY_CLEAR_BATCH",
 });
 

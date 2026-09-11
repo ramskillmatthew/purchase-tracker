@@ -51,30 +51,22 @@ describe("eBay extension queue-state — REQUIREMENT (Phase 8): duplicate protec
     expect(EbayQueueState.isEbayItemAlreadyActive(state, "item-1")).toBe(true);
   });
 
-  it("a FAILED item is NOT 'already active' — it genuinely needs an explicit Retry", () => {
+  it("a FAILED item is NOT 'already active' — it is permanently terminal for its own id, never re-dispatched by this queue", () => {
     let state = EbayQueueState.applyEbayBatchPayload(EbayQueueState.createInitialEbayState(), fixturePayload(), NOW);
     state = EbayQueueState.applyEbayItemFailed(state, "item-1", "SET_TITLE", "boom", NOW);
     expect(EbayQueueState.isEbayItemAlreadyActive(state, "item-1")).toBe(false);
-  });
-
-  it("applyRetryEbayItem only requeues a genuinely FAILED item — a true no-op (same reference) for WAITING_FOR_REVIEW or QUEUED", () => {
-    let state = EbayQueueState.applyEbayBatchPayload(EbayQueueState.createInitialEbayState(), fixturePayload(), NOW);
-    const queued = EbayQueueState.applyRetryEbayItem(state, "item-1");
-    expect(queued).toBe(state); // already queued — same reference back
-
-    state = EbayQueueState.applyEbayItemWaitingForReview(state, "item-1", NOW);
-    const waiting = EbayQueueState.applyRetryEbayItem(state, "item-1");
-    expect(waiting).toBe(state); // a completed operation cannot be replayed by retry either
-
-    state = EbayQueueState.applyEbayItemFailed(state, "item-1", "SET_TITLE", "boom", NOW);
-    const retried = EbayQueueState.applyRetryEbayItem(state, "item-1");
-    expect(retried.batch.items[0].status).toBe(EbayQueueState.EBAY_ITEM_STATUSES.QUEUED);
   });
 
   it("LIFECYCLE FIX (stale-batch review): there is no client-only cancel helper — cancellation is a real server-side atomic operation, not a local status flip", () => {
     expect((EbayQueueState as Record<string, unknown>).applyCancelEbayItem).toBeUndefined();
     const source = require("node:fs").readFileSync("vinted-draft-queue-extension/shared/ebay-queue-state.js", "utf8") as string;
     expect(source).not.toMatch(/export function applyCancelEbayItem/);
+  });
+
+  it("CORRECTIVE PASS 6 (retry truthfulness review): there is no client-only retry helper either — applyRetryEbayItem never existed as a real retry (it only flipped local state and replayed 'preparing' against the same, now-permanently-terminal item id); a real retry is a fresh batch/item from the authenticated app", () => {
+    expect((EbayQueueState as Record<string, unknown>).applyRetryEbayItem).toBeUndefined();
+    const source = require("node:fs").readFileSync("vinted-draft-queue-extension/shared/ebay-queue-state.js", "utf8") as string;
+    expect(source).not.toMatch(/export function applyRetryEbayItem/);
   });
 });
 

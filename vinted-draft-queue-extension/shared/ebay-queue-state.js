@@ -152,21 +152,17 @@ export function applyEbayItemFailed(state, itemId, errorCode, errorMessage, nowI
  * function is the CLIENT-side half: re-sending an item that is already
  * queued/in-flight/waiting-for-review is a safe no-op (same reference
  * back) — it never starts a second attempt, mirroring "re-sending the same
- * operation focuses/resumes it rather than opening another form."  Only a
- * genuinely FAILED item may be retried, and only via applyRetryEbayItem
- * below, never this one.
+ * operation focuses/resumes it rather than opening another form." A
+ * genuinely FAILED item is permanently terminal for ITS OWN id (CORRECTIVE
+ * PASS 5/6 — see supabase-ebay-extension-batches.sql's own top comment); it
+ * is deliberately excluded here too, so nothing in this queue ever
+ * re-dispatches it — a real retry needs a fresh batch/item from the
+ * authenticated app.
  */
 export function isEbayItemAlreadyActive(state, itemId) {
   const item = state.batch?.items?.find(i => i.itemId === itemId);
   if (!item) return false;
   return item.status === EBAY_ITEM_STATUSES.QUEUED || IN_FLIGHT_STATUSES.has(item.status) || item.status === EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW;
-}
-
-/** Only a FAILED item may be retried — a true no-op (same reference back) for anything else, including WAITING_FOR_REVIEW (a completed operation can never be replayed by this function) and CANCELLED (explicit, deliberate — a cancelled item needs a fresh send from the app, not a queue-level retry). */
-export function applyRetryEbayItem(state, itemId) {
-  const item = state.batch?.items?.find(i => i.itemId === itemId);
-  if (!item || item.status !== EBAY_ITEM_STATUSES.FAILED) return state;
-  return applyEbayItemStatus(state, itemId, { status: EBAY_ITEM_STATUSES.QUEUED, errorCode: null, errorMessage: null });
 }
 
 // LIFECYCLE FIX (stale-batch review) — there is deliberately NO

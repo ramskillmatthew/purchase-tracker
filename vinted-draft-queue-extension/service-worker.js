@@ -1738,8 +1738,10 @@ async function downloadPhotoForEbayContentScript(itemId, position) {
  * through. Re-sending an item that is already queued/in-flight/waiting-
  * for-review FOCUSES the existing tab instead of opening a second one —
  * "re-sending the same operation focuses/resumes it rather than opening
- * another form." A genuinely FAILED item requires the explicit Retry
- * action (EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM), never a plain re-send.
+ * another form." A genuinely FAILED item is permanently terminal for THIS
+ * item id (CORRECTIVE PASS 5/6) — it is never re-dispatched from here at
+ * all; a real retry is a fresh batch/item created through the
+ * authenticated app (see the failed-item card's own instructions).
  */
 async function startEbayItem(itemId) {
   const state = await getEbayState();
@@ -1806,10 +1808,17 @@ async function reportEbayItemResult(itemId, status, extra = {}) {
   return next;
 }
 
-async function retryEbayItem(itemId) {
-  const next = await updateEbayState(s => EbayQueueState.applyRetryEbayItem(s, itemId));
-  return { state: next };
-}
+// CORRECTIVE PASS 6 (retry truthfulness review) — there is deliberately no
+// retryEbayItem here any more. It used to flip a failed item's LOCAL
+// status back to 'queued' and re-dispatch it, which re-reported
+// 'preparing' against the SAME server-side item id — an id that is
+// permanently terminal once 'failed' (see the transition-guard review). It
+// never created a new attempt; it just lied. A real retry needs a fresh
+// batch and a fresh item id, created through the authenticated app (which
+// this extension has no session for — only a batch-scoped token) — see
+// supabase-ebay-extension-batches.sql's own top comment for the full
+// design. The failed item's card now points the user back to Listings
+// Review instead (sidepanel.js's renderEbayDrafterState).
 // LIFECYCLE FIX (stale-batch review) — the user Cancel action now does a
 // real, atomic, server-side cancel (the /cancel route -> the
 // listing_studio_cancel_ebay_extension_batch RPC: parent + every live
@@ -1848,7 +1857,6 @@ async function handleEbayMessage(message, sender) {
     case EBAY_PANEL_TO_WORKER.EBAY_GET_STATE: return { state: await getEbayState(), settings: await getSettings() };
     case EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH: return claimEbayBatch(message.pairingCode);
     case EBAY_PANEL_TO_WORKER.EBAY_START_ITEM: return startEbayItem(message.itemId);
-    case EBAY_PANEL_TO_WORKER.EBAY_RETRY_ITEM: return retryEbayItem(message.itemId);
     case EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM: return cancelEbayItem(message.itemId);
     case EBAY_PANEL_TO_WORKER.EBAY_CLEAR_BATCH: return clearEbayBatch();
     case EBAY_CONTENT_TO_WORKER.EBAY_ITEM_STEP_PROGRESS: return { state: await reportEbayItemResult(message.itemId, message.status, message) };

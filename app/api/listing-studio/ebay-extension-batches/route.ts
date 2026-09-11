@@ -104,13 +104,22 @@ export async function POST(request: Request) {
     const pairingCodeHash = hashPairingCode(pairingCode);
     const expiresAtIso = new Date(Date.now() + EBAY_EXTENSION_BATCH_EXPIRY_SECONDS * 1000).toISOString();
 
-    let created: { batch_id: string; display_number: number };
+    // CORRECTIVE PASS 6 (retry truthfulness review) — a genuine retry is
+    // this SAME action, unchanged: the create RPC itself derives
+    // retry_of_item_id server-side (the most recent genuinely 'failed'
+    // item for this owner+listing, if any — see its own comment in
+    // supabase-ebay-extension-batches.sql). Nothing here ever resets or
+    // overwrites that old row; nothing here can create two fresh batches
+    // from a double-click either — the RPC's own owner-scoped advisory
+    // lock and conflict check (unchanged) already serialize this exactly
+    // like every other create-batch call.
+    let created: { batch_id: string; display_number: number; retry_of_item_id: string | null };
     try {
       const rpcResponse = await supabaseRequest("rpc/listing_studio_create_ebay_extension_batch", {
         method: "POST",
         body: JSON.stringify({ p_owner_id: user.id, p_pairing_code_hash: pairingCodeHash, p_expires_at: expiresAtIso, p_marketplace_draft_ids: foundIds }),
       });
-      const [row] = await rpcResponse.json() as { batch_id: string; display_number: number }[];
+      const [row] = await rpcResponse.json() as { batch_id: string; display_number: number; retry_of_item_id: string | null }[];
       created = row;
     } catch (error) {
       if (isDraftAlreadyActiveConflict(error)) {
@@ -119,6 +128,9 @@ export async function POST(request: Request) {
       throw error;
     }
 
-    return NextResponse.json({ batchId: created.batch_id, displayNumber: created.display_number, pairingCode, expiresAt: expiresAtIso, listingCount: foundIds.length });
+    return NextResponse.json({
+      batchId: created.batch_id, displayNumber: created.display_number, pairingCode, expiresAt: expiresAtIso, listingCount: foundIds.length,
+      isRetry: created.retry_of_item_id !== null,
+    });
   } catch (error) { return safeApiError(error, "Could not create an eBay extension batch."); }
 }
