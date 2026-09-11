@@ -40,6 +40,38 @@
 -- transaction, so no committed state can ever show a terminal parent next
 -- to a live-indexed child.
 --
+-- CORRECTIVE PASS 5 (state-transition guard review) — a FOURTH defect,
+-- independent of locking: listing_studio_report_ebay_extension_item_result
+-- accepted ANY valid status while the parent was claimed/in_progress, with
+-- no check that the requested transition made sense against the item's
+-- CURRENT status. That permitted unsafe backwards/out-of-order transitions
+-- (waiting_for_review -> filling, waiting_for_review -> preparing,
+-- filling -> preparing) and repeated 'preparing' reports each incrementing
+-- attempt_count as if every one were a brand-new attempt. Fixed by:
+--   1. An explicit, exhaustive forward-only transition table —
+--      queued -> preparing; preparing -> filling | failed;
+--      filling -> waiting_for_review | failed — checked against the
+--      freshly parent-and-child-locked current status. Any combination not
+--      in this table is refused as a no-op, never silently applied.
+--   2. A single unconditional guard: once a child reaches
+--      'waiting_for_review', 'failed' or 'cancelled', NO further result
+--      report — same status or different — may move it again. A stale,
+--      delayed message arriving after the item is already terminal-for-now
+--      can never reopen it.
+--   3. A same-status report (e.g. 'filling' while already 'filling') is
+--      still accepted as an idempotent PROGRESS update
+--      (current_step/step_detail refreshed) but is explicitly excluded
+--      from bumping attempt_count — only the genuine 'queued' ->
+--      'preparing' transition does that, exactly once per real attempt.
+--   4. 'cancelled' is no longer an accepted status for this RPC (and no
+--      longer accepted at the HTTP request-schema layer either — see
+--      lib/listing-studio/ebay-extension-batch-schema.ts's own matching
+--      comment) — explicit cancellation continues through the dedicated
+--      listing_studio_cancel_ebay_extension_batch RPC only, never through
+--      a result report.
+-- The lock order (parent, then child) and service-role-only grants from
+-- CORRECTIVE PASS 4 are unchanged.
+--
 -- Two real defects were found in the original draft, both fixed below:
 --
 -- DEFECT 1 (inconsistent empty batches) — the original RPC set
@@ -588,6 +620,22 @@ end $$;
 --     catches) is a no-op that reports duplicate := true rather than
 --     raising or silently reapplying side effects (attempt_count,
 --     started_at, etc).
+--
+-- CORRECTIVE PASS 5 (state-transition guard review) — an EXPLICIT,
+-- exhaustive forward-only transition table (see this file's own top
+-- comment for the full defect writeup):
+--     queued    -> preparing
+--     preparing -> filling | failed
+--     filling   -> waiting_for_review | failed
+-- Any (current, requested) pair not in this table is refused as a no-op.
+-- A same-status report is always accepted as an idempotent PROGRESS update
+-- (current_step/step_detail refreshed) WITHOUT incrementing attempt_count —
+-- only the genuine queued -> preparing transition increments it, exactly
+-- once per real attempt. 'waiting_for_review', 'failed' and 'cancelled'
+-- remain unconditionally terminal-for-this-RPC (unchanged from Pass 4);
+-- 'cancelled' is also no longer an ACCEPTED requested status at all —
+-- explicit cancellation continues through
+-- listing_studio_cancel_ebay_extension_batch only.
 -- Returns a single row describing the outcome so the calling route never
 -- has to re-derive it with a second, separately-timed read.
 create or replace function public.listing_studio_report_ebay_extension_item_result(
@@ -611,11 +659,15 @@ declare
   v_now timestamptz := now();
   v_new_started_at timestamptz;
   v_all_closing boolean;
+  v_transition_allowed boolean;
 begin
   if p_batch_id is null or p_item_id is null then
     raise exception 'ARGUMENTS_REQUIRED' using errcode = 'P0001';
   end if;
-  if p_status is null or p_status not in ('queued', 'preparing', 'filling', 'waiting_for_review', 'failed', 'cancelled') then
+  -- CORRECTIVE PASS 5 — 'cancelled' is deliberately NOT an accepted
+  -- requested status here. Explicit cancellation must continue through the
+  -- dedicated Cancel RPC only.
+  if p_status is null or p_status not in ('queued', 'preparing', 'filling', 'waiting_for_review', 'failed') then
     raise exception 'INVALID_STATUS' using errcode = 'P0001';
   end if;
 
@@ -641,25 +693,43 @@ begin
     raise exception 'ITEM_NOT_FOUND' using errcode = 'P0003';
   end if;
 
-  -- "A result must never change a child already 'cancelled'" — a hard,
-  -- unconditional no-op regardless of what status is being reported,
-  -- including a replay of 'cancelled' itself. Cancel's own commit is
-  -- always what put the child here, and it wins permanently.
-  if v_item_status = 'cancelled' then
+  -- CORRECTIVE PASS 5 — ONE unconditional guard implements both
+  -- "waiting_for_review -> no further result transition" and
+  -- "failed/cancelled -> no further result transition" (and, unchanged
+  -- from Pass 4, "a result must never change a child already 'cancelled'"
+  -- / "Cancel must win permanently once committed"). Once a child reaches
+  -- ANY of these three, no report — same status or different — moves it
+  -- again. A stale, delayed message arriving after the item is already
+  -- terminal-for-now can never reopen it.
+  if v_item_status in ('waiting_for_review', 'failed', 'cancelled') then
     item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
     applied := false; duplicate := true;
     return next;
     return;
   end if;
 
-  -- Idempotent replay of the SAME terminal status the child already has —
-  -- a no-op that changes nothing (no re-incremented attempt_count, no
-  -- re-stamped completed_at), reported as a duplicate rather than reapplied.
-  if v_item_status = p_status and v_item_status in ('waiting_for_review', 'failed') then
-    item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
-    applied := false; duplicate := true;
-    return next;
-    return;
+  -- v_item_status is now guaranteed to be 'queued', 'preparing' or 'filling'.
+
+  -- CORRECTIVE PASS 5 — the explicit forward-only transition table. A
+  -- same-status report always falls through as an idempotent progress
+  -- update (handled by the attempt_count/started_at logic below); any
+  -- OTHER requested status must appear in this exact whitelist or the
+  -- report is refused — covers every backward step (filling -> preparing,
+  -- preparing -> queued, waiting_for_review -> filling/preparing — the
+  -- last already caught by the guard above) and every out-of-order skip
+  -- (queued -> filling, queued -> waiting_for_review, queued -> failed).
+  if p_status <> v_item_status then
+    v_transition_allowed :=
+      (v_item_status = 'queued' and p_status = 'preparing')
+      or (v_item_status = 'preparing' and p_status in ('filling', 'failed'))
+      or (v_item_status = 'filling' and p_status in ('waiting_for_review', 'failed'));
+
+    if not v_transition_allowed then
+      item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
+      applied := false; duplicate := true;
+      return next;
+      return;
+    end if;
   end if;
 
   -- "A result may update an item only while its parent remains 'claimed'
@@ -679,13 +749,17 @@ begin
   update public.ebay_extension_batch_items
   set
     status = p_status,
-    attempt_count = case when p_status = 'preparing' then v_item_attempt_count + 1 else v_item_attempt_count end,
+    -- CORRECTIVE PASS 5 — increments ONLY on the genuine 'queued' ->
+    -- 'preparing' transition (a real new attempt), never on a repeated
+    -- 'preparing' -> 'preparing' progress report (the bug this pass fixes:
+    -- "repeated preparing -> repeated attempt_count increments").
+    attempt_count = case when v_item_status = 'queued' and p_status = 'preparing' then v_item_attempt_count + 1 else v_item_attempt_count end,
     started_at = v_new_started_at,
-    completed_at = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then v_now else completed_at end,
+    completed_at = case when p_status in ('waiting_for_review', 'failed') then v_now else completed_at end,
     error_code = case when p_status = 'failed' then p_error_code else null end,
     error_message = case when p_status = 'failed' then p_error_message else null end,
-    current_step = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then null else p_current_step end,
-    step_detail = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then null else p_step_detail end
+    current_step = case when p_status in ('waiting_for_review', 'failed') then null else p_current_step end,
+    step_detail = case when p_status in ('waiting_for_review', 'failed') then null else p_step_detail end
   where id = p_item_id and batch_id = p_batch_id;
 
   update public.ebay_extension_batches

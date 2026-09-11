@@ -186,12 +186,15 @@ describe("cancellation race review — the new item-result RPC's own transaction
     expect(childLockIdx).toBeGreaterThan(-1);
   });
 
-  it("REQUIREMENT: 'a result must never change a child already cancelled' — this check is UNCONDITIONAL (checked before any p_status-specific branching), catching both a plain cancel-race report AND a replayed 'cancelled' report after cancellation (scenarios 1, 2, 3, 5)", () => {
-    const guardIdx = reportBody.indexOf("if v_item_status = 'cancelled' then");
+  it("REQUIREMENT: 'a result must never change a child already cancelled' — this check is UNCONDITIONAL (checked before any p_status-specific branching, including the transition table), catching both a plain cancel-race report AND a replayed 'cancelled' report after cancellation (scenarios 1, 2, 3, 5)", () => {
+    const guardIdx = reportBody.indexOf("if v_item_status in ('waiting_for_review', 'failed', 'cancelled') then");
+    const transitionTableIdx = reportBody.indexOf("v_transition_allowed :=");
     const applyIdx = reportBody.indexOf("update public.ebay_extension_batch_items\n  set\n    status = p_status");
     expect(guardIdx).toBeGreaterThan(-1);
+    expect(transitionTableIdx).toBeGreaterThan(-1);
     expect(applyIdx).toBeGreaterThan(-1);
-    expect(guardIdx).toBeLessThan(applyIdx);
+    expect(guardIdx).toBeLessThan(transitionTableIdx);
+    expect(transitionTableIdx).toBeLessThan(applyIdx);
   });
 
   it("REQUIREMENT: 'a result may update an item only while its parent remains claimed or in_progress' — checked against the freshly parent-locked status, before the update (scenario 4)", () => {
@@ -202,13 +205,8 @@ describe("cancellation race review — the new item-result RPC's own transaction
     expect(guardIdx).toBeLessThan(applyIdx);
   });
 
-  it("a same-status terminal replay (duplicate report) is idempotent — no re-incremented attempt_count, no re-stamped completed_at — and never includes 'cancelled' (that is caught by the unconditional guard above instead)", () => {
-    const idempotentIdx = reportBody.indexOf("v_item_status = p_status and v_item_status in");
-    expect(idempotentIdx).toBeGreaterThan(-1);
-    const line = reportBody.slice(idempotentIdx, reportBody.indexOf("\n", idempotentIdx));
-    expect(line).toContain("'waiting_for_review'");
-    expect(line).toContain("'failed'");
-    expect(line).not.toContain("'cancelled'");
+  it("REQUIREMENT (state-transition guard review): 'cancelled' is no longer an accepted requested status at all — explicit cancellation continues through the dedicated Cancel RPC only", () => {
+    expect(reportBody).toContain("p_status not in ('queued', 'preparing', 'filling', 'waiting_for_review', 'failed')");
   });
 
   it("REQUIREMENT: batch auto-close still checks only failed/cancelled, never waiting_for_review (same discipline as before, now inside the RPC)", () => {
@@ -222,6 +220,180 @@ describe("cancellation race review — the new item-result RPC's own transaction
     const statements = reportBody.split("\n").filter(l => !l.trim().startsWith("--")).join("\n");
     expect(statements).not.toMatch(/\bcommit\b/i);
     expect(statements.match(/\bbegin\b/gi)?.length).toBe(1);
+  });
+});
+
+// ---- CORRECTIVE PASS 5 (state-transition guard review) --------------------
+//
+// A fourth defect, independent of locking: the item-result RPC accepted ANY
+// status while the parent was claimed/in_progress, with no check that the
+// transition made sense against the item's CURRENT status — permitting
+// waiting_for_review -> filling, waiting_for_review -> preparing,
+// filling -> preparing, and unbounded attempt_count growth from repeated
+// 'preparing' reports. Fixed with an explicit, exhaustive forward-only
+// transition table. See supabase-ebay-extension-batches.sql's own top
+// comment.
+describe("state-transition guard review — the explicit forward-only transition table (SQL structure)", () => {
+  it("the whitelist is EXACTLY the three permitted forward transitions — no more, no fewer", () => {
+    const tableIdx = reportBody.indexOf("v_transition_allowed :=");
+    const tableEnd = reportBody.indexOf(";", tableIdx);
+    const table = reportBody.slice(tableIdx, tableEnd);
+    expect(table).toContain("v_item_status = 'queued' and p_status = 'preparing'");
+    expect(table).toContain("v_item_status = 'preparing' and p_status in ('filling', 'failed')");
+    expect(table).toContain("v_item_status = 'filling' and p_status in ('waiting_for_review', 'failed')");
+    // Exactly two 'or' joins between exactly three disjuncts — nothing extra.
+    expect((table.match(/\bor\b/gi) ?? []).length).toBe(2);
+    expect((table.match(/v_item_status = '\w+' and p_status/g) ?? []).length).toBe(3);
+  });
+
+  it("a DIFFERENT requested status is checked against the whitelist ONLY when it differs from the current status — a same-status report skips the whitelist and falls through as an idempotent progress update", () => {
+    const skipIdx = reportBody.indexOf("if p_status <> v_item_status then");
+    const tableIdx = reportBody.indexOf("v_transition_allowed :=");
+    expect(skipIdx).toBeGreaterThan(-1);
+    expect(tableIdx).toBeGreaterThan(skipIdx);
+  });
+
+  it("a transition not in the whitelist is refused as a no-op — never raises, never silently applies", () => {
+    const tableIdx = reportBody.indexOf("v_transition_allowed :=");
+    const rejectBlock = reportBody.slice(tableIdx, reportBody.indexOf("end if;", reportBody.indexOf("if not v_transition_allowed then", tableIdx)));
+    expect(rejectBlock).toContain("if not v_transition_allowed then");
+    expect(rejectBlock).toContain("applied := false; duplicate := true;");
+    expect(rejectBlock).not.toContain("raise exception");
+  });
+
+  it("REQUIREMENT: attempt_count increments ONLY on the genuine 'queued' -> 'preparing' transition — a repeated 'preparing' -> 'preparing' report (v_item_status already 'preparing') does NOT match this condition and leaves attempt_count untouched", () => {
+    const incrementLine = reportBody.split("\n").find(l => l.includes("attempt_count = case"));
+    expect(incrementLine).toBeTruthy();
+    expect(incrementLine).toContain("v_item_status = 'queued' and p_status = 'preparing'");
+    // The OLD, buggy condition (p_status = 'preparing' alone, regardless of
+    // the item's current status) must be gone.
+    expect(incrementLine).not.toMatch(/case when p_status = 'preparing' then/);
+  });
+
+  it("REQUIREMENT: 'cancelled' is not an accepted requested status for this RPC — explicit cancellation continues through the dedicated Cancel RPC only", () => {
+    expect(reportBody).toContain("p_status not in ('queued', 'preparing', 'filling', 'waiting_for_review', 'failed')");
+    // Defence in depth at the HTTP request-schema layer too.
+    const schemaSource = readFileSync("lib/listing-studio/ebay-extension-batch-schema.ts", "utf8");
+    const reportableIdx = schemaSource.indexOf("EBAY_EXTENSION_REPORTABLE_ITEM_STATUSES = [");
+    const reportableLine = schemaSource.slice(reportableIdx, schemaSource.indexOf("]", reportableIdx));
+    expect(reportableIdx).toBeGreaterThan(-1);
+    expect(reportableLine).not.toContain("cancelled");
+    expect(schemaSource).toContain("status: z.enum(EBAY_EXTENSION_REPORTABLE_ITEM_STATUSES)");
+  });
+});
+
+describe("state-transition guard review — behavioural: every permitted transition, every prohibited transition, repeats, stale messages, and races", () => {
+  const ITEM_UUID = "33333333-3333-4333-8333-333333333333";
+
+  beforeEach(() => {
+    process.env.EXTENSION_BATCH_SECRET = "d".repeat(32);
+    process.env.EXTENSION_ORIGIN = "chrome-extension://ocohhcppeflfggaicbpgmjbmekgbkjcl";
+    supabaseRequest.mockReset();
+    supabaseRequestAll.mockReset();
+  });
+
+  async function postResult(status: string) {
+    const { POST } = await import("@/app/api/extension/ebay-batch/items/[itemId]/result/route");
+    const { signBatchToken } = await import("@/lib/listing-studio/extension-batch-tokens");
+    const token = await signBatchToken(BATCH_UUID, 3600);
+    const request = new Request("http://test", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    return POST(request, { params: Promise.resolve({ itemId: ITEM_UUID }) });
+  }
+
+  // ---- Permitted forward transitions ----
+  it.each([
+    ["queued", "preparing"],
+    ["preparing", "filling"],
+    ["preparing", "failed"],
+    ["filling", "waiting_for_review"],
+    ["filling", "failed"],
+  ])("PERMITTED: %s -> %s is forwarded to the RPC and its applied:true result is surfaced honestly", async (_from, to) => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: to, batch_status: "claimed", applied: true, duplicate: false },
+    ]), { status: 200 }));
+
+    const response = await postResult(to);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: to, duplicate: false });
+    const rpcCall = supabaseRequest.mock.calls.find(([path]) => String(path).startsWith("rpc/listing_studio_report_ebay_extension_item_result"));
+    expect(JSON.parse(String((rpcCall![1] as RequestInit).body))).toMatchObject({ p_status: to });
+  });
+
+  // ---- Prohibited backward / out-of-order transitions — the RPC refuses
+  // and reports the item's ACTUAL (unchanged) status; the route must
+  // surface that honestly, never claim the requested status applied.
+  it.each([
+    ["waiting_for_review", "filling"],
+    ["waiting_for_review", "preparing"],
+    ["filling", "preparing"],
+    ["preparing", "queued"],
+    ["queued", "filling"],
+    ["queued", "waiting_for_review"],
+    ["failed", "preparing"],
+  ])("PROHIBITED: a %s -> %s report is refused — the route surfaces the item's actual current status ('%s'), not the requested one", async (current, requested) => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: current, batch_status: "claimed", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const response = await postResult(requested);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: current, duplicate: true });
+  });
+
+  it("REPEATED preparing: a second 'preparing' report while already 'preparing' is forwarded exactly as reported — the RPC (proven structurally above) applies it without a second attempt_count increment", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "preparing", batch_status: "claimed", applied: true, duplicate: false },
+    ]), { status: 200 }));
+
+    const response = await postResult("preparing");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "preparing", duplicate: false });
+  });
+
+  it("REPEATED filling: a second 'filling' progress report while already 'filling' is forwarded exactly as reported", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "filling", batch_status: "claimed", applied: true, duplicate: false },
+    ]), { status: 200 }));
+
+    const response = await postResult("filling");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "filling", duplicate: false });
+  });
+
+  it("DELAYED MESSAGE after waiting_for_review: a late 'filling' progress report arriving after the item already reached waiting_for_review is refused — the route reports 'waiting_for_review', never reopening it", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "waiting_for_review", batch_status: "claimed", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const response = await postResult("filling");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "waiting_for_review", duplicate: true });
+  });
+
+  it("CANCELLATION/RESULT RACE: a 'filling' report arriving after a concurrent Cancel already committed 'cancelled' is refused — the route reports 'cancelled', never resurrecting the item", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "cancelled", batch_status: "cancelled", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const response = await postResult("filling");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "cancelled", duplicate: true });
+  });
+
+  it("REQUIREMENT: a request claiming status: 'cancelled' is rejected at the HTTP boundary (zod) before the RPC is ever called — explicit cancellation must go through the dedicated Cancel RPC only", async () => {
+    const response = await postResult("cancelled");
+    expect(response.status).toBe(400);
+    expect(supabaseRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -388,12 +560,12 @@ describe("cancellation race review — the rewritten item-result route is a thin
     expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "cancelled", duplicate: true });
   });
 
-  it("REQUIREMENT (scenario 3): a replayed report after cancellation is idempotent — no error, duplicate:true, status stays 'cancelled'", async () => {
+  it("REQUIREMENT (scenario 3): a replayed report after cancellation is idempotent — a repeated report of whatever status the extension last sent (e.g. 'filling', its last known state) is refused, honestly reporting 'cancelled', no error. (A replay claiming status: 'cancelled' itself is no longer possible at all — see the state-transition guard review's own coverage of that rejection at the HTTP boundary.)", async () => {
     supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
       { item_id: ITEM_UUID, item_status: "cancelled", batch_status: "cancelled", applied: false, duplicate: true },
     ]), { status: 200 }));
 
-    const response = await postResult({ status: "cancelled" });
+    const response = await postResult({ status: "filling" });
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "cancelled", duplicate: true });

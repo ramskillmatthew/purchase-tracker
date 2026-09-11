@@ -170,8 +170,19 @@ export function isEbayExtensionBatchClosingItemStatus(status: EbayExtensionBatch
   return (BATCH_CLOSING_ITEM_STATUSES as string[]).includes(status);
 }
 
+// CORRECTIVE PASS 5 (state-transition guard review) — 'cancelled' is
+// deliberately EXCLUDED from what a result report may claim. Explicit
+// cancellation must continue through the dedicated
+// listing_studio_cancel_ebay_extension_batch RPC only (see
+// supabase-ebay-extension-batches.sql's own matching top comment) — this
+// request schema must never become a second path to the same effect. A
+// request carrying status: "cancelled" is rejected here, at the HTTP
+// boundary, with a clean validation error, rather than reaching the RPC at
+// all.
+export const EBAY_EXTENSION_REPORTABLE_ITEM_STATUSES = ["queued", "preparing", "filling", "waiting_for_review", "failed"] as const;
+
 export const ebayExtensionItemResultRequestSchema = z.object({
-  status: z.enum(EBAY_EXTENSION_BATCH_ITEM_STATUSES),
+  status: z.enum(EBAY_EXTENSION_REPORTABLE_ITEM_STATUSES),
   errorCode: z.string().max(100).nullable().optional(),
   errorMessage: z.string().max(500).nullable().optional(),
   currentStep: z.string().max(60).nullable().optional(),
