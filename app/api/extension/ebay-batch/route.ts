@@ -49,7 +49,16 @@ export async function GET(request: Request) {
     const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,expires_at,owner_id`);
     const batch = batches[0];
     if (!batch) return extensionCorsJson(request, { error: "Batch not found." }, 404);
-    if (new Date(batch.expires_at).getTime() <= Date.now()) return extensionCorsJson(request, { error: "This batch has expired." }, 410);
+    // LIFECYCLE FIX (stale-batch review) — deliberately NOT gated on
+    // expires_at: that is the PAIRING-CODE window only, and this route is
+    // only ever reached with a valid batch-scoped JWT (verifyBatchToken
+    // above already rejects an expired token — the AUTHENTICATED
+    // EXTENSION-SESSION lifetime). Whether the batch is still active is the
+    // status column's job, not a re-check of the short pairing window a
+    // claimed, mid-fill batch has long since left behind. expires_at is
+    // still SELECTed purely for the informational `expiresAt` payload
+    // field below (it marks when the pairing code stops working for a
+    // fresh claim — never a lifecycle gate here).
     if (batch.status !== "claimed" && batch.status !== "in_progress") {
       return extensionCorsJson(request, { error: `This batch is no longer active (${batch.status}).` }, 409);
     }

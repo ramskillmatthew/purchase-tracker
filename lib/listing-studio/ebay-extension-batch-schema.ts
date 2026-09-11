@@ -22,7 +22,30 @@ export const EBAY_EXTENSION_BATCH_SCHEMA_VERSION = "ebay-extension-batch-v1";
 // This milestone sends exactly one listing per batch — see
 // supabase-ebay-extension-batches.sql's own matching listing_count check.
 export const MAX_EBAY_EXTENSION_BATCH_LISTINGS = 1;
+
+// LIFECYCLE FIX (stale-batch review) — three deliberately-separate
+// lifetimes (see supabase-ebay-extension-batches.sql's own matching
+// section for the full reasoning):
+//
+//   EBAY_EXTENSION_BATCH_EXPIRY_SECONDS — the PAIRING-CODE CLAIM window
+//   only. Stored as ebay_extension_batches.expires_at; enforced ONLY at
+//   the claim boundary. Once a batch is claimed, this value is never used
+//   to expire or cancel it again.
 export const EBAY_EXTENSION_BATCH_EXPIRY_SECONDS = 10 * 60;
+//
+//   EBAY_EXTENSION_TOKEN_LIFETIME_SECONDS — the AUTHENTICATED
+//   EXTENSION-SESSION lifetime: how long the batch-scoped JWT issued at
+//   claim time stays valid, so the mechanical fill (which includes a
+//   human-scale manual condition-selection wait — see
+//   shared/ebay-form-steps.js) can genuinely outlast the short pairing
+//   window. Deliberately independent of expires_at. The payload / photo /
+//   result / heartbeat routes gate on this (a valid token + a
+//   claimed/in_progress status), never on expires_at.
+export const EBAY_EXTENSION_TOKEN_LIFETIME_SECONDS = 4 * 60 * 60;
+//
+//   The ACTIVE POPULATED-FORM lifetime ('waiting_for_review') is
+//   INDEFINITE — no constant, no timer. Released only by an explicit user
+//   Cancel or (a later milestone) a confirmed save.
 
 // Mirrors EXTENSION_PHOTO_PATH_PATTERN exactly, scoped to this feature's
 // own route namespace so an eBay batch's photo path can never be replayed

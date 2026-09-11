@@ -416,6 +416,13 @@ export default function ListingsReviewWorkspace() {
   const [sendToEbayExtensionRunning, setSendToEbayExtensionRunning] = useState(false);
   const [sendToEbayExtensionError, setSendToEbayExtensionError] = useState("");
   const [ebayExtensionPairingCode, setEbayExtensionPairingCode] = useState<string | null>(null);
+  // LIFECYCLE FIX (stale-batch review) — kept alongside the pairing code so
+  // the "Cancel this send" action has an id to target: an atomic
+  // parent+child cancel that releases the duplicate-lock, for the case
+  // where the user creates a batch, never enters the code, and wants to
+  // abandon it without waiting out the pairing window.
+  const [ebayExtensionBatchId, setEbayExtensionBatchId] = useState<string | null>(null);
+  const [ebayExtensionCancelling, setEbayExtensionCancelling] = useState(false);
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -1703,6 +1710,7 @@ export default function ListingsReviewWorkspace() {
     setSendToEbayExtensionRunning(true);
     setSendToEbayExtensionError("");
     setEbayExtensionPairingCode(null);
+    setEbayExtensionBatchId(null);
     try {
       const response = await fetch("/api/listing-studio/ebay-extension-batches", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ marketplaceDraftIds: [marketplaceDraftId] }),
@@ -1710,10 +1718,39 @@ export default function ListingsReviewWorkspace() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) { setSendToEbayExtensionError(body.error || "Could not send this listing to the eBay extension."); return; }
       setEbayExtensionPairingCode(body.pairingCode);
+      setEbayExtensionBatchId(body.batchId ?? null);
     } catch {
       setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
     } finally {
       setSendToEbayExtensionRunning(false);
+    }
+  }
+
+  /**
+   * LIFECYCLE FIX (stale-batch review) — abandon a just-created eBay
+   * extension batch the user never paired: one atomic, service-role-only
+   * transactional cancel (parent + every live child, releasing
+   * ebay_extension_batch_items_live_draft_idx) so the listing is
+   * immediately free to send again, without waiting out the pairing-code
+   * window. Never deletes the listing, the legacy offer, or Feed Batch #1.
+   */
+  async function handleCancelEbayExtensionSend() {
+    if (!ebayExtensionBatchId || ebayExtensionCancelling) return;
+    setEbayExtensionCancelling(true);
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-extension-batches/${ebayExtensionBatchId}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setSendToEbayExtensionError(body.error || "Could not cancel this send.");
+        return;
+      }
+      setEbayExtensionPairingCode(null);
+      setEbayExtensionBatchId(null);
+      setSendToEbayExtensionError("");
+    } catch {
+      setSendToEbayExtensionError("Network error — could not cancel this send.");
+    } finally {
+      setEbayExtensionCancelling(false);
     }
   }
 
@@ -2857,6 +2894,13 @@ export default function ListingsReviewWorkspace() {
             <p className="lr-ebay-status-panel-body">
               Open the extension&apos;s side panel, select the eBay tab, and enter this code: <strong>{ebayExtensionPairingCode}</strong>
             </p>
+            {ebayExtensionBatchId && (
+              <div className="lr-ebay-status-panel-actions">
+                <button type="button" className="button-secondary" disabled={ebayExtensionCancelling} onClick={handleCancelEbayExtensionSend}>
+                  {ebayExtensionCancelling ? "Cancelling…" : "Cancel this send"}
+                </button>
+              </div>
+            )}
           </div>
         )}
         {sendToEbayExtensionError && (

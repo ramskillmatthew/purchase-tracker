@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 export async function OPTIONS(request: Request) { return extensionCorsPreflight(request); }
 
-type BatchRow = { id: string; status: string; expires_at: string; owner_id: string };
+type BatchRow = { id: string; status: string; owner_id: string };
 type ItemRow = { id: string; batch_id: string; status: EbayExtensionBatchItemStatus; attempt_count: number; started_at: string | null };
 
 /**
@@ -32,10 +32,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
     try { ({ batchId } = await verifyBatchToken(token)); }
     catch (error) { if (error instanceof BatchTokenError) return extensionCorsJson(request, { error: error.message }, 401); throw error; }
 
-    const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,expires_at,owner_id`);
+    const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,owner_id`);
     const batch = batches[0];
     if (!batch) return extensionCorsJson(request, { error: "Batch not found." }, 404);
-    if (new Date(batch.expires_at).getTime() <= Date.now()) return extensionCorsJson(request, { error: "This batch has expired." }, 410);
+    // LIFECYCLE FIX (stale-batch review) — not gated on expires_at (the
+    // pairing-code window); the token's own exp + the batch status are the
+    // check. A terminal batch (cancelled/completed/expired) still rejects
+    // here so a late report can't resurrect it. See
+    // app/api/extension/ebay-batch/route.ts's own matching comment.
     if (batch.status === "cancelled" || batch.status === "completed" || batch.status === "expired") {
       return extensionCorsJson(request, { error: "This batch is no longer active." }, 409);
     }

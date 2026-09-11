@@ -281,6 +281,45 @@ begin
     raise exception 'DRAFT_NOT_ELIGIBLE' using errcode = 'P0003';
   end if;
 
+  -- ---- LIFECYCLE FIX (stale-batch review): safe cleanup of an abandoned
+  -- pairing code BEFORE the conflict check. Scoped to THIS owner + THIS
+  -- exact listing: any batch still 'pending_claim' whose pairing-code
+  -- window has genuinely elapsed (expires_at <= now()) is fully expired
+  -- here — parent -> 'expired', every still-live child -> 'cancelled',
+  -- both stamped completed_at — inside this same transaction and advisory
+  -- lock, so an abandoned/never-entered pairing code can never leave a
+  -- 'queued' child permanently occupying ebay_extension_batch_items_live_draft_idx
+  -- and blocking a resend. Deliberately NEVER touches a batch that was
+  -- actually claimed ('claimed'/'in_progress'/etc are all excluded by the
+  -- `status = 'pending_claim'` filter) — the short pairing window ending
+  -- must never kill a claimed, mid-fill or waiting-for-review operation
+  -- (see this file's own new expire/cancel RPCs below for those distinct
+  -- lifecycles). 'waiting_for_review' children are excluded from the child
+  -- update too, as defence in depth, even though a 'pending_claim' parent
+  -- can never legitimately have one.
+  update public.ebay_extension_batch_items bi
+  set status = 'cancelled', completed_at = now()
+  from public.ebay_extension_batches b
+  where bi.batch_id = b.id
+    and b.owner_id = p_owner_id
+    and b.status = 'pending_claim'
+    and b.expires_at <= now()
+    and bi.status in ('queued', 'preparing', 'filling')
+    and exists (
+      select 1 from public.ebay_extension_batch_items x
+      where x.batch_id = b.id and x.marketplace_draft_id = v_marketplace_draft_id
+    );
+
+  update public.ebay_extension_batches b
+  set status = 'expired', completed_at = coalesce(b.completed_at, now())
+  where b.owner_id = p_owner_id
+    and b.status = 'pending_claim'
+    and b.expires_at <= now()
+    and exists (
+      select 1 from public.ebay_extension_batch_items x
+      where x.batch_id = b.id and x.marketplace_draft_id = v_marketplace_draft_id
+    );
+
   -- ---- DEFECT 2 FIX: 'waiting_for_review' now correctly counts as active. ----
   select bi.marketplace_draft_id into v_conflicting_draft
   from public.ebay_extension_batch_items bi
@@ -333,17 +372,142 @@ begin
   grant execute on function public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[]) to service_role;
 end $$;
 
+-- ============================================================================
+-- LIFECYCLE FIX (stale-batch review) — three distinct lifecycles, three
+-- distinct mechanisms:
+--
+--   1. PAIRING-CODE CLAIM EXPIRY (short, ~10 min) — the window to type the
+--      code into the extension. Enforced ONLY at the claim boundary
+--      (app/api/extension/ebay-batch/claim/route.ts) and by
+--      listing_studio_expire_ebay_extension_batch below. Once a batch is
+--      'claimed', this window is irrelevant to it and must never expire or
+--      cancel it (review requirement 4).
+--
+--   2. AUTHENTICATED EXTENSION-SESSION LIFETIME (medium, hours) — how long
+--      the batch-scoped JWT the claim route issues stays valid, so the
+--      mechanical fill (search -> category -> a human-scale manual
+--      condition wait -> fill -> photo uploads) can genuinely outlast the
+--      pairing window. This is the JWT's own `exp`
+--      (EBAY_EXTENSION_TOKEN_LIFETIME_SECONDS in
+--      lib/listing-studio/ebay-extension-batch-schema.ts), independent of
+--      ebay_extension_batches.expires_at. The batch-payload / photo /
+--      result / heartbeat routes gate on THIS (a valid token + a
+--      'claimed'/'in_progress' status), never on expires_at.
+--
+--   3. ACTIVE POPULATED-FORM LIFETIME (indefinite) — a 'waiting_for_review'
+--      item has a real, populated Seller Hub tab open; it stays
+--      duplicate-protected with NO time-based expiry at all, released only
+--      by an explicit user Cancel
+--      (listing_studio_cancel_ebay_extension_batch below) or, a later
+--      milestone, a confirmed save (review requirements 5 and 6).
+-- ============================================================================
+
+-- Expires ONE never-claimed batch atomically. Called by the claim route
+-- (unauthenticated — it has only the batch id from its own pairing-hash
+-- lookup) via the service-role client, never as two independent PATCHes.
+-- A hard no-op (no rows changed, no error) for any batch not currently
+-- 'pending_claim' — so a batch claimed in the race between the claim
+-- route's lookup and this call is left completely untouched (review
+-- requirement 4). 'waiting_for_review' children are excluded from the
+-- child cancel as defence in depth (a 'pending_claim' parent can never
+-- legitimately have one).
+create or replace function public.listing_studio_expire_ebay_extension_batch(
+  p_batch_id uuid
+)
+returns void
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  update public.ebay_extension_batch_items bi
+  set status = 'cancelled', completed_at = now()
+  from public.ebay_extension_batches b
+  where bi.batch_id = b.id
+    and b.id = p_batch_id
+    and b.status = 'pending_claim'
+    and b.expires_at <= now()
+    and bi.status in ('queued', 'preparing', 'filling');
+
+  update public.ebay_extension_batches b
+  set status = 'expired', completed_at = coalesce(b.completed_at, now())
+  where b.id = p_batch_id
+    and b.status = 'pending_claim'
+    and b.expires_at <= now();
+end;
+$$;
+
+revoke all on function public.listing_studio_expire_ebay_extension_batch(uuid) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_expire_ebay_extension_batch(uuid) from anon, authenticated;
+  grant execute on function public.listing_studio_expire_ebay_extension_batch(uuid) to service_role;
+end $$;
+
+-- Explicit user Cancel — atomically cancels the parent AND every still-live
+-- child (INCLUDING 'waiting_for_review', unlike the expiry RPC — this is a
+-- deliberate human action, not a passive timeout), releasing the
+-- duplicate-lock immediately. Owner-checked inside: the batch must belong
+-- to p_owner_id or nothing happens (a hard no-op, no error — never
+-- reveals whether the id exists under a different owner). A hard no-op
+-- too for a batch already terminal ('completed'/'cancelled'/'expired').
+-- NEVER touches listing_drafts, listing_marketplace_drafts, the legacy
+-- Inventory API offer, or ebay_feed_batches — only these two extension
+-- tables' own status columns (review requirement 8).
+create or replace function public.listing_studio_cancel_ebay_extension_batch(
+  p_owner_id uuid,
+  p_batch_id uuid
+)
+returns void
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if p_owner_id is null or p_batch_id is null then
+    raise exception 'ARGUMENTS_REQUIRED' using errcode = 'P0001';
+  end if;
+
+  update public.ebay_extension_batch_items bi
+  set status = 'cancelled', completed_at = now()
+  from public.ebay_extension_batches b
+  where bi.batch_id = b.id
+    and b.id = p_batch_id
+    and b.owner_id = p_owner_id
+    and b.status not in ('completed', 'cancelled', 'expired')
+    and bi.status in ('queued', 'preparing', 'filling', 'waiting_for_review');
+
+  update public.ebay_extension_batches b
+  set status = 'cancelled', completed_at = coalesce(b.completed_at, now())
+  where b.id = p_batch_id
+    and b.owner_id = p_owner_id
+    and b.status not in ('completed', 'cancelled', 'expired');
+end;
+$$;
+
+revoke all on function public.listing_studio_cancel_ebay_extension_batch(uuid, uuid) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_cancel_ebay_extension_batch(uuid, uuid) from anon, authenticated;
+  grant execute on function public.listing_studio_cancel_ebay_extension_batch(uuid, uuid) to service_role;
+end $$;
+
 -- READ-ONLY PERMISSION VERIFIER — run this manually in the Supabase SQL
 -- editor AFTER applying the migration above (never as part of it). Expected
--- (not yet verified): anon=false, authenticated=false, service_role=true
--- for the function, AND all four table-privilege booleans false for both
--- anon and authenticated (proving neither role can read either table
--- directly, not just that they can't call the function).
+-- (not yet verified): every *_execute column true for service_role only
+-- and false for anon/authenticated on ALL THREE functions, AND every
+-- table-privilege boolean false for both anon and authenticated (proving
+-- neither role can read either table directly, not just that they can't
+-- call the functions).
 --
 -- select
---   has_function_privilege('anon', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as anon_execute,
---   has_function_privilege('authenticated', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as authenticated_execute,
---   has_function_privilege('service_role', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as service_role_execute,
+--   has_function_privilege('anon', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as anon_execute_create,
+--   has_function_privilege('authenticated', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as authenticated_execute_create,
+--   has_function_privilege('service_role', 'public.listing_studio_create_ebay_extension_batch(uuid, text, timestamptz, uuid[])', 'EXECUTE') as service_role_execute_create,
+--   has_function_privilege('anon', 'public.listing_studio_expire_ebay_extension_batch(uuid)', 'EXECUTE') as anon_execute_expire,
+--   has_function_privilege('authenticated', 'public.listing_studio_expire_ebay_extension_batch(uuid)', 'EXECUTE') as authenticated_execute_expire,
+--   has_function_privilege('service_role', 'public.listing_studio_expire_ebay_extension_batch(uuid)', 'EXECUTE') as service_role_execute_expire,
+--   has_function_privilege('anon', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as anon_execute_cancel,
+--   has_function_privilege('authenticated', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as authenticated_execute_cancel,
+--   has_function_privilege('service_role', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as service_role_execute_cancel,
 --   has_table_privilege('anon', 'public.ebay_extension_batches', 'SELECT') as anon_select_batches,
 --   has_table_privilege('authenticated', 'public.ebay_extension_batches', 'SELECT') as authenticated_select_batches,
 --   has_table_privilege('anon', 'public.ebay_extension_batch_items', 'SELECT') as anon_select_items,

@@ -2058,7 +2058,12 @@ describe("REQUIREMENT (Phase 7 action-area redesign): exactly one eBay primary a
   });
 
   it("the status panel's own primary actions are mutually exclusive: needs_reconciliation shows Reconcile, failed shows Retry, active-stalled shows Resume — never more than one kind's button in the same render", () => {
-    const panelStart = workspaceSource.indexOf('className="lr-ebay-status-panel-actions"');
+    // Anchor on the Feed status panel specifically (the eBay extension
+    // drafter's own pairing-code panel reuses the .lr-ebay-status-panel-actions
+    // style for its "Cancel this send" button and appears earlier in
+    // source) — search from the Feed panel's own distinctive reasons list.
+    const feedPanelAnchor = workspaceSource.indexOf("ebayIneligibleBlockingReasons.map(reason =>");
+    const panelStart = workspaceSource.indexOf('className="lr-ebay-status-panel-actions"', feedPanelAnchor);
     const panelBody = workspaceSource.slice(panelStart, panelStart + 1200);
     expect(panelBody).toContain('ebayBlockingBatchAction?.kind === "needs_reconciliation" && (');
     expect(panelBody).toContain('ebayBlockingBatchAction?.kind === "failed" && <>');

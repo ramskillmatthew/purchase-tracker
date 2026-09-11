@@ -1,7 +1,7 @@
 import { supabaseRequest } from "@/lib/supabase";
 import { hashPairingCode } from "@/lib/listing-studio/extension-pairing-code";
 import { signBatchToken } from "@/lib/listing-studio/extension-batch-tokens";
-import { ebayExtensionClaimRequestSchema } from "@/lib/listing-studio/ebay-extension-batch-schema";
+import { ebayExtensionClaimRequestSchema, EBAY_EXTENSION_TOKEN_LIFETIME_SECONDS } from "@/lib/listing-studio/ebay-extension-batch-schema";
 import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError, requestIpForRateLimit } from "@/lib/listing-studio/extension-cors";
 import { enforceRateLimit } from "@/lib/security/activity";
 
@@ -41,8 +41,14 @@ export async function POST(request: Request) {
     if (!batch) return genericError();
 
     if (new Date(batch.expires_at).getTime() <= Date.now()) {
-      await supabaseRequest(`ebay_extension_batches?id=eq.${batch.id}&status=eq.pending_claim`, {
-        method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "expired" }),
+      // LIFECYCLE FIX (stale-batch review) — expire the parent AND its
+      // still-queued child(ren) ATOMICALLY, via a single service-role-only
+      // transactional RPC (never the old two independent PATCHes, which
+      // left the child 'queued' and permanently occupying the
+      // duplicate-lock index). A hard no-op inside the RPC if the batch
+      // was claimed in the race since the lookup above.
+      await supabaseRequest("rpc/listing_studio_expire_ebay_extension_batch", {
+        method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ p_batch_id: batch.id }),
       }).catch(() => {});
       return genericError();
     }
@@ -58,8 +64,14 @@ export async function POST(request: Request) {
     if (!claimedRows.length) return genericError();
 
     claimStage = "token_signing";
-    const expiresInSeconds = Math.max(1, Math.floor((new Date(batch.expires_at).getTime() - Date.now()) / 1000));
-    const batchToken = await signBatchToken(batch.id, expiresInSeconds);
+    // LIFECYCLE FIX (stale-batch review) — the token's life is the
+    // AUTHENTICATED EXTENSION-SESSION lifetime (hours), deliberately
+    // decoupled from the batch's own PAIRING-CODE window (expires_at,
+    // minutes). The mechanical fill — search, category, a human-scale
+    // manual condition wait, form fill, photo uploads — routinely
+    // outlasts the pairing window, and once claimed the batch must not be
+    // functionally killed by that window ending (review requirements 4/5).
+    const batchToken = await signBatchToken(batch.id, EBAY_EXTENSION_TOKEN_LIFETIME_SECONDS);
 
     return extensionCorsJson(request, { batchToken, batchId: batch.id, expiresAt: batch.expires_at });
   } catch (error) { return extensionSafeApiError(request, error, `Could not claim this eBay batch (${claimStage}).`); }

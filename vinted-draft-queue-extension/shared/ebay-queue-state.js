@@ -169,12 +169,15 @@ export function applyRetryEbayItem(state, itemId) {
   return applyEbayItemStatus(state, itemId, { status: EBAY_ITEM_STATUSES.QUEUED, errorCode: null, errorMessage: null });
 }
 
-/** Only a QUEUED item may be cancelled — anything genuinely in flight is left alone, mirroring queue-state.js's own applyCancelRemaining. */
-export function applyCancelEbayItem(state, itemId) {
-  const item = state.batch?.items?.find(i => i.itemId === itemId);
-  if (!item || item.status !== EBAY_ITEM_STATUSES.QUEUED) return state;
-  return applyEbayItemStatus(state, itemId, { status: EBAY_ITEM_STATUSES.CANCELLED });
-}
+// LIFECYCLE FIX (stale-batch review) — there is deliberately NO
+// client-only cancel helper here any more. The user Cancel action is a
+// real, atomic, SERVER-SIDE operation
+// (listing_studio_cancel_ebay_extension_batch: parent + every live child,
+// releasing the duplicate-lock), after which service-worker.js's
+// cancelEbayItem clears the whole local eBay queue. A pure function that
+// only flipped a local 'queued' item to 'cancelled' could never release
+// the database-level lock, and could never cancel a 'waiting_for_review'
+// form — the two states this feature most needs a real cancel for.
 
 export function applyEbaySelectedTab(state, tabId) {
   if (!state.batch) return state;

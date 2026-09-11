@@ -71,11 +71,10 @@ describe("eBay extension queue-state — REQUIREMENT (Phase 8): duplicate protec
     expect(retried.batch.items[0].status).toBe(EbayQueueState.EBAY_ITEM_STATUSES.QUEUED);
   });
 
-  it("applyCancelEbayItem only cancels a genuinely QUEUED item — never one already in flight", () => {
-    let state = EbayQueueState.applyEbayBatchPayload(EbayQueueState.createInitialEbayState(), fixturePayload(), NOW);
-    state = EbayQueueState.applyEbayItemAttemptStarting(state, "item-1", NOW);
-    const unchanged = EbayQueueState.applyCancelEbayItem(state, "item-1");
-    expect(unchanged).toBe(state);
+  it("LIFECYCLE FIX (stale-batch review): there is no client-only cancel helper — cancellation is a real server-side atomic operation, not a local status flip", () => {
+    expect((EbayQueueState as Record<string, unknown>).applyCancelEbayItem).toBeUndefined();
+    const source = require("node:fs").readFileSync("vinted-draft-queue-extension/shared/ebay-queue-state.js", "utf8") as string;
+    expect(source).not.toMatch(/export function applyCancelEbayItem/);
   });
 });
 

@@ -1810,9 +1810,32 @@ async function retryEbayItem(itemId) {
   const next = await updateEbayState(s => EbayQueueState.applyRetryEbayItem(s, itemId));
   return { state: next };
 }
-async function cancelEbayItem(itemId) {
-  const next = await updateEbayState(s => EbayQueueState.applyCancelEbayItem(s, itemId));
-  return { state: next };
+// LIFECYCLE FIX (stale-batch review) — the user Cancel action now does a
+// real, atomic, server-side cancel (the /cancel route -> the
+// listing_studio_cancel_ebay_extension_batch RPC: parent + every live
+// child, INCLUDING waiting_for_review, releasing the duplicate-lock),
+// then reflects that locally — never just a client-only status flip on a
+// still-queued item (which left the DB row live and the listing blocked).
+// Works in ANY non-terminal state, not only 'queued'.
+async function cancelEbayItem(_itemId) {
+  const state = await getEbayState();
+  if (!state.pairing?.batchToken) return { error: "No active eBay batch to cancel." };
+  const { appBaseUrl } = await getSettings();
+  try {
+    const response = await fetch(`${appBaseUrl}/api/extension/ebay-batch/cancel`, {
+      method: "POST", headers: { Authorization: `Bearer ${state.pairing.batchToken}` },
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      return { error: body.error || "Could not cancel this eBay listing." };
+    }
+  } catch (error) {
+    return { error: `Could not reach the app to cancel (${error?.name || "Error"}).` };
+  }
+  // The server is now the source of truth (batch + item cancelled); clear
+  // the local eBay queue so the side panel returns to its idle/paired
+  // state and the listing is free to be re-sent from the app.
+  return { state: await setEbayState(EbayQueueState.createInitialEbayState()) || EbayQueueState.createInitialEbayState() };
 }
 async function clearEbayBatch() {
   const current = await getEbayState();

@@ -807,10 +807,19 @@ function renderEbayDrafterState(state = { pairing: null, batch: null }) {
   els.ebayDrafterItemError.textContent = failed ? (item.errorMessage || "This listing could not be filled.") : "";
 
   const inFlight = item.status === EBAY_ITEM_STATUSES.PREPARING || item.status === EBAY_ITEM_STATUSES.FILLING;
+  const cancelled = item.status === EBAY_ITEM_STATUSES.CANCELLED;
   els.ebayDrafterStart.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
   els.ebayDrafterStart.disabled = inFlight;
   els.ebayDrafterRetry.hidden = !failed;
-  els.ebayDrafterCancel.hidden = item.status !== EBAY_ITEM_STATUSES.QUEUED;
+  // LIFECYCLE FIX (stale-batch review) — Cancel is available in EVERY
+  // non-terminal state, not just 'queued': a mid-fill or (especially) a
+  // 'waiting_for_review' operation is exactly what a real, atomic,
+  // lock-releasing cancel is for. It does a genuine server-side cancel
+  // (see service-worker.js's cancelEbayItem), never a local status flip.
+  els.ebayDrafterCancel.hidden = failed || cancelled;
+  els.ebayDrafterCancel.textContent = item.status === EBAY_ITEM_STATUSES.WAITING_FOR_REVIEW
+    ? "Cancel — discard this Seller Hub form"
+    : "Cancel this listing";
 }
 
 els.ebayDrafterTab.addEventListener("click", () => selectAssistantTab("ebay-drafter"));
@@ -850,8 +859,17 @@ els.ebayDrafterCancel.addEventListener("click", async () => {
   const state = (await send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)).state;
   const item = state?.batch?.items?.[0];
   if (!item) return;
-  const result = await send(EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM, { itemId: item.itemId });
-  if (result.state) renderEbayDrafterState(result.state);
+  els.ebayDrafterCancel.disabled = true;
+  try {
+    // EBAY_CANCEL_ITEM now does a real server-side atomic cancel (parent +
+    // every live child, releasing the duplicate-lock) then clears the
+    // local queue — see service-worker.js's cancelEbayItem.
+    const result = await send(EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM, { itemId: item.itemId });
+    if (result.error) { els.ebayDrafterItemError.textContent = result.error; els.ebayDrafterItemError.hidden = false; return; }
+    if (result.state) renderEbayDrafterState(result.state);
+  } finally {
+    els.ebayDrafterCancel.disabled = false;
+  }
 });
 
 const EBAY_STATUS_LABELS = { waiting: "Waiting", imported: "Imported", failed: "Failed" };

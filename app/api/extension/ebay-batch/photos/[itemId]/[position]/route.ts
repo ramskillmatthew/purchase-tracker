@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 
 export async function OPTIONS(request: Request) { return extensionCorsPreflight(request); }
 
-type BatchRow = { id: string; status: string; expires_at: string; owner_id: string };
+type BatchRow = { id: string; status: string; owner_id: string };
 type ItemRow = { id: string; batch_id: string; product_draft_id: string };
 type ImageRow = { id: string; storage_path: string; mime_type: string; sort_order: number };
 
@@ -34,10 +34,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ item
     try { ({ batchId } = await verifyBatchToken(token)); }
     catch (error) { if (error instanceof BatchTokenError) return extensionCorsJson(request, { error: error.message }, 401); throw error; }
 
-    const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,expires_at,owner_id`);
+    const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,owner_id`);
     const batch = batches[0];
     if (!batch) return extensionCorsJson(request, { error: "Batch not found." }, 404);
-    if (new Date(batch.expires_at).getTime() <= Date.now()) return extensionCorsJson(request, { error: "This batch has expired." }, 410);
+    // LIFECYCLE FIX (stale-batch review) — not gated on expires_at (the
+    // pairing-code window); a valid token + a claimed/in_progress status
+    // is the check. See app/api/extension/ebay-batch/route.ts's own
+    // matching comment.
     if (batch.status !== "claimed" && batch.status !== "in_progress") return extensionCorsJson(request, { error: "This batch is no longer active." }, 409);
 
     const items = await supabaseRequestAll<ItemRow>(`ebay_extension_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}&select=id,batch_id,product_draft_id`);
