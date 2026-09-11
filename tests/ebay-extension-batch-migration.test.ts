@@ -142,11 +142,13 @@ describe("eBay extension batch migration — application-layer half of Defect 2'
     expect(schema.isEbayExtensionBatchClosingItemStatus("queued")).toBe(false);
   });
 
-  it("STRUCTURAL: the item-result route uses isEbayExtensionBatchClosingItemStatus for its batch-completion check, never the broader isTerminalEbayExtensionItemStatus", () => {
+  it("STRUCTURAL (CORRECTIVE PASS 4): the item-result route no longer performs its own batch-completion check at all — that logic, and its own only-failed/cancelled-close discipline, now live inside listing_studio_report_ebay_extension_item_result (see the lifecycle test file's own coverage of that RPC's SQL text)", () => {
     const source = readFileSync("app/api/extension/ebay-batch/items/[itemId]/result/route.ts", "utf8");
-    const checkIdx = source.indexOf("allItems.every(");
-    const checkLine = source.slice(checkIdx, source.indexOf(")", checkIdx) + 1);
-    expect(checkLine).toContain("isEbayExtensionBatchClosingItemStatus");
-    expect(checkLine).not.toContain("isTerminalEbayExtensionItemStatus");
+    expect(source).not.toContain("allItems.every(");
+    expect(source).not.toContain("isEbayExtensionBatchClosingItemStatus");
+    expect(source).not.toContain("isTerminalEbayExtensionItemStatus");
+    // It calls the RPC, not any direct table read/write of its own.
+    expect(source).toContain("rpc/listing_studio_report_ebay_extension_item_result");
+    expect(source).not.toMatch(/supabaseRequestAll/);
   });
 });

@@ -8,6 +8,38 @@
 -- migrate away from; overwriting is safe and deliberate, not a second
 -- migration layered on top of a first).
 --
+-- CORRECTIVE PASS 4 (cancellation race review) — a THIRD concurrency defect
+-- was found and fixed, on top of the two lifecycle fixes below:
+-- listing_studio_cancel_ebay_extension_batch updated its child row(s) BEFORE
+-- its parent row, with no explicit lock acquired on either beforehand,
+-- while the (now-retired) item-result HTTP route read the parent with a
+-- plain, lock-free SELECT and later PATCHed the child independently. A
+-- result report racing a concurrent Cancel could read the batch while still
+-- active, then — after Cancel committed 'cancelled' on both rows — overwrite
+-- the child back to a LIVE status (e.g. 'waiting_for_review'), leaving a
+-- cancelled parent with a child still occupying
+-- ebay_extension_batch_items_live_draft_idx forever (the exact stuck-batch
+-- shape the earlier lifecycle fix existed to prevent, reached a different
+-- way). Fixed by:
+--   1. Giving listing_studio_expire_ebay_extension_batch and
+--      listing_studio_cancel_ebay_extension_batch an explicit
+--      `select ... for update` on the PARENT row as their very first
+--      statement, BEFORE any child row is touched.
+--   2. Replacing the item-result HTTP route's own direct
+--      SELECT+PATCH+PATCH with a THIRD transactional, service-role-only
+--      RPC, listing_studio_report_ebay_extension_item_result, which uses
+--      the exact same lock order: parent row locked first (`for update`),
+--      status re-checked, THEN the child row locked and updated.
+-- All three functions therefore always acquire parent-then-child locks,
+-- never child-then-parent — so no two of them can ever deadlock against
+-- each other, and a concurrent pair always serializes (the second blocks on
+-- the parent lock until the first commits, then re-reads the now-current
+-- parent status before deciding anything) rather than interleaving. A
+-- transaction that commits a terminal parent status (cancelled/expired)
+-- always commits its own child transition to 'cancelled' in the SAME
+-- transaction, so no committed state can ever show a terminal parent next
+-- to a live-indexed child.
+--
 -- Two real defects were found in the original draft, both fixed below:
 --
 -- DEFECT 1 (inconsistent empty batches) — the original RPC set
@@ -411,6 +443,17 @@ end $$;
 -- requirement 4). 'waiting_for_review' children are excluded from the
 -- child cancel as defence in depth (a 'pending_claim' parent can never
 -- legitimately have one).
+--
+-- CONCURRENCY FIX (cancellation race review) — the parent row is locked
+-- FIRST (`for update`), before any child row is touched, and the
+-- eligibility check is re-read from that locked row rather than folded
+-- into the later UPDATEs' own WHERE clauses. This is the SAME lock order
+-- used by listing_studio_cancel_ebay_extension_batch and
+-- listing_studio_report_ebay_extension_item_result below (see this file's
+-- own top comment) — a concurrent call from either of those against the
+-- SAME batch blocks here until one of the two transactions commits, then
+-- the other re-reads the now-current status before deciding anything, so
+-- neither can interleave with a half-finished parent/child pair.
 create or replace function public.listing_studio_expire_ebay_extension_batch(
   p_batch_id uuid
 )
@@ -418,21 +461,27 @@ returns void
 language plpgsql
 set search_path = public, pg_temp
 as $$
+declare
+  v_status text;
+  v_expires_at timestamptz;
 begin
+  select b.status, b.expires_at into v_status, v_expires_at
+  from public.ebay_extension_batches b
+  where b.id = p_batch_id
+  for update;
+
+  if not found or v_status <> 'pending_claim' or v_expires_at > now() then
+    return;
+  end if;
+
   update public.ebay_extension_batch_items bi
   set status = 'cancelled', completed_at = now()
-  from public.ebay_extension_batches b
-  where bi.batch_id = b.id
-    and b.id = p_batch_id
-    and b.status = 'pending_claim'
-    and b.expires_at <= now()
+  where bi.batch_id = p_batch_id
     and bi.status in ('queued', 'preparing', 'filling');
 
   update public.ebay_extension_batches b
   set status = 'expired', completed_at = coalesce(b.completed_at, now())
-  where b.id = p_batch_id
-    and b.status = 'pending_claim'
-    and b.expires_at <= now();
+  where b.id = p_batch_id;
 end;
 $$;
 
@@ -453,6 +502,19 @@ end $$;
 -- NEVER touches listing_drafts, listing_marketplace_drafts, the legacy
 -- Inventory API offer, or ebay_feed_batches — only these two extension
 -- tables' own status columns (review requirement 8).
+--
+-- CONCURRENCY FIX (cancellation race review) — the parent row is locked
+-- FIRST (`for update`), before any child row is touched, and the
+-- owner/terminal-status checks are re-read from that locked row rather than
+-- folded into the later UPDATEs' own WHERE clauses. This is what makes
+-- Cancel win PERMANENTLY once committed: a concurrent
+-- listing_studio_report_ebay_extension_item_result call for the SAME batch
+-- either wins the parent lock first (in which case THIS call then sees
+-- whatever status it left behind) or loses it and blocks here until this
+-- transaction commits — at which point its own re-read of the parent
+-- (locked in the same order) sees 'cancelled' and refuses to touch the
+-- child at all (see that function's own comment). Neither call can ever
+-- observe a half-committed parent/child pair.
 create or replace function public.listing_studio_cancel_ebay_extension_batch(
   p_owner_id uuid,
   p_batch_id uuid
@@ -461,25 +523,31 @@ returns void
 language plpgsql
 set search_path = public, pg_temp
 as $$
+declare
+  v_owner_id uuid;
+  v_status text;
 begin
   if p_owner_id is null or p_batch_id is null then
     raise exception 'ARGUMENTS_REQUIRED' using errcode = 'P0001';
   end if;
 
+  select b.owner_id, b.status into v_owner_id, v_status
+  from public.ebay_extension_batches b
+  where b.id = p_batch_id
+  for update;
+
+  if not found or v_owner_id <> p_owner_id or v_status in ('completed', 'cancelled', 'expired') then
+    return;
+  end if;
+
   update public.ebay_extension_batch_items bi
   set status = 'cancelled', completed_at = now()
-  from public.ebay_extension_batches b
-  where bi.batch_id = b.id
-    and b.id = p_batch_id
-    and b.owner_id = p_owner_id
-    and b.status not in ('completed', 'cancelled', 'expired')
+  where bi.batch_id = p_batch_id
     and bi.status in ('queued', 'preparing', 'filling', 'waiting_for_review');
 
   update public.ebay_extension_batches b
   set status = 'cancelled', completed_at = coalesce(b.completed_at, now())
-  where b.id = p_batch_id
-    and b.owner_id = p_owner_id
-    and b.status not in ('completed', 'cancelled', 'expired');
+  where b.id = p_batch_id;
 end;
 $$;
 
@@ -490,10 +558,175 @@ begin
   grant execute on function public.listing_studio_cancel_ebay_extension_batch(uuid, uuid) to service_role;
 end $$;
 
+-- Transactional item-result reporting — REPLACES the old direct
+-- SELECT+PATCH+PATCH the HTTP route used to perform (see this file's own
+-- top "CORRECTIVE PASS 4" comment for the exact race this closes). Called
+-- by app/api/extension/ebay-batch/items/[itemId]/result/route.ts once per
+-- extension progress/result report, via the service-role client only.
+--
+-- Lock order matches listing_studio_expire_ebay_extension_batch and
+-- listing_studio_cancel_ebay_extension_batch exactly: the PARENT batch row
+-- is locked first (`for update`), its status re-checked, and ONLY THEN is
+-- the child item row locked and updated. Concretely, this enforces every
+-- review requirement in one place:
+--   - "A result may update an item only while its parent remains 'claimed'
+--     or 'in_progress'" — checked against the freshly-locked parent row,
+--     never a stale earlier read.
+--   - "A result must never change a child already 'cancelled'" — checked
+--     against the freshly-locked child row, after the parent lock is held,
+--     so a Cancel that committed while this call was blocked on the parent
+--     lock is always visible here before the child is touched.
+--   - "Cancel must win permanently once committed" — a direct consequence
+--     of the shared parent-first lock order: this function can never
+--     observe the parent as still 'claimed'/'in_progress' AND the child as
+--     already cancelled by a Cancel that has genuinely committed, because
+--     both facts are updated together, in the same transaction, under the
+--     same parent lock, by listing_studio_cancel_ebay_extension_batch.
+--   - "Duplicate/result replays must be idempotent" — a replay that would
+--     leave the child's status unchanged (including a replay AFTER
+--     cancellation, which the child-already-cancelled check above also
+--     catches) is a no-op that reports duplicate := true rather than
+--     raising or silently reapplying side effects (attempt_count,
+--     started_at, etc).
+-- Returns a single row describing the outcome so the calling route never
+-- has to re-derive it with a second, separately-timed read.
+create or replace function public.listing_studio_report_ebay_extension_item_result(
+  p_batch_id uuid,
+  p_item_id uuid,
+  p_status text,
+  p_error_code text default null,
+  p_error_message text default null,
+  p_current_step text default null,
+  p_step_detail text default null
+)
+returns table(item_id uuid, item_status text, batch_status text, applied boolean, duplicate boolean)
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+  v_batch_status text;
+  v_item_status text;
+  v_item_attempt_count integer;
+  v_item_started_at timestamptz;
+  v_now timestamptz := now();
+  v_new_started_at timestamptz;
+  v_all_closing boolean;
+begin
+  if p_batch_id is null or p_item_id is null then
+    raise exception 'ARGUMENTS_REQUIRED' using errcode = 'P0001';
+  end if;
+  if p_status is null or p_status not in ('queued', 'preparing', 'filling', 'waiting_for_review', 'failed', 'cancelled') then
+    raise exception 'INVALID_STATUS' using errcode = 'P0001';
+  end if;
+
+  -- Lock the PARENT first — same order as expire/cancel above.
+  select b.status into v_batch_status
+  from public.ebay_extension_batches b
+  where b.id = p_batch_id
+  for update;
+
+  if not found then
+    raise exception 'BATCH_NOT_FOUND' using errcode = 'P0003';
+  end if;
+
+  -- THEN lock the child, scoped to this exact batch (mirrors the route's
+  -- own existing "does not belong to the active batch" check).
+  select bi.status, bi.attempt_count, bi.started_at
+  into v_item_status, v_item_attempt_count, v_item_started_at
+  from public.ebay_extension_batch_items bi
+  where bi.id = p_item_id and bi.batch_id = p_batch_id
+  for update;
+
+  if not found then
+    raise exception 'ITEM_NOT_FOUND' using errcode = 'P0003';
+  end if;
+
+  -- "A result must never change a child already 'cancelled'" — a hard,
+  -- unconditional no-op regardless of what status is being reported,
+  -- including a replay of 'cancelled' itself. Cancel's own commit is
+  -- always what put the child here, and it wins permanently.
+  if v_item_status = 'cancelled' then
+    item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
+    applied := false; duplicate := true;
+    return next;
+    return;
+  end if;
+
+  -- Idempotent replay of the SAME terminal status the child already has —
+  -- a no-op that changes nothing (no re-incremented attempt_count, no
+  -- re-stamped completed_at), reported as a duplicate rather than reapplied.
+  if v_item_status = p_status and v_item_status in ('waiting_for_review', 'failed') then
+    item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
+    applied := false; duplicate := true;
+    return next;
+    return;
+  end if;
+
+  -- "A result may update an item only while its parent remains 'claimed'
+  -- or 'in_progress'" — any other parent status (including a Cancel that
+  -- committed while this call waited on the parent lock, or an already-
+  -- completed/expired batch) refuses the update outright rather than
+  -- silently resurrecting a live child under a closed batch.
+  if v_batch_status not in ('claimed', 'in_progress') then
+    item_id := p_item_id; item_status := v_item_status; batch_status := v_batch_status;
+    applied := false; duplicate := true;
+    return next;
+    return;
+  end if;
+
+  v_new_started_at := case when v_item_started_at is null and p_status <> 'queued' then v_now else v_item_started_at end;
+
+  update public.ebay_extension_batch_items
+  set
+    status = p_status,
+    attempt_count = case when p_status = 'preparing' then v_item_attempt_count + 1 else v_item_attempt_count end,
+    started_at = v_new_started_at,
+    completed_at = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then v_now else completed_at end,
+    error_code = case when p_status = 'failed' then p_error_code else null end,
+    error_message = case when p_status = 'failed' then p_error_message else null end,
+    current_step = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then null else p_current_step end,
+    step_detail = case when p_status in ('waiting_for_review', 'failed', 'cancelled') then null else p_step_detail end
+  where id = p_item_id and batch_id = p_batch_id;
+
+  update public.ebay_extension_batches
+  set last_extension_activity_at = v_now
+  where id = p_batch_id;
+
+  -- CORRECTIVE PASS (safety review, Defect 2's application-layer half,
+  -- preserved verbatim here from the old route) — deliberately checking
+  -- against 'failed'/'cancelled' only, NEVER 'waiting_for_review'. A batch
+  -- only auto-closes once every item is genuinely failed/cancelled; an
+  -- item merely reaching waiting_for_review keeps its batch open (and
+  -- therefore keeps blocking a resend via the create RPC's own conflict
+  -- check) until an explicit Cancel or a later confirmed-save milestone.
+  select bool_and(bi.status in ('failed', 'cancelled')) into v_all_closing
+  from public.ebay_extension_batch_items bi
+  where bi.batch_id = p_batch_id;
+
+  if v_all_closing then
+    update public.ebay_extension_batches
+    set status = 'completed', completed_at = coalesce(completed_at, v_now)
+    where id = p_batch_id and status in ('pending_claim', 'claimed', 'in_progress');
+  end if;
+
+  item_id := p_item_id; item_status := p_status;
+  select b.status into batch_status from public.ebay_extension_batches b where b.id = p_batch_id;
+  applied := true; duplicate := false;
+  return next;
+end;
+$$;
+
+revoke all on function public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text) from anon, authenticated;
+  grant execute on function public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text) to service_role;
+end $$;
+
 -- READ-ONLY PERMISSION VERIFIER — run this manually in the Supabase SQL
 -- editor AFTER applying the migration above (never as part of it). Expected
 -- (not yet verified): every *_execute column true for service_role only
--- and false for anon/authenticated on ALL THREE functions, AND every
+-- and false for anon/authenticated on ALL FOUR functions, AND every
 -- table-privilege boolean false for both anon and authenticated (proving
 -- neither role can read either table directly, not just that they can't
 -- call the functions).
@@ -508,6 +741,9 @@ end $$;
 --   has_function_privilege('anon', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as anon_execute_cancel,
 --   has_function_privilege('authenticated', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as authenticated_execute_cancel,
 --   has_function_privilege('service_role', 'public.listing_studio_cancel_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as service_role_execute_cancel,
+--   has_function_privilege('anon', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as anon_execute_report_result,
+--   has_function_privilege('authenticated', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as authenticated_execute_report_result,
+--   has_function_privilege('service_role', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as service_role_execute_report_result,
 --   has_table_privilege('anon', 'public.ebay_extension_batches', 'SELECT') as anon_select_batches,
 --   has_table_privilege('authenticated', 'public.ebay_extension_batches', 'SELECT') as authenticated_select_batches,
 --   has_table_privilege('anon', 'public.ebay_extension_batch_items', 'SELECT') as anon_select_items,

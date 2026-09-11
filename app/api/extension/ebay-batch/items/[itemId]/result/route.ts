@@ -1,6 +1,6 @@
-import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
+import { supabaseRequest } from "@/lib/supabase";
 import { verifyBatchToken, extractBearerToken, BatchTokenError } from "@/lib/listing-studio/extension-batch-tokens";
-import { ebayExtensionItemResultRequestSchema, isTerminalEbayExtensionItemStatus, isEbayExtensionBatchClosingItemStatus, type EbayExtensionBatchItemStatus } from "@/lib/listing-studio/ebay-extension-batch-schema";
+import { ebayExtensionItemResultRequestSchema, type EbayExtensionBatchItemStatus } from "@/lib/listing-studio/ebay-extension-batch-schema";
 import { extensionCorsPreflight, extensionCorsJson, extensionSafeApiError } from "@/lib/listing-studio/extension-cors";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 
@@ -8,8 +8,7 @@ export const runtime = "nodejs";
 
 export async function OPTIONS(request: Request) { return extensionCorsPreflight(request); }
 
-type BatchRow = { id: string; status: string; owner_id: string };
-type ItemRow = { id: string; batch_id: string; status: EbayExtensionBatchItemStatus; attempt_count: number; started_at: string | null };
+type RpcResultRow = { item_id: string; item_status: EbayExtensionBatchItemStatus; batch_status: string; applied: boolean; duplicate: boolean };
 
 /**
  * eBay Seller Hub extension drafter — mirrors
@@ -20,6 +19,19 @@ type ItemRow = { id: string; batch_id: string; status: EbayExtensionBatchItemSta
  * a later, genuine Save Draft milestone would write it, and only from a
  * real observed eBay confirmation, never from a "waiting_for_review"
  * report).
+ *
+ * CORRECTIVE PASS 4 (cancellation race review) — this route used to read
+ * the batch (plain SELECT, no lock) and later PATCH the item independently
+ * — a result report racing a concurrent Cancel could read the batch while
+ * still active, then overwrite an already-cancelled child back to a LIVE
+ * status. All of that locking, the "only while claimed/in_progress",
+ * "never change an already-cancelled child", and batch-auto-close logic
+ * now lives inside the single transactional
+ * listing_studio_report_ebay_extension_item_result RPC (see
+ * supabase-ebay-extension-batches.sql's own top comment). This route is now
+ * a THIN wrapper: verify the token, validate the body, call the RPC once,
+ * map its outcome to a response. It never reads or writes
+ * ebay_extension_batches / ebay_extension_batch_items directly any more.
  */
 export async function POST(request: Request, { params }: { params: Promise<{ itemId: string }> }) {
   try {
@@ -32,70 +44,35 @@ export async function POST(request: Request, { params }: { params: Promise<{ ite
     try { ({ batchId } = await verifyBatchToken(token)); }
     catch (error) { if (error instanceof BatchTokenError) return extensionCorsJson(request, { error: error.message }, 401); throw error; }
 
-    const batches = await supabaseRequestAll<BatchRow>(`ebay_extension_batches?id=eq.${batchId}&select=id,status,owner_id`);
-    const batch = batches[0];
-    if (!batch) return extensionCorsJson(request, { error: "Batch not found." }, 404);
-    // LIFECYCLE FIX (stale-batch review) — not gated on expires_at (the
-    // pairing-code window); the token's own exp + the batch status are the
-    // check. A terminal batch (cancelled/completed/expired) still rejects
-    // here so a late report can't resurrect it. See
-    // app/api/extension/ebay-batch/route.ts's own matching comment.
-    if (batch.status === "cancelled" || batch.status === "completed" || batch.status === "expired") {
-      return extensionCorsJson(request, { error: "This batch is no longer active." }, 409);
-    }
-
-    const items = await supabaseRequestAll<ItemRow>(`ebay_extension_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}&select=id,batch_id,status,attempt_count,started_at`);
-    const item = items[0];
-    if (!item) return extensionCorsJson(request, { error: "This item does not belong to the active batch." }, 404);
-
     const body = ebayExtensionItemResultRequestSchema.parse(await request.json());
 
-    // Idempotent no-op — a repeated report for an item already terminal
-    // with the SAME status changes nothing (mirrors the Vinted route's own
-    // duplicate-completion protection, generalised to every terminal
-    // status here since none of them carry a unique draft id to key off
-    // yet in this milestone).
-    if (isTerminalEbayExtensionItemStatus(item.status) && item.status === body.status) {
-      return extensionCorsJson(request, { itemId: item.id, status: item.status, duplicate: true });
+    let row: RpcResultRow | undefined;
+    try {
+      const rpcResponse = await supabaseRequest("rpc/listing_studio_report_ebay_extension_item_result", {
+        method: "POST",
+        body: JSON.stringify({
+          p_batch_id: batchId,
+          p_item_id: itemId,
+          p_status: body.status,
+          p_error_code: body.status === "failed" ? (body.errorCode ?? null) : null,
+          p_error_message: body.status === "failed" ? (body.errorMessage ?? null) : null,
+          p_current_step: body.currentStep ?? null,
+          p_step_detail: body.detail ?? null,
+        }),
+      });
+      [row] = await rpcResponse.json() as RpcResultRow[];
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("BATCH_NOT_FOUND")) return extensionCorsJson(request, { error: "Batch not found." }, 404);
+      if (error instanceof Error && error.message.includes("ITEM_NOT_FOUND")) return extensionCorsJson(request, { error: "This item does not belong to the active batch." }, 404);
+      throw error;
     }
 
-    const nowIso = new Date().toISOString();
-    await supabaseRequest(`ebay_extension_batches?status=neq.completed&id=eq.${batchId}`, {
-      method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ last_extension_activity_at: nowIso }),
-    }).catch(() => {});
+    if (!row) return extensionCorsJson(request, { error: "This item does not belong to the active batch." }, 404);
 
-    const patchBody: Record<string, unknown> = { status: body.status };
-    if (body.status === "preparing") patchBody.attempt_count = item.attempt_count + 1;
-    if (!item.started_at && body.status !== "queued") patchBody.started_at = nowIso;
-    if (isTerminalEbayExtensionItemStatus(body.status)) patchBody.completed_at = nowIso;
-    patchBody.error_code = body.status === "failed" ? (body.errorCode ?? null) : null;
-    patchBody.error_message = body.status === "failed" ? (body.errorMessage ?? null) : null;
-    patchBody.current_step = isTerminalEbayExtensionItemStatus(body.status) ? null : (body.currentStep ?? null);
-    patchBody.step_detail = isTerminalEbayExtensionItemStatus(body.status) ? null : (body.detail ?? null);
-
-    await supabaseRequest(`ebay_extension_batch_items?id=eq.${itemId}&batch_id=eq.${batchId}`, {
-      method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify(patchBody),
-    });
-
-    // CORRECTIVE PASS (safety review, Defect 2's application-layer half) —
-    // deliberately isEbayExtensionBatchClosingItemStatus here, NEVER
-    // isTerminalEbayExtensionItemStatus (which includes
-    // 'waiting_for_review'). Marking the batch 'completed' the moment an
-    // item merely reaches waiting_for_review would flip it out of the
-    // create-batch RPC's own `status not in ('completed', ...)` conflict
-    // filter — silently reopening the duplicate-send hole this migration's
-    // database-level unique index and conflict check both exist to close.
-    // A batch only auto-closes once every item is genuinely failed/
-    // cancelled; a waiting_for_review item keeps its batch open (and
-    // therefore keeps blocking a second send) until the operation is
-    // explicitly cancelled or (a later milestone) confirmed saved.
-    const allItems = await supabaseRequestAll<{ status: EbayExtensionBatchItemStatus }>(`ebay_extension_batch_items?batch_id=eq.${batchId}&select=status`);
-    if (allItems.length > 0 && allItems.every(i => isEbayExtensionBatchClosingItemStatus(i.status))) {
-      await supabaseRequest(`ebay_extension_batches?id=eq.${batchId}&status=in.(pending_claim,claimed,in_progress)`, {
-        method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "completed", completed_at: nowIso }),
-      }).catch(() => {});
-    }
-
-    return extensionCorsJson(request, { itemId: item.id, status: body.status, duplicate: false });
+    // Always the item's OWN current status as the RPC left it — honest even
+    // when the requested transition was refused (a concurrent Cancel, a
+    // closed batch, or a same-status replay), never a lie that the
+    // requested status applied when it didn't.
+    return extensionCorsJson(request, { itemId: row.item_id, status: row.item_status, duplicate: row.duplicate });
   } catch (error) { return extensionSafeApiError(request, error, "Could not report this item's result."); }
 }

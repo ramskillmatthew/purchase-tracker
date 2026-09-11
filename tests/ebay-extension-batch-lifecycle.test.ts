@@ -21,6 +21,7 @@ function fnBody(name: string): string {
 const createBody = fnBody("listing_studio_create_ebay_extension_batch");
 const expireBody = fnBody("listing_studio_expire_ebay_extension_batch");
 const cancelBody = fnBody("listing_studio_cancel_ebay_extension_batch");
+const reportBody = fnBody("listing_studio_report_ebay_extension_item_result");
 
 describe("stale-batch lifecycle — SQL: expiring an unclaimed batch releases its child (Defect scenario 1 + 8)", () => {
   it("listing_studio_expire_ebay_extension_batch exists and sets both the parent AND its still-live children", () => {
@@ -37,11 +38,13 @@ describe("stale-batch lifecycle — SQL: expiring an unclaimed batch releases it
   });
 
   it("REQUIREMENT 4: the expiry RPC is a hard no-op for any batch not currently 'pending_claim' — a claimed/in_progress/waiting_for_review batch is never touched by pairing-window expiry", () => {
-    // Both the child and parent updates are gated on b.status = 'pending_claim'
-    expect((expireBody.match(/b\.status = 'pending_claim'/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    expect(expireBody).not.toMatch(/b\.status (in|not in)[^'\n]*'claimed'/);
-    // and on the pairing window genuinely having elapsed
-    expect((expireBody.match(/b\.expires_at <= now\(\)/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // CORRECTIVE PASS 4 (cancellation race review): eligibility is now read
+    // ONCE from the parent-locked row into v_status/v_expires_at and
+    // checked before either UPDATE runs, rather than repeated inline on
+    // each UPDATE's own WHERE clause.
+    expect(expireBody).toContain("v_status <> 'pending_claim'");
+    expect(expireBody).toContain("v_expires_at > now()");
+    expect(expireBody).not.toMatch(/status (in|not in)[^'\n]*'claimed'/);
   });
 });
 
@@ -93,7 +96,10 @@ describe("stale-batch lifecycle — SQL: explicit cancel releases the listing (s
   });
 
   it("the cancel RPC is owner-checked — a batch belonging to a different owner is a hard no-op (no error, no info leak)", () => {
-    expect((cancelBody.match(/b\.owner_id = p_owner_id/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // CORRECTIVE PASS 4: owner is read ONCE from the parent-locked row into
+    // v_owner_id and checked before either UPDATE runs.
+    expect(cancelBody).toContain("select b.owner_id, b.status into v_owner_id, v_status");
+    expect(cancelBody).toContain("v_owner_id <> p_owner_id");
     const raiseLines = cancelBody.match(/raise exception[^;]*;/g) ?? [];
     for (const line of raiseLines) expect(line).not.toContain("p_batch_id");
   });
@@ -106,16 +112,136 @@ describe("stale-batch lifecycle — SQL: explicit cancel releases the listing (s
     const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft"), createBody.indexOf("limit 1"));
     expect(conflictQuery).toContain("bi.status not in ('failed', 'cancelled')");
     expect(conflictQuery).not.toContain("waiting_for_review");
-    const idxStatement = sql.slice(sql.indexOf("ebay_extension_batch_items_live_draft_idx"), sql.indexOf(";", sql.indexOf("ebay_extension_batch_items_live_draft_idx")));
+    // Anchored on the actual CREATE statement (not just the bare index
+    // name), which this file's own top comment now also mentions in prose —
+    // a bare-name search would find that earlier mention instead.
+    const idxDeclIdx = sql.indexOf("create unique index if not exists ebay_extension_batch_items_live_draft_idx");
+    const idxStatement = sql.slice(idxDeclIdx, sql.indexOf(";", idxDeclIdx));
+    expect(idxDeclIdx).toBeGreaterThan(-1);
     expect(idxStatement).toContain("where status not in ('failed', 'cancelled')");
   });
 
-  it("both new RPCs are service_role-only", () => {
-    for (const sig of ["listing_studio_expire_ebay_extension_batch(uuid)", "listing_studio_cancel_ebay_extension_batch(uuid, uuid)"]) {
-      const grantBlock = sql.slice(sql.indexOf(`revoke all on function public.${sig}`), sql.indexOf(`revoke all on function public.${sig}`) + 400);
+  it("all three lifecycle RPCs (expire, cancel, report-result) are service_role-only", () => {
+    for (const sig of [
+      "listing_studio_expire_ebay_extension_batch(uuid)",
+      "listing_studio_cancel_ebay_extension_batch(uuid, uuid)",
+      "listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)",
+    ]) {
+      const grantBlock = sql.slice(sql.indexOf(`revoke all on function public.${sig}`), sql.indexOf(`revoke all on function public.${sig}`) + 700);
       expect(grantBlock).toContain(`revoke all on function public.${sig} from anon, authenticated`);
       expect(grantBlock).toContain(`grant execute on function public.${sig} to service_role`);
     }
+  });
+});
+
+// ---- CORRECTIVE PASS 4 (cancellation race review) --------------------------
+//
+// A third concurrency defect: listing_studio_cancel_ebay_extension_batch
+// updated its child row(s) BEFORE its parent, with no explicit lock, while
+// the (now-retired) item-result HTTP route read the parent with a plain,
+// lock-free SELECT and later PATCHed the child independently. A result
+// report racing a concurrent Cancel could read the batch while still
+// active, then overwrite an already-cancelled child back to a LIVE status —
+// leaving a cancelled parent with a child still occupying
+// ebay_extension_batch_items_live_draft_idx. Fixed by giving all three
+// lifecycle-mutating RPCs (expire, cancel, and the new
+// listing_studio_report_ebay_extension_item_result) the SAME lock order:
+// the parent row locked FIRST (`for update`), re-checked, THEN the child
+// touched. See supabase-ebay-extension-batches.sql's own top comment.
+describe("cancellation race review — consistent parent-first lock ordering across all three RPCs (scenario 6)", () => {
+  const rpcs: Array<[string, string]> = [
+    ["expire", expireBody],
+    ["cancel", cancelBody],
+    ["report-result", reportBody],
+  ];
+
+  it.each(rpcs)("%s: locks the PARENT row with `for update` before touching any child row", (_name, body) => {
+    const lockIdx = body.indexOf("for update");
+    expect(lockIdx).toBeGreaterThan(-1);
+    // The parent lock's own SELECT must be against ebay_extension_batches,
+    // not ebay_extension_batch_items.
+    const lockStatement = body.slice(Math.max(0, body.lastIndexOf("select", lockIdx)), lockIdx);
+    expect(lockStatement).toContain("public.ebay_extension_batches");
+    expect(lockStatement).not.toContain("ebay_extension_batch_items");
+
+    const childTouchIdx = Math.min(
+      ...[body.indexOf("update public.ebay_extension_batch_items"), body.indexOf("select bi.status")].filter(i => i !== -1),
+    );
+    if (Number.isFinite(childTouchIdx)) expect(childTouchIdx).toBeGreaterThan(lockIdx);
+  });
+
+  it("REQUIREMENT: no deadlock-prone child-first path exists anywhere in the three functions (scenario 7) — none of them ever locks/touches ebay_extension_batch_items before locking ebay_extension_batches", () => {
+    for (const [, body] of rpcs) {
+      const firstChildRef = body.indexOf("ebay_extension_batch_items");
+      const firstParentLock = body.indexOf("for update");
+      expect(firstParentLock).toBeGreaterThan(-1);
+      if (firstChildRef !== -1) expect(firstChildRef).toBeGreaterThan(firstParentLock);
+    }
+  });
+});
+
+describe("cancellation race review — the new item-result RPC's own transaction (scenarios 1-4)", () => {
+  it("locks the child row too (`for update`) before deciding anything about it", () => {
+    const childLockIdx = reportBody.indexOf("for update", reportBody.indexOf("select bi.status"));
+    expect(childLockIdx).toBeGreaterThan(-1);
+  });
+
+  it("REQUIREMENT: 'a result must never change a child already cancelled' — this check is UNCONDITIONAL (checked before any p_status-specific branching), catching both a plain cancel-race report AND a replayed 'cancelled' report after cancellation (scenarios 1, 2, 3, 5)", () => {
+    const guardIdx = reportBody.indexOf("if v_item_status = 'cancelled' then");
+    const applyIdx = reportBody.indexOf("update public.ebay_extension_batch_items\n  set\n    status = p_status");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(applyIdx);
+  });
+
+  it("REQUIREMENT: 'a result may update an item only while its parent remains claimed or in_progress' — checked against the freshly parent-locked status, before the update (scenario 4)", () => {
+    const guardIdx = reportBody.indexOf("v_batch_status not in ('claimed', 'in_progress')");
+    const applyIdx = reportBody.indexOf("update public.ebay_extension_batch_items\n  set\n    status = p_status");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(applyIdx);
+  });
+
+  it("a same-status terminal replay (duplicate report) is idempotent — no re-incremented attempt_count, no re-stamped completed_at — and never includes 'cancelled' (that is caught by the unconditional guard above instead)", () => {
+    const idempotentIdx = reportBody.indexOf("v_item_status = p_status and v_item_status in");
+    expect(idempotentIdx).toBeGreaterThan(-1);
+    const line = reportBody.slice(idempotentIdx, reportBody.indexOf("\n", idempotentIdx));
+    expect(line).toContain("'waiting_for_review'");
+    expect(line).toContain("'failed'");
+    expect(line).not.toContain("'cancelled'");
+  });
+
+  it("REQUIREMENT: batch auto-close still checks only failed/cancelled, never waiting_for_review (same discipline as before, now inside the RPC)", () => {
+    const closeCheckIdx = reportBody.indexOf("select bool_and(bi.status in ('failed', 'cancelled'))");
+    expect(closeCheckIdx).toBeGreaterThan(-1);
+  });
+
+  it("is a single plpgsql function (one implicit transaction) — no COMMIT, no nested BEGIN", () => {
+    // Strip comment lines first — this function's own comments describe
+    // Cancel's "commit" prose-wise, which must not false-positive here.
+    const statements = reportBody.split("\n").filter(l => !l.trim().startsWith("--")).join("\n");
+    expect(statements).not.toMatch(/\bcommit\b/i);
+    expect(statements.match(/\bbegin\b/gi)?.length).toBe(1);
+  });
+});
+
+describe("cancellation race review — a cancelled/expired parent never retains a live-indexed child (scenario 8)", () => {
+  it("the cancel RPC's child update is UNCONDITIONAL once it runs — every live status transitions straight to 'cancelled', which the partial unique index (and the create RPC's own conflict query) both already exclude from 'live'", () => {
+    const childUpdate = cancelBody.slice(cancelBody.indexOf("update public.ebay_extension_batch_items"), cancelBody.indexOf("update public.ebay_extension_batches"));
+    expect(childUpdate).toContain("set status = 'cancelled', completed_at = now()");
+    // No alternate branch that could leave a child in any other status.
+    expect(childUpdate).not.toMatch(/case\s+when/i);
+  });
+
+  it("the expire RPC's child update is likewise unconditional — every live status transitions straight to 'cancelled'", () => {
+    const childUpdate = expireBody.slice(expireBody.indexOf("update public.ebay_extension_batch_items"), expireBody.indexOf("update public.ebay_extension_batches"));
+    expect(childUpdate).toContain("set status = 'cancelled', completed_at = now()");
+    expect(childUpdate).not.toMatch(/case\s+when/i);
+  });
+
+  it("a listing whose only batch is now cancelled is eligible for a brand-new batch — the create RPC's conflict query only excludes 'failed'/'cancelled' children, both of which this cancel/expire path always produces", () => {
+    const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft"), createBody.indexOf("limit 1"));
+    expect(conflictQuery).toContain("bi.status not in ('failed', 'cancelled')");
   });
 });
 
@@ -208,5 +334,94 @@ describe("stale-batch lifecycle — explicit Cancel routes call the atomic RPC (
     const source = readFileSync("app/api/extension/ebay-batch/cancel/route.ts", "utf8");
     expect(source).toContain("verifyBatchToken");
     expect(source).not.toContain("requireOwner");
+  });
+});
+
+// ---- Route behaviour: the rewritten item-result route (CORRECTIVE PASS 4) --
+
+describe("cancellation race review — the rewritten item-result route is a thin wrapper around the new RPC", () => {
+  const ITEM_UUID = "22222222-2222-4222-8222-222222222222";
+
+  beforeEach(() => {
+    process.env.EXTENSION_BATCH_SECRET = "d".repeat(32);
+    process.env.EXTENSION_ORIGIN = "chrome-extension://ocohhcppeflfggaicbpgmjbmekgbkjcl";
+    supabaseRequest.mockReset();
+    supabaseRequestAll.mockReset();
+  });
+
+  async function postResult(body: unknown) {
+    const { POST } = await import("@/app/api/extension/ebay-batch/items/[itemId]/result/route");
+    const { signBatchToken } = await import("@/lib/listing-studio/extension-batch-tokens");
+    const token = await signBatchToken(BATCH_UUID, 3600);
+    const request = new Request("http://test", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return POST(request, { params: Promise.resolve({ itemId: ITEM_UUID }) });
+  }
+
+  it("calls listing_studio_report_ebay_extension_item_result exactly once, and never reads or PATCHes either table directly any more", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "waiting_for_review", batch_status: "claimed", applied: true, duplicate: false },
+    ]), { status: 200 }));
+
+    const response = await postResult({ status: "waiting_for_review" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "waiting_for_review", duplicate: false });
+    const rpcCall = supabaseRequest.mock.calls.find(([path]) => String(path).startsWith("rpc/listing_studio_report_ebay_extension_item_result"));
+    expect(rpcCall).toBeTruthy();
+    expect(JSON.parse(String((rpcCall![1] as RequestInit).body))).toMatchObject({ p_batch_id: BATCH_UUID, p_item_id: ITEM_UUID, p_status: "waiting_for_review" });
+    expect(supabaseRequestAll).not.toHaveBeenCalled();
+    expect(supabaseRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("REQUIREMENT (scenarios 1, 2): a result the RPC refused (a concurrent Cancel, or a closed parent) is surfaced HONESTLY — the item's OWN current status, never the status that was merely requested — with duplicate:true", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "cancelled", batch_status: "cancelled", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const response = await postResult({ status: "waiting_for_review" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "cancelled", duplicate: true });
+  });
+
+  it("REQUIREMENT (scenario 3): a replayed report after cancellation is idempotent — no error, duplicate:true, status stays 'cancelled'", async () => {
+    supabaseRequest.mockResolvedValue(new Response(JSON.stringify([
+      { item_id: ITEM_UUID, item_status: "cancelled", batch_status: "cancelled", applied: false, duplicate: true },
+    ]), { status: 200 }));
+
+    const response = await postResult({ status: "cancelled" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ itemId: ITEM_UUID, status: "cancelled", duplicate: true });
+  });
+
+  it("maps a BATCH_NOT_FOUND RPC rejection to a safe 404, never the raw error text", async () => {
+    supabaseRequest.mockRejectedValue(Object.assign(new Error("BATCH_NOT_FOUND"), { status: 400 }));
+
+    const response = await postResult({ status: "waiting_for_review" });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Batch not found." });
+  });
+
+  it("maps an ITEM_NOT_FOUND RPC rejection to a safe 404, never the raw error text", async () => {
+    supabaseRequest.mockRejectedValue(Object.assign(new Error("ITEM_NOT_FOUND"), { status: 400 }));
+
+    const response = await postResult({ status: "waiting_for_review" });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "This item does not belong to the active batch." });
+  });
+
+  it("STRUCTURAL: the route no longer imports/uses isTerminalEbayExtensionItemStatus, isEbayExtensionBatchClosingItemStatus, or supabaseRequestAll — that entire decision now lives inside the RPC", () => {
+    const source = readFileSync("app/api/extension/ebay-batch/items/[itemId]/result/route.ts", "utf8");
+    expect(source).not.toContain("isTerminalEbayExtensionItemStatus");
+    expect(source).not.toContain("isEbayExtensionBatchClosingItemStatus");
+    expect(source).not.toContain("supabaseRequestAll");
+    expect(source).toContain("rpc/listing_studio_report_ebay_extension_item_result");
   });
 });
