@@ -37,6 +37,11 @@ import { computeCostPence, computeProfitPence, type SkuPurchaseMatch } from "@/l
 import { MAX_EXPORT_LISTINGS_PER_BATCH } from "@/lib/listing-studio/vinted-export-schema";
 import { MAX_EXTENSION_BATCH_LISTINGS } from "@/lib/listing-studio/extension-batch-schema";
 import { evaluateEbayFeedDraftEligibility, type EbayFeedDraftEligibilityResult } from "@/lib/listing-studio/ebay-feed/feed-draft-eligibility";
+// CORRECTIVE PASS (blocking-batch visibility review) — shared with
+// ListingsTable.tsx's own per-row workflow cell (see that file's own
+// import) so a batch's status/tone can never read differently in the two
+// places that show it.
+import { ebayExtensionBatchStatusLabel, ebayExtensionBatchStatusTone } from "@/lib/listing-studio/ebay-extension-batch-schema";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
 
@@ -83,6 +88,38 @@ type EbayBatchStatus = {
   items: EbayBatchItemRow[];
 };
 type EbayStuckBatch = { batchId: string; displayNumber: number; status: string; listingCount: number; createdAt: string };
+
+// CORRECTIVE PASS (blocking-batch visibility review) — mirrors
+// GET /api/listing-studio/ebay-extension-batches's own response shape
+// exactly (one row per batch, its item nested inside). Deliberately a
+// SEPARATE type from Vinted's RecoverableBatchInfo/BlockingBatchInfo below
+// — the two extension systems are never the same workflow.
+type EbayExtensionActiveBatchItemInfo = {
+  itemId: string; marketplaceDraftId: string; status: string; attemptCount: number;
+  errorCode: string | null; errorMessage: string | null; currentStep: string | null; stepDetail: string | null;
+  startedAt: string | null; completedAt: string | null;
+  title: string | null; sku: string | null;
+};
+type EbayExtensionActiveBatchInfo = {
+  batchId: string; displayNumber: number; status: string;
+  createdAt: string; expiresAt: string; claimedAt: string | null; completedAt: string | null;
+  extensionId: string | null; extensionVersion: string | null; browserLabel: string | null;
+  boxDismissedAt: string | null; lastExtensionActivityAt: string | null;
+  isActive: boolean;
+  item: EbayExtensionActiveBatchItemInfo;
+};
+
+// Live-ish countdown string for a 'pending_claim' batch's pairing window.
+// nowMs is passed in (never read from Date.now() directly) so the caller
+// controls exactly when this re-renders — see ebayExtensionNowMs below.
+function ebayExtensionExpiryLabel(expiresAt: string, nowMs: number): string {
+  const diffMs = new Date(expiresAt).getTime() - nowMs;
+  if (diffMs <= 0) return "Expired";
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `Expires in ${minutes}m ${seconds}s` : `Expires in ${seconds}s`;
+}
 
 // Every eBay Feed item status that counts as "still being actively worked
 // on" for the marketplace-aware "Sent"/"Drafting" filter, mirroring
@@ -196,6 +233,11 @@ type ListingRow = ListingDetails & ReviewableListing & {
   // the flat fields, never the nested .ebay object) can detect a stale,
   // inconsistent row and refuse to display a misleading "Queued".
   ebayFeedBatchState: EbayFeedBatchBlockingState;
+  // CORRECTIVE PASS (blocking-batch visibility review) — non-null only
+  // while a genuinely ACTIVE eBay extension batch exists for this row's
+  // marketplace draft; see ListingsTable.tsx's own resolveWorkflowDisplay
+  // for how this takes priority over the Feed-pipeline-derived label.
+  ebayExtensionActiveState: { label: string; tone: string; pulse: boolean } | null;
 };
 
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
@@ -440,6 +482,31 @@ export default function ListingsReviewWorkspace() {
   // lib/listing-studio/server-diagnostics.ts's own top comment.
   const [ebayExtensionBuildId, setEbayExtensionBuildId] = useState<string | null>(null);
   const [ebayExtensionProjectRef, setEbayExtensionProjectRef] = useState<string | null>(null);
+  // CORRECTIVE PASS (blocking-batch visibility review) — a real, live
+  // batch (created via a genuinely correct app instance) blocked a new
+  // send while being COMPLETELY INVISIBLE in this page: the create RPC's
+  // own conflict check reads straight from the database (always
+  // authoritative), while this page's OWN "active batch" display used to
+  // be nothing but ebayExtensionPairingCode/ebayExtensionBatchId above —
+  // React state set ONLY by a just-completed create call's own response,
+  // never populated by fetching EXISTING batches on mount. A fresh page
+  // load (or simply navigating away and back) lost all visibility into a
+  // still-genuinely-active batch, with no way to inspect or cancel it —
+  // see GET /api/listing-studio/ebay-extension-batches's own top comment
+  // for the full root cause. This is DELIBERATELY separate from Vinted's
+  // own blockingBatch/recoverableBatches mechanism just below — never the
+  // same workflow (see this file's own eBay-extension section for why).
+  const [ebayExtensionBatches, setEbayExtensionBatches] = useState<EbayExtensionActiveBatchInfo[]>([]);
+  const [ebayExtensionBatchesLoading, setEbayExtensionBatchesLoading] = useState(false);
+  const [ebayExtensionCancelConfirmBatchId, setEbayExtensionCancelConfirmBatchId] = useState<string | null>(null);
+  const [ebayExtensionBatchCancellingId, setEbayExtensionBatchCancellingId] = useState<string | null>(null);
+  // Set from a create-route 409's own blockingBatchId, so the error can
+  // point straight at the real card above instead of a dead end.
+  const [ebayExtensionHighlightBatchId, setEbayExtensionHighlightBatchId] = useState<string | null>(null);
+  // Ticks once a second, ONLY while at least one batch is genuinely
+  // 'pending_claim' (the only state with a meaningful countdown) — never
+  // runs a pointless interval otherwise.
+  const [ebayExtensionNowMs, setEbayExtensionNowMs] = useState(() => Date.now());
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -591,6 +658,75 @@ export default function ListingsReviewWorkspace() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // CORRECTIVE PASS (blocking-batch visibility review) — the fix for the
+  // root cause above: fetch every genuinely active eBay extension batch
+  // from the server (the SAME is_active definition the create RPC's own
+  // conflict check uses) on mount, and again after any create/cancel
+  // action, so this page can never again show a listing as blocked by a
+  // batch nobody can see. A useCallback (not an inline effect body) so
+  // both the mount effect below and the create/cancel handlers can call
+  // the exact same fetch.
+  const fetchEbayExtensionBatches = useCallback(async () => {
+    setEbayExtensionBatchesLoading(true);
+    try {
+      const response = await fetch("/api/listing-studio/ebay-extension-batches");
+      if (!response.ok) return;
+      const body = await response.json() as { batches: EbayExtensionActiveBatchInfo[] };
+      setEbayExtensionBatches(body.batches);
+    } catch { /* best-effort — the page still works, just without the active-batch panel */ }
+    finally { setEbayExtensionBatchesLoading(false); }
+  }, []);
+  useEffect(() => { fetchEbayExtensionBatches(); }, [fetchEbayExtensionBatches]);
+  // Self-rescheduling setTimeout, matching this file's own established
+  // convention (see the poll() function's own REGRESSION comment
+  // elsewhere in this file) — never setInterval anywhere in this
+  // component, even for a plain UI tick like this one.
+  useEffect(() => {
+    if (!ebayExtensionBatches.some(batch => batch.status === "pending_claim")) return;
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    function tick() {
+      if (cancelled) return;
+      setEbayExtensionNowMs(Date.now());
+      timeoutId = window.setTimeout(tick, 1000);
+    }
+    timeoutId = window.setTimeout(tick, 1000);
+    return () => { cancelled = true; if (timeoutId !== undefined) window.clearTimeout(timeoutId); };
+  }, [ebayExtensionBatches]);
+
+  /**
+   * CORRECTIVE PASS (blocking-batch visibility review) — cancels ANY
+   * active eBay extension batch shown in the new status panel (not just
+   * the one this exact page session just created — see
+   * handleCancelEbayExtensionSend above for that narrower case). Reuses
+   * the SAME already-hardened, atomic, service-role-only DELETE route/RPC.
+   * Never deletes rows; never touches Feed Batch #1 or the legacy offer.
+   */
+  const handleCancelEbayExtensionBatch = useCallback(async (batchId: string) => {
+    setEbayExtensionBatchCancellingId(batchId);
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-extension-batches/${batchId}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setSendToEbayExtensionError(body.error || "Could not cancel this eBay extension batch.");
+        return;
+      }
+      // If this was the batch this exact page session's own pairing card
+      // was showing, clear that card too — it no longer exists to pair
+      // against.
+      setEbayExtensionBatchId(current => (current === batchId ? null : current));
+      setEbayExtensionPairingCode(current => (ebayExtensionBatchId === batchId ? null : current));
+      if (ebayExtensionHighlightBatchId === batchId) setEbayExtensionHighlightBatchId(null);
+      setEbayExtensionCancelConfirmBatchId(null);
+      setSendToEbayExtensionError("");
+      await fetchEbayExtensionBatches();
+    } catch {
+      setSendToEbayExtensionError("Network error — could not cancel this eBay extension batch.");
+    } finally {
+      setEbayExtensionBatchCancellingId(null);
+    }
+  }, [ebayExtensionBatchId, ebayExtensionHighlightBatchId, fetchEbayExtensionBatches]);
 
   // Listings Review redesign — root-cause fix: resume tracking every
   // batch that's still genuinely visible (in flight, or terminal but not
@@ -787,6 +923,20 @@ export default function ListingsReviewWorkspace() {
   // every batch this session knew about is dismissed, or on a page that
   // never had one this session. Only this small mapping re-runs on a poll
   // tick, never the full baseListingRows pipeline above.
+  // CORRECTIVE PASS (blocking-batch visibility review) — keyed by the
+  // eBay marketplace draft id (the SAME id every ebay* field on a row
+  // already keys against — see row.ebay.marketplaceDraftId just below),
+  // ACTIVE batches only. A terminal batch (completed/cancelled/expired)
+  // never overrides the row's own Feed-pipeline status — only a batch
+  // still genuinely blocking a new send does.
+  const ebayExtensionActiveByMarketplaceDraftId = useMemo(() => {
+    const map = new Map<string, EbayExtensionActiveBatchInfo>();
+    for (const batch of ebayExtensionBatches) {
+      if (batch.isActive) map.set(batch.item.marketplaceDraftId, batch);
+    }
+    return map;
+  }, [ebayExtensionBatches]);
+
   const listingRows: ListingRow[] = useMemo(() => baseListingRows.map(row => {
     const live = liveItemByDraftId.get(row.id);
     const workflowStatus = live
@@ -818,12 +968,27 @@ export default function ListingsReviewWorkspace() {
       ...row.ebay, workflowStatus: ebayWorkflowStatus, queuePosition: ebayQueuePosition, errorMessage: ebayErrorMessage,
     } : null;
 
+    // CORRECTIVE PASS (blocking-batch visibility review) — "The main row
+    // status should prioritise the active eBay extension state when one
+    // exists" / "Do not show a generic 'Failed' status when one subsystem
+    // failed but another active extension batch is waiting or
+    // processing." Computed here (not in ListingsTable) so it can reuse
+    // the SAME shared label/tone functions the status panel above the
+    // table already uses — never a second, independently-drifting answer.
+    const ebayExtensionActiveBatch = row.ebay ? ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId) ?? null : null;
+    const ebayExtensionActiveState = ebayExtensionActiveBatch ? {
+      label: ebayExtensionBatchStatusLabel(ebayExtensionActiveBatch.status, ebayExtensionActiveBatch.item.status),
+      tone: ebayExtensionBatchStatusTone(ebayExtensionActiveBatch.status, ebayExtensionActiveBatch.item.status),
+      pulse: !["waiting_for_review", "failed", "cancelled"].includes(ebayExtensionActiveBatch.item.status),
+    } : null;
+
     return {
       ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage,
       ebayWorkflowStatus, ebayQueuePosition, ebayErrorMessage, ebay,
       ebayFeedBatchState: row.ebay?.feedBatchState ?? { kind: "none" as const },
+      ebayExtensionActiveState,
     };
-  }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId]);
+  }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId, ebayExtensionActiveByMarketplaceDraftId]);
 
   const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);
 
@@ -1736,7 +1901,17 @@ export default function ListingsReviewWorkspace() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ marketplaceDraftIds: [marketplaceDraftId] }),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) { setSendToEbayExtensionError(body.error || "Could not send this listing to the eBay extension."); return; }
+      if (!response.ok) {
+        setSendToEbayExtensionError(body.error || "Could not send this listing to the eBay extension.");
+        // CORRECTIVE PASS (blocking-batch visibility review) — names the
+        // real blocking batch (when the route's own conflict response
+        // carried its id) and refreshes the panel so it's visible right
+        // above, instead of leaving the user at a dead end.
+        setEbayExtensionHighlightBatchId(body.blockingBatchId ?? null);
+        if (body.blockingBatchId) fetchEbayExtensionBatches();
+        return;
+      }
+      setEbayExtensionHighlightBatchId(null);
       setEbayExtensionPairingCode(body.pairingCode);
       setEbayExtensionBatchId(body.batchId ?? null);
       // CORRECTIVE PASS 6 (retry truthfulness review) — this SAME action IS
@@ -1750,6 +1925,7 @@ export default function ListingsReviewWorkspace() {
       // shown as-is; never fabricated client-side.
       setEbayExtensionBuildId(body.buildId ?? null);
       setEbayExtensionProjectRef(body.supabaseProjectRef ?? null);
+      await fetchEbayExtensionBatches();
     } catch {
       setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
     } finally {
@@ -1781,6 +1957,7 @@ export default function ListingsReviewWorkspace() {
       setEbayExtensionBuildId(null);
       setEbayExtensionProjectRef(null);
       setSendToEbayExtensionError("");
+      await fetchEbayExtensionBatches();
     } catch {
       setSendToEbayExtensionError("Network error — could not cancel this send.");
     } finally {
@@ -2792,6 +2969,87 @@ export default function ListingsReviewWorkspace() {
       </div>
     </div>}
 
+    {/* CORRECTIVE PASS (blocking-batch visibility review) — every genuinely
+        active eBay extension batch, shown prominently ABOVE the listings
+        table, regardless of which marketplace tab is currently selected
+        or what this page session itself created — a fresh page load must
+        never again lose visibility into a batch that is still genuinely
+        blocking a send. Deliberately separate from, and positioned above,
+        the "Legacy Seller Hub Feed fallback" section further down — the
+        two extension systems are never the same workflow. */}
+    {ebayExtensionBatches.length > 0 && (
+      <div className="lr-ebay-extension-active-panel">
+        <p className="lr-ebay-extension-active-panel-title">eBay Extension batches</p>
+        {ebayExtensionBatchesLoading && <p className="lr-ebay-extension-active-panel-hint">Refreshing…</p>}
+        {ebayExtensionBatches.map(batch => {
+          const showOwnPairingCode = batch.status === "pending_claim" && batch.batchId === ebayExtensionBatchId && Boolean(ebayExtensionPairingCode);
+          return (
+            <div
+              key={batch.batchId} id={`ebay-ext-batch-${batch.batchId}`}
+              className={`lr-ebay-extension-active-card${batch.batchId === ebayExtensionHighlightBatchId ? " lr-ebay-extension-active-card--highlight" : ""}`}
+            >
+              <div className="lr-ebay-extension-active-card-header">
+                <span>Batch #{batch.displayNumber}</span>
+                <span className="lr-ebay-extension-active-card-status">{ebayExtensionBatchStatusLabel(batch.status, batch.item.status)}</span>
+              </div>
+              <p className="lr-ebay-extension-active-card-item">
+                {batch.item.title ?? "Untitled listing"}{batch.item.sku ? ` · SKU ${batch.item.sku}` : ""}
+              </p>
+              <p className="lr-ebay-extension-active-card-meta">
+                Created {new Date(batch.createdAt).toLocaleString()}
+                {batch.status === "pending_claim" && <> · {ebayExtensionExpiryLabel(batch.expiresAt, ebayExtensionNowMs)}</>}
+                {" · "}{batch.claimedAt ? `Claimed ${new Date(batch.claimedAt).toLocaleString()}` : "Not yet claimed"}
+              </p>
+              {batch.item.currentStep && (
+                <p className="lr-ebay-extension-active-card-meta">Step: {batch.item.currentStep}{batch.item.stepDetail ? ` — ${batch.item.stepDetail}` : ""}</p>
+              )}
+              {batch.item.errorMessage && <p className="lr-ebay-extension-active-card-error">{batch.item.errorMessage}</p>}
+              {showOwnPairingCode && (
+                <p className="lr-ebay-extension-active-card-meta">Pairing code: <strong>{ebayExtensionPairingCode}</strong></p>
+              )}
+              {batch.status === "pending_claim" && !showOwnPairingCode && (
+                <p className="lr-ebay-extension-active-card-hint">The pairing code was only shown once, when this batch was created. If it&apos;s lost, cancel this batch and send again.</p>
+              )}
+              {batch.status === "expired" && (
+                <p className="lr-ebay-extension-active-card-hint">Expired — create a new extension batch.</p>
+              )}
+              {batch.isActive && (
+                <div className="lr-ebay-extension-active-card-actions">
+                  <button
+                    type="button" className="button-secondary"
+                    disabled={ebayExtensionBatchCancellingId === batch.batchId}
+                    onClick={() => setEbayExtensionCancelConfirmBatchId(batch.batchId)}
+                  >
+                    {ebayExtensionBatchCancellingId === batch.batchId ? "Cancelling…" : "Cancel extension batch"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    )}
+    {ebayExtensionCancelConfirmBatchId && (
+      <div className="dialog-overlay" role="dialog" aria-modal="true">
+        <div className="dialog">
+          <h3>Cancel this eBay extension batch?</h3>
+          <p>This does not delete or publish anything on eBay. It only stops tracking this batch in Trotters Attire and immediately frees the listing so it can be sent again.</p>
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setEbayExtensionCancelConfirmBatchId(null)} disabled={ebayExtensionBatchCancellingId !== null}>
+              Keep it
+            </button>
+            <button
+              type="button" className="dialog-confirm"
+              disabled={ebayExtensionBatchCancellingId !== null}
+              onClick={() => handleCancelEbayExtensionBatch(ebayExtensionCancelConfirmBatchId)}
+            >
+              {ebayExtensionBatchCancellingId ? "Cancelling…" : "Cancel batch"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
     {!loading && !hasAnyData && !loadError && <p className="lr-empty-explanation">No generated listings yet — generate listings from your product groups in Listing Studio, then come back here to review them.</p>}
 
     {/* Two-column workspace (reference image 4's exact proportions). The
@@ -2891,7 +3149,13 @@ export default function ListingsReviewWorkspace() {
               {/* REQUIREMENT (Phase 7): the Feed workflow is now clearly
                   labelled as a secondary/legacy area, never the primary
                   eBay action — "Send to eBay extension" above is that. */}
-              <span className="lr-feed-fallback-label">Seller Hub Feed fallback</span>
+              {/* CORRECTIVE PASS (blocking-batch visibility review) — renamed
+                  from "Seller Hub Feed fallback": with a real eBay Extension
+                  status panel now shown separately above, this label must
+                  say plainly which (older, CSV-task-based) pipeline it is,
+                  never leaving room to confuse it with an active extension
+                  batch. */}
+              <span className="lr-feed-fallback-label">Legacy Seller Hub Feed fallback</span>
               <BulkEbayPolicyControl
                 eligibleCount={eligibleForPolicyCount}
                 policies={ebayPolicies}
@@ -2959,6 +3223,20 @@ export default function ListingsReviewWorkspace() {
           <div className="lr-ebay-status-panel" role="status">
             <p className="lr-ebay-status-panel-title">Could not send to the eBay extension</p>
             <p className="lr-ebay-status-panel-body">{sendToEbayExtensionError}</p>
+            {/* CORRECTIVE PASS (blocking-batch visibility review) — the
+                error above already names the real blocking batch; this
+                jumps straight to its card in the panel above the table
+                instead of leaving the user at a dead end. */}
+            {ebayExtensionHighlightBatchId && (
+              <div className="lr-ebay-status-panel-actions">
+                <button
+                  type="button" className="button-secondary"
+                  onClick={() => document.getElementById(`ebay-ext-batch-${ebayExtensionHighlightBatchId}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                >
+                  View this batch
+                </button>
+              </div>
+            )}
           </div>
         )}
         {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && !ebayBatchingAvailable && (

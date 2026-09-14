@@ -60,9 +60,16 @@ describe("eBay extension batch migration — Defect 1 (inconsistent empty batche
 
 describe("eBay extension batch migration — Defect 2 (duplicate form risk) fix", () => {
   it("REQUIREMENT: the conflict query no longer excludes 'waiting_for_review' — only 'failed' and 'cancelled' end an item's protection", () => {
-    const conflictIdx = fnBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft");
+    // CORRECTIVE PASS (blocking-batch visibility review) — this exact
+    // boolean now lives in ONE place, listing_studio_is_ebay_extension_item_active
+    // (see that describe block's own "defines 'active'" test), which the
+    // conflict query below calls rather than re-deriving inline. This test
+    // still proves the SAME substantive requirement: the conflict query
+    // itself never excludes 'waiting_for_review' from blocking a new send.
+    const conflictIdx = fnBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id");
     const conflictQuery = fnBody.slice(conflictIdx, fnBody.indexOf("limit 1", conflictIdx) + 7);
-    expect(conflictQuery).toContain("bi.status not in ('failed', 'cancelled')");
+    expect(conflictIdx).toBeGreaterThan(-1);
+    expect(conflictQuery).toContain("public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)");
     expect(conflictQuery).not.toContain("waiting_for_review");
   });
 
@@ -284,5 +291,82 @@ describe("retry truthfulness review — the app-side 'Try again with eBay extens
   it("the app UI shows honest, server-derived retry framing — never a client-side guess", () => {
     expect(workspaceSource).toContain("setEbayExtensionIsRetry(Boolean(body.isRetry))");
     expect(workspaceSource).toContain("Retrying with the eBay extension");
+  });
+});
+
+describe("blocking-batch visibility review — one authoritative 'active' definition", () => {
+  const isActiveStart = sql.indexOf("create or replace function public.listing_studio_is_ebay_extension_item_active");
+  const isActiveBody = sql.slice(isActiveStart, sql.indexOf("$$;", sql.indexOf("as $$", isActiveStart)) + 3);
+  const conflictStart = sql.indexOf("create or replace function public.listing_studio_create_ebay_extension_batch");
+  const conflictFnBody = sql.slice(conflictStart, sql.indexOf("\n$$;", conflictStart));
+  const listStart = sql.indexOf("create or replace function public.listing_studio_list_ebay_extension_batches");
+  const listBody = sql.slice(listStart, sql.indexOf("\n$$;", listStart));
+
+  it("REQUIREMENT: listing_studio_is_ebay_extension_item_active exists, is immutable, and defines 'active' as neither the batch nor the item being terminal", () => {
+    expect(isActiveStart).toBeGreaterThan(-1);
+    expect(isActiveBody).toContain("immutable");
+    expect(isActiveBody).toContain("p_batch_status not in ('completed', 'cancelled', 'expired')");
+    expect(isActiveBody).toContain("p_item_status not in ('failed', 'cancelled')");
+  });
+
+  it("REQUIREMENT: is service-role only (never anon/authenticated)", () => {
+    const grantBlockIdx = sql.indexOf("listing_studio_is_ebay_extension_item_active(text, text) to service_role");
+    expect(grantBlockIdx).toBeGreaterThan(-1);
+    const revokeBlockIdx = sql.indexOf("listing_studio_is_ebay_extension_item_active(text, text) from anon, authenticated");
+    expect(revokeBlockIdx).toBeGreaterThan(-1);
+    expect(revokeBlockIdx).toBeLessThan(grantBlockIdx);
+  });
+
+  it("REQUIREMENT: the create RPC's own conflict check calls the SHARED is_active function — never a second, independently-drifting boolean expression", () => {
+    const conflictQueryIdx = conflictFnBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id");
+    expect(conflictQueryIdx).toBeGreaterThan(-1);
+    const conflictQuery = conflictFnBody.slice(conflictQueryIdx, conflictFnBody.indexOf("limit 1;", conflictQueryIdx));
+    expect(conflictQuery).toContain("public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)");
+    // Never re-derives the same boolean inline (the old, since-fixed bug shape).
+    expect(conflictQuery).not.toMatch(/b\.status not in \('completed'/);
+  });
+
+  it("REQUIREMENT: the conflict raise carries the blocking batch's own id, so the app can name it and offer a 'View this batch' action — never a bare, unidentifiable conflict", () => {
+    expect(conflictFnBody).toContain("v_conflicting_batch_id uuid;");
+    expect(conflictFnBody).toContain("raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH:%', v_conflicting_batch_id");
+  });
+
+  it("REQUIREMENT: listing_studio_list_ebay_extension_batches exists, is read-only (stable, not volatile), and is service-role only", () => {
+    expect(listStart).toBeGreaterThan(-1);
+    expect(listBody).toContain("stable");
+    expect(listBody).not.toMatch(/\bvolatile\b/);
+    const grantIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid) to service_role");
+    const revokeIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid) from anon, authenticated");
+    expect(grantIdx).toBeGreaterThan(-1);
+    expect(revokeIdx).toBeGreaterThan(-1);
+    expect(revokeIdx).toBeLessThan(grantIdx);
+  });
+
+  it("REQUIREMENT: the list RPC computes is_active via the SAME shared function the create RPC's own conflict check uses — never a second definition", () => {
+    expect(listBody).toContain("public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)");
+  });
+
+  it("REQUIREMENT: the list RPC flags a genuinely expired-but-unreconciled 'pending_claim' batch (expires_at already elapsed, status column not yet flipped) — this is the exact root cause the review identified, and it MUST be flagged, never silently dropped", () => {
+    expect(listBody).toContain("(b.status = 'pending_claim' and b.expires_at <= now())");
+  });
+
+  it("REQUIREMENT: the list RPC never filters rows by expires_at — only box_dismissed_at — so it can never again silently drop a batch the create RPC's own conflict check would still treat as active", () => {
+    const whereIdx = listBody.indexOf("where b.owner_id = p_owner_id");
+    const whereClause = listBody.slice(whereIdx, listBody.indexOf("order by", whereIdx));
+    expect(whereClause).not.toContain("expires_at");
+    expect(whereClause).toContain("b.box_dismissed_at is null");
+  });
+
+  it("REQUIREMENT: the permission-verifier query's own trailing comment block covers both new functions across anon/authenticated/service_role", () => {
+    const verifierIdx = sql.lastIndexOf("has_function_privilege");
+    expect(verifierIdx).toBeGreaterThan(-1);
+    for (const fnSig of [
+      "public.listing_studio_is_ebay_extension_item_active(text, text)",
+      "public.listing_studio_list_ebay_extension_batches(uuid)",
+    ]) {
+      for (const role of ["anon", "authenticated", "service_role"]) {
+        expect(sql).toContain(`has_function_privilege('${role}', '${fnSig}', 'EXECUTE')`);
+      }
+    }
   });
 });

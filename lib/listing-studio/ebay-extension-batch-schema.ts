@@ -196,6 +196,52 @@ export const ebayExtensionItemResultRequestSchema = z.object({
 }).strict();
 export type EbayExtensionItemResultRequest = z.infer<typeof ebayExtensionItemResultRequestSchema>;
 
+// CORRECTIVE PASS (blocking-batch visibility review) — the PARENT batch's
+// own status vocabulary (supabase-ebay-extension-batches.sql's own
+// `check (status in (...))` on ebay_extension_batches.status), exported
+// here so the app layer never hardcodes this list a second time.
+export const EBAY_EXTENSION_BATCH_STATUSES = ["pending_claim", "claimed", "in_progress", "completed", "expired", "cancelled"] as const;
+export type EbayExtensionBatchStatus = typeof EBAY_EXTENSION_BATCH_STATUSES[number];
+
+/**
+ * CORRECTIVE PASS (blocking-batch visibility review) — one honest label
+ * per genuinely distinct combined (batch, item) state, shared between the
+ * Listings Review table's per-row workflow cell and its own "eBay
+ * Extension batches" status panel (components/listings-review/
+ * ListingsTable.tsx and ListingsReviewWorkspace.tsx respectively) so the
+ * two can never show a different answer for the exact same batch. Plain
+ * strings in, not the narrower typed enums above — callers already hold
+ * server-reported values that must display even if they somehow drift
+ * from this file's own vocabulary (never throws on an unrecognised value).
+ */
+export function ebayExtensionBatchStatusLabel(batchStatus: string, itemStatus: string): string {
+  if (batchStatus === "cancelled") return "Cancelled";
+  if (batchStatus === "expired") return "Expired";
+  if (batchStatus === "completed") return "Completed";
+  if (batchStatus === "pending_claim") return "Waiting for pairing";
+  switch (itemStatus) {
+    case "queued": return "Claimed — not yet started";
+    case "preparing": return "Opening Seller Hub…";
+    case "filling": return "Filling in listing details…";
+    case "waiting_for_review": return "Waiting for you to review in Seller Hub";
+    case "failed": return "Failed";
+    case "cancelled": return "Cancelled";
+    default: return batchStatus === "claimed" ? "Claimed" : "In progress";
+  }
+}
+
+// A restrained tone mapping matching feed-workflow-status.ts's own
+// emerald/amber/red/neutral palette — reused by both surfaces above so a
+// "Failed" state is never a different colour in the table than in the
+// status panel.
+export function ebayExtensionBatchStatusTone(batchStatus: string, itemStatus: string): string {
+  if (batchStatus === "cancelled" || batchStatus === "expired") return "#7E8798";
+  if (itemStatus === "failed") return "#B91C1C";
+  if (itemStatus === "waiting_for_review") return "#B45309";
+  if (batchStatus === "completed") return "#047857";
+  return "#2563EB";
+}
+
 export const ebayExtensionClaimRequestSchema = z.object({
   pairingCode: z.string().min(4).max(32),
   extensionId: z.string().max(100).optional(),

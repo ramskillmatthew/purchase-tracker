@@ -38,23 +38,93 @@ type ImageRow = { id: string; draft_id: string };
  * reused here rather than re-invented, since "ready to draft" is the same
  * real question either pipeline asks.
  */
+type ListBatchRow = {
+  batch_id: string; display_number: number; batch_status: string;
+  created_at: string; expires_at: string; claimed_at: string | null; completed_at: string | null;
+  extension_id: string | null; extension_version: string | null; browser_label: string | null;
+  box_dismissed_at: string | null; last_extension_activity_at: string | null;
+  item_id: string; marketplace_draft_id: string; item_status: string; attempt_count: number;
+  error_code: string | null; error_message: string | null; current_step: string | null; step_detail: string | null;
+  item_started_at: string | null; item_completed_at: string | null;
+  is_active: boolean; is_expired_unreconciled: boolean;
+};
+
+/**
+ * CORRECTIVE PASS (blocking-batch visibility review) — the ONE place the
+ * app renders "every active eBay extension batch". Calls
+ * listing_studio_list_ebay_extension_batches (the SAME is_active
+ * definition the create RPC's own conflict check uses — see that
+ * function's own comment in supabase-ebay-extension-batches.sql) and, for
+ * any row the RPC flags is_expired_unreconciled, calls the EXISTING,
+ * already-hardened listing_studio_expire_ebay_extension_batch RPC before
+ * returning — so the UI always sees an honest, already-reconciled state
+ * ("Expired — create a new extension batch") rather than a phantom
+ * "Waiting for pairing" for a window that has actually already closed.
+ * Never silently drops a row the way the old batchIds-only filter did.
+ */
 export async function GET() {
   try {
     const user = await requireOwner();
-    type OwnerBatchRow = { id: string; status: string; expires_at: string; display_number: number; box_dismissed_at: string | null };
-    const batches = await supabaseRequestAll<OwnerBatchRow>(
-      `ebay_extension_batches?owner_id=eq.${user.id}&select=id,status,expires_at,display_number,box_dismissed_at&order=created_at.desc`,
-    );
-    const now = Date.now();
-    const visible = batches.filter(batch => {
-      if (batch.box_dismissed_at !== null) return false;
-      const isLive = batch.status === "pending_claim" || batch.status === "claimed" || batch.status === "in_progress";
-      return isLive ? new Date(batch.expires_at).getTime() > now : true;
+    const rpcResponse = await supabaseRequest("rpc/listing_studio_list_ebay_extension_batches", {
+      method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
     });
-    return NextResponse.json({ batchIds: visible.map(batch => ({ batchId: batch.id, displayNumber: batch.display_number })) });
+    const rows = await rpcResponse.json() as ListBatchRow[];
+
+    // Reconcile any stale, never-claimed, genuinely-expired batch BEFORE
+    // returning it — one call per row (never more than a handful for a
+    // single owner in practice), each independently safe/idempotent (a
+    // hard no-op if it was claimed in the interim — see that RPC's own
+    // comment).
+    for (const row of rows) {
+      if (!row.is_expired_unreconciled) continue;
+      await supabaseRequest("rpc/listing_studio_expire_ebay_extension_batch", {
+        method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ p_batch_id: row.batch_id }),
+      }).catch(() => {});
+      row.batch_status = "expired";
+      if (["queued", "preparing", "filling"].includes(row.item_status)) row.item_status = "cancelled";
+      row.is_active = false;
+    }
+
+    // Resolve SKU/title for display — this route's own concern, so the UI
+    // never needs a second round trip just to label a batch card.
+    const marketplaceDraftIds = [...new Set(rows.map(row => row.marketplace_draft_id))];
+    const drafts = marketplaceDraftIds.length ? await supabaseRequestAll<{ id: string; product_draft_id: string; title: string | null }>(
+      `listing_marketplace_drafts?id=in.(${marketplaceDraftIds.join(",")})&owner_id=eq.${user.id}&select=id,product_draft_id,title`,
+    ) : [];
+    const draftById = new Map(drafts.map(d => [d.id, d]));
+    const productDraftIds = [...new Set(drafts.map(d => d.product_draft_id))];
+    const skuRows = productDraftIds.length ? await supabaseRequestAll<{ id: string; sku: string | null }>(
+      `listing_drafts?id=in.(${productDraftIds.join(",")})&owner_id=eq.${user.id}&select=id,sku`,
+    ) : [];
+    const skuByProductDraftId = new Map(skuRows.map(r => [r.id, r.sku]));
+
+    return NextResponse.json({
+      batches: rows.map(row => {
+        const draft = draftById.get(row.marketplace_draft_id);
+        return {
+          batchId: row.batch_id, displayNumber: row.display_number, status: row.batch_status,
+          createdAt: row.created_at, expiresAt: row.expires_at, claimedAt: row.claimed_at, completedAt: row.completed_at,
+          extensionId: row.extension_id, extensionVersion: row.extension_version, browserLabel: row.browser_label,
+          boxDismissedAt: row.box_dismissed_at, lastExtensionActivityAt: row.last_extension_activity_at,
+          isActive: row.is_active,
+          item: {
+            itemId: row.item_id, marketplaceDraftId: row.marketplace_draft_id, status: row.item_status, attemptCount: row.attempt_count,
+            errorCode: row.error_code, errorMessage: row.error_message, currentStep: row.current_step, stepDetail: row.step_detail,
+            startedAt: row.item_started_at, completedAt: row.item_completed_at,
+            title: draft?.title ?? null, sku: draft ? (skuByProductDraftId.get(draft.product_draft_id) ?? null) : null,
+          },
+        };
+      }),
+    });
   } catch (error) { return safeApiError(error, "Could not check for active eBay extension batches."); }
 }
 
+/** Extracts the blocking batch's own id from the create RPC's conflict raise (`DRAFT_ALREADY_IN_ACTIVE_BATCH:<uuid>`) — never guesses, never returns a truthy result for anything else, so a caller can distinguish "conflict, and we know which batch" from "conflict, id unavailable" (an older RPC signature, or a malformed message) without ever fabricating one. */
+function draftAlreadyActiveBlockingBatchId(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const match = error.message.match(/DRAFT_ALREADY_IN_ACTIVE_BATCH:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  return match ? match[1] : null;
+}
 function isDraftAlreadyActiveConflict(error: unknown): boolean {
   return error instanceof Error && error.message.includes("DRAFT_ALREADY_IN_ACTIVE_BATCH");
 }
@@ -124,7 +194,15 @@ export async function POST(request: Request) {
       created = row;
     } catch (error) {
       if (isDraftAlreadyActiveConflict(error)) {
-        return NextResponse.json({ error: "One or more selected listings are already part of another active eBay extension batch." }, { status: 409 });
+        // CORRECTIVE PASS (blocking-batch visibility review) — names the
+        // actual blocking batch (when the RPC's own raise carried its id —
+        // see this file's own draftAlreadyActiveBlockingBatchId comment)
+        // so the UI can offer a real "View this batch" action instead of
+        // a dead-end generic message.
+        return NextResponse.json({
+          error: "One or more selected listings are already part of another active eBay extension batch.",
+          blockingBatchId: draftAlreadyActiveBlockingBatchId(error),
+        }, { status: 409 });
       }
       throw error;
     }

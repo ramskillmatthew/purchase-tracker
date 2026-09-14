@@ -117,6 +117,37 @@
 --      real, reachable case, and the item's local watchdog reports
 --      'failed' directly while the server-side row is still 'queued'.
 --
+-- CORRECTIVE PASS (blocking-batch visibility review) — a live, real batch
+-- (created via the actually-correct app instance) genuinely blocked a new
+-- send while being COMPLETELY INVISIBLE in the app: the create RPC's own
+-- conflict check (correctly) never looks at expires_at — a batch is still
+-- genuinely active, and must still block a duplicate send, right up until
+-- its pairing window elapses — but the app's GET-batches route excluded
+-- ANY 'pending_claim' batch whose expires_at had passed, REGARDLESS of
+-- whether its status column had actually been flipped to 'expired' yet
+-- (nothing does that until something calls
+-- listing_studio_expire_ebay_extension_batch; a plain read never
+-- reconciles it on its own). Two independently-written "is this active"
+-- definitions, quietly disagreeing at exactly the boundary where it
+-- mattered most. Fixed by:
+--   1. listing_studio_is_ebay_extension_item_active — the ONE
+--      authoritative definition, now used by BOTH the create RPC's
+--      conflict check AND the new list RPC below. See that function's own
+--      comment.
+--   2. listing_studio_list_ebay_extension_batches — the ONE query the
+--      app's GET route now uses to render every one of an owner's
+--      non-dismissed batches, with is_active computed via the function
+--      above and is_expired_unreconciled flagging a 'pending_claim' batch
+--      whose window has genuinely elapsed but hasn't been reconciled yet
+--      — the app route calls the EXISTING, already-hardened expire RPC
+--      for any such row before returning, so the UI always sees an
+--      honest, already-reconciled state, never a phantom "still waiting"
+--      for something that's actually dead.
+--   3. The create RPC's conflict raise now also carries the BLOCKING
+--      BATCH's own id (DRAFT_ALREADY_IN_ACTIVE_BATCH:<batch_id>), so the
+--      app can tell the user exactly which batch to look at instead of a
+--      dead-end generic message.
+--
 -- Two real defects were found in the original draft, both fixed below:
 --
 -- DEFECT 1 (inconsistent empty batches) — the original RPC set
@@ -318,6 +349,48 @@ create unique index if not exists ebay_extension_batch_items_live_draft_idx
 alter table public.ebay_extension_batch_items enable row level security;
 revoke all on public.ebay_extension_batch_items from anon, authenticated;
 
+-- CORRECTIVE PASS (blocking-batch visibility review) — the ONE
+-- authoritative definition of "this eBay extension item currently blocks
+-- a new send for its listing". Before this, the create RPC's own conflict
+-- check and the app's GET-batches route each computed "active" with their
+-- OWN independent boolean logic — the create RPC never checked expires_at
+-- at all (correctly: a batch is still genuinely active, and must still
+-- block a duplicate send, the instant before its pairing window elapses),
+-- while the GET route excluded ANY 'pending_claim' batch whose expires_at
+-- had passed, REGARDLESS of whether its status column had actually been
+-- flipped to 'expired' yet (nothing does that until something calls
+-- listing_studio_expire_ebay_extension_batch — a read, by itself, never
+-- reconciles it). The result: a batch that had just crossed its own
+-- expiry, but was never claimed and never went through the expire RPC,
+-- could be genuinely STILL BLOCKING (conflict check: status column still
+-- says 'pending_claim', so "active") while being COMPLETELY INVISIBLE in
+-- the app (GET route: same status column, but expires_at already passed,
+-- so filtered out) — exactly the reported "cannot inspect or remove the
+-- blocking batch" bug. A single `plpgsql` function (not `sql`)
+-- deliberately, so this file's own structural tests can find and parse
+-- its body the same way as every other function here.
+create or replace function public.listing_studio_is_ebay_extension_item_active(
+  p_batch_status text,
+  p_item_status text
+)
+returns boolean
+language plpgsql
+immutable
+set search_path = public, pg_temp
+as $$
+begin
+  return p_batch_status not in ('completed', 'cancelled', 'expired')
+     and p_item_status not in ('failed', 'cancelled');
+end;
+$$;
+
+revoke all on function public.listing_studio_is_ebay_extension_item_active(text, text) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_is_ebay_extension_item_active(text, text) from anon, authenticated;
+  grant execute on function public.listing_studio_is_ebay_extension_item_active(text, text) to service_role;
+end $$;
+
 -- Mirrors listing_studio_create_extension_batch's own advisory-lock +
 -- sequential-display-number pattern (supabase-listing-studio.sql) — see
 -- this file's own top comment for the two defects fixed relative to the
@@ -338,6 +411,7 @@ declare
   v_marketplace_draft_id uuid;
   v_product_draft_id uuid;
   v_conflicting_draft uuid;
+  v_conflicting_batch_id uuid;
   v_inserted_count integer;
   v_distinct_count integer;
   v_retry_of_item_id uuid;
@@ -446,17 +520,25 @@ begin
     );
 
   -- ---- DEFECT 2 FIX: 'waiting_for_review' now correctly counts as active. ----
-  select bi.marketplace_draft_id into v_conflicting_draft
+  -- CORRECTIVE PASS (blocking-batch visibility review) — "active" is now
+  -- computed via listing_studio_is_ebay_extension_item_active, the ONE
+  -- authoritative definition this migration's own list RPC
+  -- (listing_studio_list_ebay_extension_batches) also uses for display —
+  -- see that function's own comment for exactly why two independent
+  -- copies of this boolean is what let a genuinely-blocking batch go
+  -- invisible in the UI while still correctly blocking a new send here.
+  -- Also now captures the BLOCKING BATCH's own id, not just the draft id,
+  -- so the caller can tell the user exactly which batch to look at.
+  select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id
   from public.ebay_extension_batch_items bi
   join public.ebay_extension_batches b on b.id = bi.batch_id
   where bi.marketplace_draft_id = v_marketplace_draft_id
     and b.owner_id = p_owner_id
-    and b.status not in ('completed', 'cancelled', 'expired')
-    and bi.status not in ('failed', 'cancelled')
+    and public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)
   limit 1;
 
   if v_conflicting_draft is not null then
-    raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH' using errcode = 'P0002';
+    raise exception 'DRAFT_ALREADY_IN_ACTIVE_BATCH:%', v_conflicting_batch_id using errcode = 'P0002';
   end if;
 
   -- CORRECTIVE PASS 6 (retry truthfulness review) — attempt lineage,
@@ -897,10 +979,79 @@ begin
   grant execute on function public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text) to service_role;
 end $$;
 
+-- CORRECTIVE PASS (blocking-batch visibility review) — the ONE query the
+-- app's GET /api/listing-studio/ebay-extension-batches route uses to
+-- render every one of an owner's non-dismissed eBay extension batches
+-- (and their single item — this milestone's own "exactly one listing per
+-- batch" scope, joined rather than a separate lookup). is_active is
+-- computed via the SAME listing_studio_is_ebay_extension_item_active the
+-- create RPC's own conflict check uses — a batch this function reports as
+-- is_active = true is GUARANTEED to be exactly the batch that would block
+-- a new send for that listing, and vice versa; there is no second,
+-- independently-drifting definition anywhere. is_expired_unreconciled
+-- flags a 'pending_claim' batch whose pairing window has genuinely
+-- elapsed (expires_at <= now()) but whose status column hasn't been
+-- flipped yet — nothing does that until something calls
+-- listing_studio_expire_ebay_extension_batch, which a plain read (this
+-- function) never does itself (kept a read-only `stable` SQL function
+-- deliberately — see that flag's own doc on the app route, which is the
+-- ONE place actually allowed to call the expire RPC as a result of
+-- reading this). A hard no-op for a genuinely nonexistent/wrong owner
+-- (returns zero rows, never an error) — this is a read, never a
+-- capability an unauthenticated caller should ever reach (service-role
+-- only, same as every other function here).
+create or replace function public.listing_studio_list_ebay_extension_batches(
+  p_owner_id uuid
+)
+returns table(
+  batch_id uuid, display_number integer, batch_status text,
+  created_at timestamptz, expires_at timestamptz, claimed_at timestamptz, completed_at timestamptz,
+  extension_id text, extension_version text, browser_label text,
+  box_dismissed_at timestamptz, last_extension_activity_at timestamptz,
+  item_id uuid, marketplace_draft_id uuid, item_status text, attempt_count integer,
+  error_code text, error_message text, current_step text, step_detail text,
+  item_started_at timestamptz, item_completed_at timestamptz,
+  is_active boolean, is_expired_unreconciled boolean
+)
+language plpgsql
+stable
+set search_path = public, pg_temp
+as $$
+begin
+  if p_owner_id is null then
+    raise exception 'OWNER_ID_REQUIRED' using errcode = 'P0001';
+  end if;
+
+  return query
+  select
+    b.id, b.display_number, b.status,
+    b.created_at, b.expires_at, b.claimed_at, b.completed_at,
+    b.extension_id, b.extension_version, b.browser_label,
+    b.box_dismissed_at, b.last_extension_activity_at,
+    bi.id, bi.marketplace_draft_id, bi.status, bi.attempt_count,
+    bi.error_code, bi.error_message, bi.current_step, bi.step_detail,
+    bi.started_at, bi.completed_at,
+    public.listing_studio_is_ebay_extension_item_active(b.status, bi.status),
+    (b.status = 'pending_claim' and b.expires_at <= now())
+  from public.ebay_extension_batches b
+  join public.ebay_extension_batch_items bi on bi.batch_id = b.id
+  where b.owner_id = p_owner_id
+    and b.box_dismissed_at is null
+  order by b.created_at desc;
+end;
+$$;
+
+revoke all on function public.listing_studio_list_ebay_extension_batches(uuid) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_list_ebay_extension_batches(uuid) from anon, authenticated;
+  grant execute on function public.listing_studio_list_ebay_extension_batches(uuid) to service_role;
+end $$;
+
 -- READ-ONLY PERMISSION VERIFIER — run this manually in the Supabase SQL
 -- editor AFTER applying the migration above (never as part of it). Expected
 -- (not yet verified): every *_execute column true for service_role only
--- and false for anon/authenticated on ALL FOUR functions, AND every
+-- and false for anon/authenticated on ALL SIX functions, AND every
 -- table-privilege boolean false for both anon and authenticated (proving
 -- neither role can read either table directly, not just that they can't
 -- call the functions).
@@ -918,6 +1069,12 @@ end $$;
 --   has_function_privilege('anon', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as anon_execute_report_result,
 --   has_function_privilege('authenticated', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as authenticated_execute_report_result,
 --   has_function_privilege('service_role', 'public.listing_studio_report_ebay_extension_item_result(uuid, uuid, text, text, text, text, text)', 'EXECUTE') as service_role_execute_report_result,
+--   has_function_privilege('anon', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as anon_execute_is_active,
+--   has_function_privilege('authenticated', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as authenticated_execute_is_active,
+--   has_function_privilege('service_role', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as service_role_execute_is_active,
+--   has_function_privilege('anon', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as anon_execute_list,
+--   has_function_privilege('authenticated', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as authenticated_execute_list,
+--   has_function_privilege('service_role', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as service_role_execute_list,
 --   has_table_privilege('anon', 'public.ebay_extension_batches', 'SELECT') as anon_select_batches,
 --   has_table_privilege('authenticated', 'public.ebay_extension_batches', 'SELECT') as authenticated_select_batches,
 --   has_table_privilege('anon', 'public.ebay_extension_batch_items', 'SELECT') as anon_select_items,

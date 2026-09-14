@@ -60,6 +60,9 @@ export type ListingTableRow = {
   // CORRECTIVE PASS (third real-submission audit) — see
   // ListingsReviewWorkspace.tsx's own comment on this field.
   ebayFeedBatchState: EbayFeedBatchBlockingState;
+  // CORRECTIVE PASS (blocking-batch visibility review) — see
+  // ListingsReviewWorkspace.tsx's own comment on this field.
+  ebayExtensionActiveState: { label: string; tone: string; pulse: boolean } | null;
 };
 
 // Readiness reuses the same emerald/amber the workflow statuses use for
@@ -96,6 +99,18 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
   }
   if (!row.hasEbayPreparation) {
     return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence };
+  }
+  // CORRECTIVE PASS (blocking-batch visibility review) — "The main row
+  // status should prioritise the active eBay extension state when one
+  // exists" / never show a generic Feed "Failed" while a genuinely active
+  // extension batch is still waiting or processing for this exact row.
+  // Checked BEFORE the Feed-pipeline-derived needs_reconciliation/ordinary
+  // label below — an active extension batch always wins.
+  if (row.ebayExtensionActiveState) {
+    return {
+      label: row.ebayExtensionActiveState.label, tone: row.ebayExtensionActiveState.tone, pulse: row.ebayExtensionActiveState.pulse,
+      secondaryLine: "eBay extension", pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
+    };
   }
   // CORRECTIVE PASS (third real-submission audit) — a stale, inconsistent
   // item (parent already terminal-failed, this row never updated to

@@ -57,7 +57,7 @@ describe("stale-batch lifecycle — SQL: atomicity + safe create-time cleanup (s
 
   it("REQUIREMENT 3: the create RPC cleans up this owner's genuinely-expired, never-claimed batches for THIS listing BEFORE the conflict check", () => {
     const cleanupIdx = createBody.indexOf("LIFECYCLE FIX (stale-batch review): safe cleanup");
-    const conflictIdx = createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft");
+    const conflictIdx = createBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id");
     expect(cleanupIdx).toBeGreaterThan(-1);
     expect(conflictIdx).toBeGreaterThan(-1);
     expect(cleanupIdx).toBeLessThan(conflictIdx);
@@ -80,7 +80,7 @@ describe("stale-batch lifecycle — SQL: atomicity + safe create-time cleanup (s
     // Only the actual UPDATE statements, never the surrounding comment
     // (which describes what must NOT happen and so mentions 'claimed'/
     // 'waiting_for_review' descriptively).
-    const cleanup = createBody.slice(createBody.indexOf("LIFECYCLE FIX (stale-batch review): safe cleanup"), createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft"));
+    const cleanup = createBody.slice(createBody.indexOf("LIFECYCLE FIX (stale-batch review): safe cleanup"), createBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id"));
     const statements = cleanup.split("\n").filter(l => !l.trim().startsWith("--")).join("\n");
     expect(statements).not.toMatch(/status (=|in|not in)[^\n]*'claimed'/);
     expect(statements).not.toContain("waiting_for_review");
@@ -109,8 +109,14 @@ describe("stale-batch lifecycle — SQL: explicit cancel releases the listing (s
   });
 
   it("REQUIREMENT 5: 'waiting_for_review' still blocks a duplicate send — the create conflict query and the partial unique index both still treat it as live", () => {
-    const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft"), createBody.indexOf("limit 1"));
-    expect(conflictQuery).toContain("bi.status not in ('failed', 'cancelled')");
+    const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id"), createBody.indexOf("limit 1"));
+    // CORRECTIVE PASS (blocking-batch visibility review) — this boolean
+    // now lives in ONE place (listing_studio_is_ebay_extension_item_active
+    // — see tests/ebay-extension-batch-migration.test.ts's own coverage),
+    // which this query calls rather than re-deriving inline. Still proves
+    // the SAME substantive requirement: 'waiting_for_review' is never
+    // excluded from blocking a new send.
+    expect(conflictQuery).toContain("public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)");
     expect(conflictQuery).not.toContain("waiting_for_review");
     // Anchored on the actual CREATE statement (not just the bare index
     // name), which this file's own top comment now also mentions in prose —
@@ -413,8 +419,9 @@ describe("cancellation race review — a cancelled/expired parent never retains 
   });
 
   it("a listing whose only batch is now cancelled is eligible for a brand-new batch — the create RPC's conflict query only excludes 'failed'/'cancelled' children, both of which this cancel/expire path always produces", () => {
-    const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id into v_conflicting_draft"), createBody.indexOf("limit 1"));
-    expect(conflictQuery).toContain("bi.status not in ('failed', 'cancelled')");
+    const conflictQuery = createBody.slice(createBody.indexOf("select bi.marketplace_draft_id, b.id into v_conflicting_draft, v_conflicting_batch_id"), createBody.indexOf("limit 1"));
+    // See the "REQUIREMENT 5" test above — same shared-function indirection.
+    expect(conflictQuery).toContain("public.listing_studio_is_ebay_extension_item_active(b.status, bi.status)");
   });
 });
 

@@ -2872,3 +2872,25 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-ebay-status-panel-reasons li { margin: 2px 0; overflow-wrap: anywhere; }
 .lr-ebay-status-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .lr-ebay-status-panel-actions .button, .lr-ebay-status-panel-actions .button-secondary { min-height: 32px; padding: 0 12px; font-size: 10.5px; }
+
+/* CORRECTIVE PASS (blocking-batch visibility review) — every genuinely
+   active eBay extension batch, shown prominently above the listings
+   table itself (not tucked inside the bulk-action bar's own per-selection
+   panels above), so a batch created in an earlier page session is never
+   invisible again. One card per batch; a highlighted card (jumped to from
+   a 409 conflict's own "View this batch" button) gets a visibly distinct
+   border so it's unmistakable which one is blocking a send. */
+.lr-ebay-extension-active-panel { display: flex; flex-direction: column; gap: 10px; width: 100%; margin: 0 0 16px; }
+.lr-ebay-extension-active-panel-title { margin: 0; color: var(--lr-text); font-size: 13px; font-weight: 700; }
+.lr-ebay-extension-active-panel-hint { margin: 0; color: var(--lr-muted); font-size: 11px; }
+.lr-ebay-extension-active-card { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); }
+.lr-ebay-extension-active-card--highlight { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.lr-ebay-extension-active-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lr-ebay-extension-active-card-header > span:first-child { color: var(--lr-text); font-size: 12px; font-weight: 700; }
+.lr-ebay-extension-active-card-status { color: var(--lr-muted); font-size: 11px; font-weight: 600; }
+.lr-ebay-extension-active-card-item { margin: 0; color: var(--lr-text); font-size: 12px; }
+.lr-ebay-extension-active-card-meta { margin: 0; color: var(--lr-muted); font-size: 11px; line-height: 1.5; }
+.lr-ebay-extension-active-card-error { margin: 0; color: var(--danger); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.lr-ebay-extension-active-card-hint { margin: 0; color: var(--lr-muted); font-size: 11px; font-style: italic; }
+.lr-ebay-extension-active-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.lr-ebay-extension-active-card-actions .button-secondary { min-height: 32px; padding: 0 12px; font-size: 10.5px; }
