@@ -493,10 +493,50 @@ describe("stale-batch lifecycle — explicit Cancel routes call the atomic RPC (
     expect(JSON.parse(String((rpcCall![1] as RequestInit).body))).toMatchObject({ p_owner_id: "owner-1", p_batch_id: BATCH_UUID });
   });
 
+  it("REQUIREMENT (Phase 4): the owner-authenticated PATCH {action:\"dismiss\"} route calls listing_studio_dismiss_ebay_extension_batch with the SESSION owner id", async () => {
+    const { PATCH } = await import("@/app/api/listing-studio/ebay-extension-batches/[batchId]/route");
+    const response = await PATCH(
+      new Request("http://test", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }) }),
+      { params: Promise.resolve({ batchId: BATCH_UUID }) },
+    );
+    expect(response.status).toBe(200);
+    const rpcCall = supabaseRequest.mock.calls.find(([path]) => String(path).startsWith("rpc/listing_studio_dismiss_ebay_extension_batch"));
+    expect(rpcCall).toBeTruthy();
+    expect(JSON.parse(String((rpcCall![1] as RequestInit).body))).toMatchObject({ p_owner_id: "owner-1", p_batch_id: BATCH_UUID });
+  });
+
+  it("REQUIREMENT (Phase 4): an invalid action is rejected by the schema, never reaching the RPC", async () => {
+    const { PATCH } = await import("@/app/api/listing-studio/ebay-extension-batches/[batchId]/route");
+    supabaseRequest.mockClear();
+    const response = await PATCH(
+      new Request("http://test", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "cancel" }) }),
+      { params: Promise.resolve({ batchId: BATCH_UUID }) },
+    );
+    expect(response.status).not.toBe(200);
+    expect(supabaseRequest.mock.calls.some(([path]) => String(path).startsWith("rpc/listing_studio_dismiss_ebay_extension_batch"))).toBe(false);
+  });
+
   it("the owner-authenticated DELETE route derives the owner from the session — a spoofed body owner id has zero effect (it never reads the body at all)", async () => {
     const source = readFileSync("app/api/listing-studio/ebay-extension-batches/[batchId]/route.ts", "utf8");
-    expect(source).not.toMatch(/request\.json\(\)/);
-    expect(source).toContain("await requireOwner()");
+    // CORRECTIVE PASS (controlled pairing test review, Phase 4) — scoped
+    // to the DELETE function's own body specifically: the sibling PATCH
+    // (dismiss) handler added this pass legitimately reads the request
+    // body for its own non-security-sensitive {action:"dismiss"} field —
+    // this requirement is about DELETE never reading a spoofable owner id
+    // from a body, not about every handler in the file.
+    const deleteStart = source.indexOf("export async function DELETE");
+    const deleteEnd = source.indexOf("export async function PATCH");
+    const deleteBody = source.slice(deleteStart, deleteEnd);
+    expect(deleteBody).not.toMatch(/request\.json\(\)/);
+    expect(deleteBody).toContain("await requireOwner()");
+  });
+
+  it("REQUIREMENT: the sibling PATCH (dismiss) handler is ALSO owner-authenticated via the session, never trusting an owner id from the request body", async () => {
+    const source = readFileSync("app/api/listing-studio/ebay-extension-batches/[batchId]/route.ts", "utf8");
+    const patchStart = source.indexOf("export async function PATCH");
+    const patchBody = source.slice(patchStart);
+    expect(patchBody).toContain("await requireOwner()");
+    expect(patchBody).not.toMatch(/ownerId/);
   });
 
   it("the extension (batch-token) POST /cancel route resolves the owner from the batch row and calls the SAME RPC", async () => {

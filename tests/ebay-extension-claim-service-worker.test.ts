@@ -62,36 +62,69 @@ describe("service worker — claimEbayBatch error classification (pairing failur
     expect(result.errorKind).toBe("code_rejected");
   });
 
-  it("REQUIREMENT: a 500 internal-server response is classified as server_failure — NEVER shown as 'invalid or expired', even though the route's fallback text differs from that exact phrase", async () => {
+  // CORRECTIVE PASS (controlled pairing test review) — a real, reproduced
+  // 404 was previously falling through to this SAME generic
+  // "server_failure" bucket as a 500, showing a misleading "try again in
+  // a moment" for a failure retrying can never fix (the route genuinely
+  // doesn't exist at the configured origin). 500/503/etc now get their
+  // own, more specific "internal_failure" kind — see the 404 test below
+  // for the route_not_found kind this same review added.
+  it("REQUIREMENT: a 500 internal-server response is classified as internal_failure — NEVER shown as 'invalid or expired', and never the generic server_failure bucket a 404 used to share", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Could not claim this eBay batch (pairing_lookup)." }), { status: 500 })));
     const { dispatch } = await loadWorker();
     const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
-    expect(result.errorKind).toBe("server_failure");
+    expect(result.errorKind).toBe("internal_failure");
     expect(result.error).not.toMatch(/invalid or has expired/i);
   });
 
-  it("REQUIREMENT: a 500 response whose body fails to parse as JSON is STILL classified as server_failure with an honest status-based message — never silently falls back to 'invalid or expired'", async () => {
+  it("REQUIREMENT: a 500 response whose body fails to parse as JSON is STILL classified as internal_failure with an honest status-based message — never silently falls back to 'invalid or expired'", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>Internal Server Error</html>", { status: 500, headers: { "Content-Type": "text/html" } })));
     const { dispatch } = await loadWorker();
     const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
-    expect(result.errorKind).toBe("server_failure");
+    expect(result.errorKind).toBe("internal_failure");
     expect(result.error).not.toMatch(/invalid or has expired/i);
     expect(result.error).toContain("500");
   });
 
-  it("REQUIREMENT: a 429 rate-limit response is classified as server_failure (retry, don't retype), never code_rejected", async () => {
+  it("REQUIREMENT: a 429 rate-limit response is classified as its own rate_limited kind (retry, don't retype), never code_rejected and never lumped in with a genuine server failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Too many attempts." }), { status: 429 })));
     const { dispatch } = await loadWorker();
     const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
-    expect(result.errorKind).toBe("server_failure");
+    expect(result.errorKind).toBe("rate_limited");
   });
 
-  it("REQUIREMENT: a network-level failure (fetch itself rejects — DNS/offline/etc) is classified as connection_failure", async () => {
+  // CORRECTIVE PASS (controlled pairing test review) — the exact defect a
+  // real, reproduced pairing failure traced to: a genuine 404 (the claim
+  // route does not exist at the configured App URL — wrong origin, wrong
+  // path, or a server build predating this route) was reported as "The
+  // app reported a problem (status 404). Try again in a moment." —
+  // indistinguishable from a transient server hiccup, even though retrying
+  // can never fix a route that doesn't exist. The message must also name
+  // the actual destination origin the request was built against, so the
+  // fix is "check Settings → App URL", not a guess.
+  it("REQUIREMENT: a 404 (the route does not exist at the configured App URL) is classified as its own route_not_found kind, naming the actual destination origin — never the generic server_failure/'try again' message", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 404 })));
+    const { dispatch } = await loadWorker();
+    const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
+    expect(result.errorKind).toBe("route_not_found");
+    expect(result.error).toContain(APP_BASE_URL);
+    expect(result.error).not.toMatch(/try again in a moment/i);
+  });
+
+  it("REQUIREMENT: a 401/403 response is classified as its own auth_failure kind, distinct from code_rejected and route_not_found", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Unauthorized." }), { status: 401 })));
+    const { dispatch } = await loadWorker();
+    const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
+    expect(result.errorKind).toBe("auth_failure");
+  });
+
+  it("REQUIREMENT: a network-level failure (fetch itself rejects — DNS/offline/etc) is classified as connection_failure and names the actual destination origin", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
     const { dispatch } = await loadWorker();
     const result: any = await dispatch({ type: EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH, pairingCode: "ABCD2345" });
     expect(result.errorKind).toBe("connection_failure");
     expect(result.error).not.toMatch(/invalid or has expired/i);
+    expect(result.error).toContain(APP_BASE_URL);
   });
 
   it("REQUIREMENT: retrying after a transport failure does not corrupt any local state — a failed claim attempt never writes a pairing/batch to storage", async () => {

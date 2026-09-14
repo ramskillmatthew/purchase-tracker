@@ -1684,24 +1684,49 @@ async function updateEbayState(updater) {
 // for a genuine server/network problem. Branching on the STATUS CODE (not
 // guessing from message text) is what actually distinguishes them, without
 // touching the route's own deliberately-undifferentiated 400 response.
-function classifyEbayClaimFailure(response, body) {
+// CORRECTIVE PASS (controlled pairing test review) — REQUIREMENT:
+// "Differentiate route-not-found, wrong server build, invalid/expired
+// code, authentication failure, network failure and internal failure.
+// Never report a route 404 merely as a generic app problem." A real,
+// reproduced 404 was previously falling through to the generic
+// "server_failure" branch below (`response.status ${...}`), giving a
+// misleading "try again in a moment" for a failure retrying can never
+// fix (the route genuinely does not exist at the configured origin). Each
+// kind now gets its own branch, and route_not_found/connection_failure
+// both name the actual destination origin the request was built against
+// — see requestOrigin below — so the message points at the real thing to
+// check (Settings → App URL) instead of leaving the user to guess.
+function classifyEbayClaimFailure(response, body, requestOrigin) {
   if (response.status === 400) return { kind: "code_rejected", message: body.error || "This code is invalid or has expired." };
-  if (response.status === 429) return { kind: "server_failure", message: body.error || "Too many attempts — wait a moment and try again." };
+  if (response.status === 401 || response.status === 403) {
+    return { kind: "auth_failure", message: body.error || "The app rejected this request (authentication)." };
+  }
+  if (response.status === 404) {
+    return {
+      kind: "route_not_found",
+      message: `${requestOrigin} does not have the eBay pairing route (status 404). Check Settings → App URL, and make sure the app server is running the latest build.`,
+    };
+  }
+  if (response.status === 429) return { kind: "rate_limited", message: body.error || "Too many attempts — wait a moment and try again." };
+  if (response.status >= 500) return { kind: "internal_failure", message: body.error || `${requestOrigin} had an internal problem (status ${response.status}). Try again in a moment.` };
   return { kind: "server_failure", message: body.error || `The app reported a problem (status ${response.status}). Try again in a moment.` };
 }
 
 async function claimEbayBatch(pairingCode) {
   if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app.", errorKind: "code_rejected" };
   const { appBaseUrl } = await getSettings();
+  const requestUrl = `${appBaseUrl}/api/extension/ebay-batch/claim`;
   let response;
   try {
-    response = await fetch(`${appBaseUrl}/api/extension/ebay-batch/claim`, {
+    response = await fetch(requestUrl, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairingCode, extensionId: chrome.runtime.id, extensionVersion: chrome.runtime.getManifest().version }),
     });
-  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).`, errorKind: "connection_failure" }; }
+  } catch (error) {
+    return { error: `Could not reach ${appBaseUrl} (${error?.name || "Error"}). Check Settings → App URL and that the app is running.`, errorKind: "connection_failure" };
+  }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) { const failure = classifyEbayClaimFailure(response, body); return { error: failure.message, errorKind: failure.kind }; }
+  if (!response.ok) { const failure = classifyEbayClaimFailure(response, body, appBaseUrl); return { error: failure.message, errorKind: failure.kind }; }
   const next = await updateEbayState(s => EbayQueueState.applyEbayClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: new Date().toISOString() }));
   await fetchEbayBatchPayload();
   return { state: next };

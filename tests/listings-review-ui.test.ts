@@ -2043,19 +2043,26 @@ describe("REQUIREMENT (Phase 7 action-area redesign): exactly one eBay primary a
 
   it("the eBay action group (policy control, Create, Open Seller Hub Drafts) is gated by workflowMarketplaceView === \"EBAY_UK\"", () => {
     const idx = workspaceSource.indexOf("<BulkEbayPolicyControl");
-    // Widened from 300 (eBay extension drafter, Phase 7), then again from
-    // 600 (blocking-batch visibility review — the fallback label's own
-    // explanatory comment grew) — a "Legacy Seller Hub Feed fallback"
-    // label now sits between the guard condition and BulkEbayPolicyControl
-    // itself; the guard text is unchanged, just slightly further away in
-    // source.
-    const before = workspaceSource.slice(Math.max(0, idx - 1000), idx);
-    expect(before).toMatch(/marketplaceToggleOptions\.includes\("EBAY_UK"\) && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>/);
+    // Widened from 300 (eBay extension drafter, Phase 7), then 600
+    // (blocking-batch visibility review — the fallback label's own
+    // explanatory comment grew), then 1100 (controlled pairing test
+    // review, Phase 5 — the fallback group became a <details>, replacing
+    // the bare "&& <>" fragment opener with "&& (") — a "Legacy Seller Hub
+    // Feed fallback" label now sits between the guard condition and
+    // BulkEbayPolicyControl itself; the guard condition's own text is
+    // unchanged, just slightly further away in source.
+    const before = workspaceSource.slice(Math.max(0, idx - 1100), idx);
+    expect(before).toMatch(/marketplaceToggleOptions\.includes\("EBAY_UK"\) && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && \(/);
   });
 
   it("Create and 'Open Seller Hub Drafts' are mutually exclusive (eligibleEbayCount > 0 vs === 0 && already drafted) — never both, never a disabled Create 0 button", () => {
+    // CORRECTIVE PASS (controlled pairing test review, Phase 5) — this
+    // group is now the body of a <details> (see that requirement's own
+    // "collapsed by default" change) — anchor on its real closing tag,
+    // never the old bare fragment-close "</>}"  this group no longer ends
+    // with.
     const groupStart = workspaceSource.indexOf("<BulkEbayPolicyControl");
-    const groupEnd = workspaceSource.indexOf("</>}", groupStart);
+    const groupEnd = workspaceSource.indexOf("</details>", groupStart);
     const group = workspaceSource.slice(groupStart, groupEnd);
     expect(group).toContain("eligibleEbayCount > 0 && (");
     expect(group).toContain("eligibleEbayCount === 0 && ebayAlreadyDraftedSingleSelection && (");
@@ -2116,22 +2123,35 @@ describe("blocking-batch visibility review — the eBay Extension status panel",
     const fetchIdx = workspaceSource.indexOf("const fetchEbayExtensionBatches = useCallback");
     expect(fetchIdx).toBeGreaterThan(-1);
     const fetchFn = workspaceSource.slice(fetchIdx, fetchIdx + 700);
-    expect(fetchFn).toContain('fetch("/api/listing-studio/ebay-extension-batches")');
-    expect(workspaceSource).toContain("useEffect(() => { fetchEbayExtensionBatches(); }, [fetchEbayExtensionBatches]);");
+    // Phase 4 extended this to a template literal carrying the "Show
+    // dismissed batches" toggle — the base path is still the exact same
+    // GET route.
+    expect(fetchFn).toContain("`/api/listing-studio/ebay-extension-batches${includeDismissed");
+    expect(workspaceSource).toContain("useEffect(() => { fetchEbayExtensionBatches(ebayExtensionShowDismissed); }, [fetchEbayExtensionBatches, ebayExtensionShowDismissed]);");
   });
 
   it("REQUIREMENT: refetches after a successful create AND after a successful cancel — never leaves the panel showing stale state", () => {
     const sendIdx = workspaceSource.indexOf("async function handleSendToEbayExtension");
     const sendFn = workspaceSource.slice(sendIdx, workspaceSource.indexOf("\n  }", workspaceSource.indexOf("setSendToEbayExtensionRunning(false)", sendIdx)));
-    expect(sendFn).toContain("await fetchEbayExtensionBatches();");
+    expect(sendFn).toContain("await fetchEbayExtensionBatches(ebayExtensionShowDismissed);");
 
-    const cancelOwnIdx = workspaceSource.indexOf("async function handleCancelEbayExtensionSend");
-    const cancelOwnFn = workspaceSource.slice(cancelOwnIdx, workspaceSource.indexOf("\n  }", workspaceSource.indexOf("setEbayExtensionCancelling(false)", cancelOwnIdx)));
-    expect(cancelOwnFn).toContain("await fetchEbayExtensionBatches();");
-
+    // CORRECTIVE PASS (controlled pairing test review, Phase 5) — the
+    // once-separate handleCancelEbayExtensionSend was consolidated into
+    // THIS one canonical handler (see "One canonical Cancel action rather
+    // than duplicated confusing actions") — it no longer exists as its
+    // own function; the pairing card's own Cancel button now opens the
+    // SAME confirmation dialog this handler serves (checked below).
+    expect(workspaceSource).not.toContain("async function handleCancelEbayExtensionSend");
     const cancelAnyIdx = workspaceSource.indexOf("const handleCancelEbayExtensionBatch = useCallback");
-    const cancelAnyFn = workspaceSource.slice(cancelAnyIdx, cancelAnyIdx + 1600);
-    expect(cancelAnyFn).toContain("await fetchEbayExtensionBatches();");
+    const cancelAnyFn = workspaceSource.slice(cancelAnyIdx, cancelAnyIdx + 1800);
+    expect(cancelAnyFn).toContain("await fetchEbayExtensionBatches(ebayExtensionShowDismissed);");
+  });
+
+  it("REQUIREMENT (Phase 5 consolidation): the pairing card's own Cancel button opens the SAME confirmation dialog as every other batch's Cancel button — never a second, silent, no-confirmation cancel path", () => {
+    const panelIdx = workspaceSource.indexOf("Ready for the eBay extension");
+    const actionsIdx = workspaceSource.indexOf("lr-ebay-status-panel-actions", panelIdx);
+    const actionsBlock = workspaceSource.slice(actionsIdx, actionsIdx + 400);
+    expect(actionsBlock).toContain("setEbayExtensionCancelConfirmBatchId(ebayExtensionBatchId)");
   });
 
   it("REQUIREMENT: displays batch number, item/SKU, status, creation time, expiry countdown, current processing step, and whether it has been claimed", () => {
@@ -2157,7 +2177,10 @@ describe("blocking-batch visibility review — the eBay Extension status panel",
     expect(showLine).toContain("ebayExtensionPairingCode");
     // An unclaimed batch that ISN'T this session's own shows an honest
     // "already shown once" message — never a second code.
-    expect(workspaceSource).toContain("The pairing code was only shown once, when this batch was created. If it&apos;s lost, cancel this batch and send again.");
+    // Phase 3 (Copy buttons review) — reworded to lead with the exact
+    // "Pairing code no longer available — cancel and create a new batch"
+    // phrasing that review required.
+    expect(workspaceSource).toContain("Pairing code no longer available — cancel and create a new batch.");
   });
 
   it("REQUIREMENT: an expired batch shows an honest 'Expired — create a new extension batch' state", () => {
@@ -2226,5 +2249,107 @@ describe("blocking-batch visibility review — the eBay Extension status panel",
     expect(schemaSource).toContain("export function ebayExtensionBatchStatusLabel(");
     expect(schemaSource).toContain("export function ebayExtensionBatchStatusTone(");
     expect(workspaceSource).toContain('import { ebayExtensionBatchStatusLabel, ebayExtensionBatchStatusTone } from "@/lib/listing-studio/ebay-extension-batch-schema";');
+  });
+});
+
+// CORRECTIVE PASS (controlled pairing test review) — Phases 3 (Copy),
+// 4 (Dismiss terminal batches), and 5 (page hierarchy) of the pairing-
+// failure follow-up review.
+describe("controlled pairing test review — Phase 3 (one-click Copy)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("REQUIREMENT: uses the Clipboard API with a safe (execCommand) fallback — never leaves the button non-functional where the modern API is unavailable", () => {
+    const fnIdx = workspaceSource.indexOf("async function copyTextWithFallback");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fn = workspaceSource.slice(fnIdx, fnIdx + 1200);
+    expect(fn).toContain("navigator.clipboard?.writeText");
+    expect(fn).toContain('document.execCommand("copy")');
+  });
+
+  it("REQUIREMENT: shows a visible 'Copied' confirmation, is a real <button> (native keyboard support), and carries an accessible label", () => {
+    expect(workspaceSource).toContain('ebayCodeCopiedSource === "active-card" ? "Copied" : "Copy"');
+    expect(workspaceSource).toContain('ebayCodeCopiedSource === "ready-panel" ? "Copied" : "Copy"');
+    const copyButtonOccurrences = workspaceSource.match(/type="button" className="lr-copy-code-button"/g) ?? [];
+    expect(copyButtonOccurrences.length).toBe(2); // active-batch card AND the pairing-code panel
+    expect(workspaceSource).toContain("aria-label={`Copy pairing code ${ebayExtensionPairingCode}`}");
+  });
+
+  it("REQUIREMENT: only ever copies plaintext already held in THIS session's own React state — never fetched from the server, never a hash", () => {
+    const handlerIdx = workspaceSource.indexOf("const handleCopyEbayPairingCode = useCallback");
+    const handler = workspaceSource.slice(handlerIdx, handlerIdx + 500);
+    expect(handler).not.toMatch(/fetch\(/);
+    expect(handler).toContain("copyTextWithFallback(code)");
+  });
+});
+
+describe("controlled pairing test review — Phase 4 (dismiss terminal batches, UI)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("REQUIREMENT: Dismiss is offered ONLY for a terminal (!isActive), not-yet-dismissed batch — never for an active/waiting/processing one (that's Cancel's job, never substituted)", () => {
+    const idx = workspaceSource.indexOf("!batch.isActive && !batch.boxDismissedAt && (");
+    expect(idx).toBeGreaterThan(-1);
+    const block = workspaceSource.slice(idx, idx + 400);
+    expect(block).toContain("handleDismissEbayExtensionBatch(batch.batchId)");
+  });
+
+  it("REQUIREMENT: dismissal reuses the EXISTING PATCH route — never a second, independent mechanism, never a DELETE (never hard-deletes)", () => {
+    const fnIdx = workspaceSource.indexOf("const handleDismissEbayExtensionBatch = useCallback");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fn = workspaceSource.slice(fnIdx, fnIdx + 800);
+    expect(fn).toContain('method: "PATCH"');
+    expect(fn).toContain('JSON.stringify({ action: "dismiss" })');
+    expect(fn).not.toContain('method: "DELETE"');
+  });
+
+  it("REQUIREMENT: an optional 'Show dismissed batches' toggle exists, off by default, and is forwarded to the fetch", () => {
+    expect(workspaceSource).toContain("const [ebayExtensionShowDismissed, setEbayExtensionShowDismissed] = useState(false);");
+    expect(workspaceSource).toContain('Show dismissed batches');
+    expect(workspaceSource).toContain("onChange={event => setEbayExtensionShowDismissed(event.target.checked)}");
+  });
+
+  it("REQUIREMENT: never claims to hard-delete — the dismiss code path only ever PATCHes, and the panel shows a 'still on record' hint for a dismissed batch rather than removing all trace of it from the API response", () => {
+    expect(workspaceSource).toContain("still on record, hidden from the default view");
+  });
+});
+
+describe("controlled pairing test review — Phase 5 (page hierarchy)", () => {
+  const workspaceSource = read("components/listings-review/ListingsReviewWorkspace.tsx");
+
+  it("REQUIREMENT: active eBay Extension batches sort before terminal ones in the panel — 'Active work first'", () => {
+    const idx = workspaceSource.indexOf("const sortedEbayExtensionBatches = useMemo");
+    expect(idx).toBeGreaterThan(-1);
+    const fn = workspaceSource.slice(idx, idx + 400);
+    expect(fn).toContain("a.isActive === b.isActive ? 0 : a.isActive ? -1 : 1");
+    expect(workspaceSource).toContain("sortedEbayExtensionBatches.map(batch =>");
+  });
+
+  it("REQUIREMENT: 'Legacy Seller Hub Feed fallback' is visually subordinate and collapsed by default (a native <details>, closed unless the user opens it)", () => {
+    const idx = workspaceSource.indexOf('<summary className="lr-feed-fallback-label">Legacy Seller Hub Feed fallback</summary>');
+    expect(idx).toBeGreaterThan(-1);
+    const detailsOpenIdx = workspaceSource.lastIndexOf("<details", idx);
+    const detailsTag = workspaceSource.slice(detailsOpenIdx, workspaceSource.indexOf(">", detailsOpenIdx) + 1);
+    expect(detailsTag).not.toContain(" open"); // no `open` attribute — closed by default
+  });
+
+  it("REQUIREMENT: 'Send to eBay extension' is proactively disabled (replaced by a direct 'View active batch' action) while an active batch already exists for that exact listing — never waits for a 409 to discover this", () => {
+    const idx = workspaceSource.indexOf("const activeBatch = ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId);");
+    expect(idx).toBeGreaterThan(-1);
+    const block = workspaceSource.slice(idx, idx + 700);
+    expect(block).toContain("if (activeBatch) {");
+    expect(block).toContain("scrollIntoView");
+    expect(block).toContain("View active batch #");
+  });
+
+  it("REGRESSION: 'Retry Seller Hub draft' is never offered as a remedy for an eBay extension pairing/conflict failure — it only ever appears inside the Legacy Feed fallback's own failed-batch branch", () => {
+    const occurrences = [...workspaceSource.matchAll(/Retry Seller Hub draft/g)];
+    expect(occurrences.length).toBeGreaterThan(0);
+    for (const match of occurrences) {
+      const before = workspaceSource.slice(Math.max(0, match.index! - 400), match.index!);
+      // Every occurrence is scoped under the Feed pipeline's own
+      // ebayBlockingBatchAction — never anywhere near
+      // sendToEbayExtensionError / blockingBatchId (the extension
+      // conflict's own state).
+      expect(before + match[0]).not.toContain("blockingBatchId");
+    }
   });
 });

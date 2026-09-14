@@ -62,11 +62,16 @@ type ListBatchRow = {
  * "Waiting for pairing" for a window that has actually already closed.
  * Never silently drops a row the way the old batchIds-only filter did.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const user = await requireOwner();
+    // CORRECTIVE PASS (controlled pairing test review, Phase 4) — the
+    // optional "Show dismissed batches" toggle. Defaults to false (the
+    // exact prior behaviour — a dismissed batch stays hidden) so this is
+    // purely additive.
+    const includeDismissed = new URL(request.url).searchParams.get("includeDismissed") === "true";
     const rpcResponse = await supabaseRequest("rpc/listing_studio_list_ebay_extension_batches", {
-      method: "POST", body: JSON.stringify({ p_owner_id: user.id }),
+      method: "POST", body: JSON.stringify({ p_owner_id: user.id, p_include_dismissed: includeDismissed }),
     });
     const rows = await rpcResponse.json() as ListBatchRow[];
 

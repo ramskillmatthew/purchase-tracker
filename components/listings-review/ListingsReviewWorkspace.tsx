@@ -112,6 +112,43 @@ type EbayExtensionActiveBatchInfo = {
 // Live-ish countdown string for a 'pending_claim' batch's pairing window.
 // nowMs is passed in (never read from Date.now() directly) so the caller
 // controls exactly when this re-renders — see ebayExtensionNowMs below.
+// CORRECTIVE PASS (controlled pairing test review) — one-click Copy for
+// the eBay pairing code (Phase 3). The Clipboard API needs a secure
+// context and, in some embeddings, a user-gesture/permissions grant this
+// page cannot guarantee — a safe fallback (a temporary, off-screen
+// textarea + the legacy execCommand("copy")) keeps the button working
+// where the modern API is unavailable or throws, matching this session's
+// established "never leave the user with no working action" discipline.
+// Deliberately module-level and reusable by BOTH copy buttons (Phase 3's
+// "active extension-batch card" and the pairing-code panel shown right
+// after a successful send, further down in this file)
+// rather than duplicated — one implementation, one place to get the
+// fallback right.
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to the legacy fallback below */ }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function ebayExtensionExpiryLabel(expiresAt: string, nowMs: number): string {
   const diffMs = new Date(expiresAt).getTime() - nowMs;
   if (diffMs <= 0) return "Expired";
@@ -464,7 +501,6 @@ export default function ListingsReviewWorkspace() {
   // where the user creates a batch, never enters the code, and wants to
   // abandon it without waiting out the pairing window.
   const [ebayExtensionBatchId, setEbayExtensionBatchId] = useState<string | null>(null);
-  const [ebayExtensionCancelling, setEbayExtensionCancelling] = useState(false);
   // CORRECTIVE PASS 6 (retry truthfulness review) — the create route's own
   // server-derived isRetry flag (true only when the RPC found a genuinely
   // 'failed' prior item for this exact listing and linked it as lineage —
@@ -507,6 +543,27 @@ export default function ListingsReviewWorkspace() {
   // 'pending_claim' (the only state with a meaningful countdown) — never
   // runs a pointless interval otherwise.
   const [ebayExtensionNowMs, setEbayExtensionNowMs] = useState(() => Date.now());
+  // CORRECTIVE PASS (controlled pairing test review, Phase 3) — which of
+  // the two Copy buttons (active-batch card vs "Ready for the eBay
+  // extension" panel — they can both be visible at once, showing the SAME
+  // code) most recently showed "Copied", so each button's own
+  // confirmation is independent and self-clearing.
+  const [ebayCodeCopiedSource, setEbayCodeCopiedSource] = useState<"active-card" | "ready-panel" | null>(null);
+  // CORRECTIVE PASS (controlled pairing test review, Phase 4) — "Show
+  // dismissed batches": off by default (a dismissed terminal batch stays
+  // hidden, matching every other card-dismissal pattern in this app), so
+  // records stay inspectable without cluttering the default view.
+  const [ebayExtensionShowDismissed, setEbayExtensionShowDismissed] = useState(false);
+  const [ebayExtensionDismissingId, setEbayExtensionDismissingId] = useState<string | null>(null);
+  // CORRECTIVE PASS (controlled pairing test review, Phase 5) —
+  // "Active eBay Extension work first": the list RPC's own order
+  // (created_at desc) is preserved WITHIN each group, but every active
+  // batch sorts before every terminal one, so the thing most likely to
+  // need attention is never buried below old, already-resolved cards.
+  const sortedEbayExtensionBatches = useMemo(
+    () => [...ebayExtensionBatches].sort((a, b) => (a.isActive === b.isActive ? 0 : a.isActive ? -1 : 1)),
+    [ebayExtensionBatches],
+  );
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -667,17 +724,44 @@ export default function ListingsReviewWorkspace() {
   // batch nobody can see. A useCallback (not an inline effect body) so
   // both the mount effect below and the create/cancel handlers can call
   // the exact same fetch.
-  const fetchEbayExtensionBatches = useCallback(async () => {
+  const fetchEbayExtensionBatches = useCallback(async (includeDismissed: boolean) => {
     setEbayExtensionBatchesLoading(true);
     try {
-      const response = await fetch("/api/listing-studio/ebay-extension-batches");
+      const response = await fetch(`/api/listing-studio/ebay-extension-batches${includeDismissed ? "?includeDismissed=true" : ""}`);
       if (!response.ok) return;
       const body = await response.json() as { batches: EbayExtensionActiveBatchInfo[] };
       setEbayExtensionBatches(body.batches);
     } catch { /* best-effort — the page still works, just without the active-batch panel */ }
     finally { setEbayExtensionBatchesLoading(false); }
   }, []);
-  useEffect(() => { fetchEbayExtensionBatches(); }, [fetchEbayExtensionBatches]);
+  useEffect(() => { fetchEbayExtensionBatches(ebayExtensionShowDismissed); }, [fetchEbayExtensionBatches, ebayExtensionShowDismissed]);
+
+  /**
+   * CORRECTIVE PASS (controlled pairing test review, Phase 4) — clears a
+   * TERMINAL batch's card without hard-deleting the audit row. Reuses the
+   * EXISTING DELETE route's sibling PATCH action (the actual "only a
+   * terminal batch can be dismissed" guard lives server-side, in the RPC
+   * — this handler never duplicates that check client-side, so it can
+   * never drift out of sync with what the server actually enforces).
+   */
+  const handleDismissEbayExtensionBatch = useCallback(async (batchId: string) => {
+    setEbayExtensionDismissingId(batchId);
+    try {
+      const response = await fetch(`/api/listing-studio/ebay-extension-batches/${batchId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setSendToEbayExtensionError(body.error || "Could not dismiss this eBay extension batch.");
+        return;
+      }
+      await fetchEbayExtensionBatches(ebayExtensionShowDismissed);
+    } catch {
+      setSendToEbayExtensionError("Network error — could not dismiss this eBay extension batch.");
+    } finally {
+      setEbayExtensionDismissingId(null);
+    }
+  }, [fetchEbayExtensionBatches, ebayExtensionShowDismissed]);
   // Self-rescheduling setTimeout, matching this file's own established
   // convention (see the poll() function's own REGRESSION comment
   // elsewhere in this file) — never setInterval anywhere in this
@@ -696,12 +780,16 @@ export default function ListingsReviewWorkspace() {
   }, [ebayExtensionBatches]);
 
   /**
-   * CORRECTIVE PASS (blocking-batch visibility review) — cancels ANY
-   * active eBay extension batch shown in the new status panel (not just
-   * the one this exact page session just created — see
-   * handleCancelEbayExtensionSend above for that narrower case). Reuses
-   * the SAME already-hardened, atomic, service-role-only DELETE route/RPC.
-   * Never deletes rows; never touches Feed Batch #1 or the legacy offer.
+   * CORRECTIVE PASS (blocking-batch visibility review; consolidated,
+   * controlled pairing test review Phase 5) — the ONE canonical Cancel
+   * action for every eBay extension batch this page shows — both the
+   * general active-batches panel AND the post-send pairing-code card
+   * (which used to have its OWN separate, no-confirmation
+   * cancel path — see the "One canonical Cancel action rather than
+   * duplicated confusing actions" requirement this consolidation closes).
+   * Reuses the SAME already-hardened, atomic, service-role-only DELETE
+   * route/RPC. Never deletes rows; never touches Feed Batch #1 or the
+   * legacy offer.
    */
   const handleCancelEbayExtensionBatch = useCallback(async (batchId: string) => {
     setEbayExtensionBatchCancellingId(batchId);
@@ -715,18 +803,23 @@ export default function ListingsReviewWorkspace() {
       // If this was the batch this exact page session's own pairing card
       // was showing, clear that card too — it no longer exists to pair
       // against.
-      setEbayExtensionBatchId(current => (current === batchId ? null : current));
-      setEbayExtensionPairingCode(current => (ebayExtensionBatchId === batchId ? null : current));
+      if (ebayExtensionBatchId === batchId) {
+        setEbayExtensionBatchId(null);
+        setEbayExtensionPairingCode(null);
+        setEbayExtensionIsRetry(false);
+        setEbayExtensionBuildId(null);
+        setEbayExtensionProjectRef(null);
+      }
       if (ebayExtensionHighlightBatchId === batchId) setEbayExtensionHighlightBatchId(null);
       setEbayExtensionCancelConfirmBatchId(null);
       setSendToEbayExtensionError("");
-      await fetchEbayExtensionBatches();
+      await fetchEbayExtensionBatches(ebayExtensionShowDismissed);
     } catch {
       setSendToEbayExtensionError("Network error — could not cancel this eBay extension batch.");
     } finally {
       setEbayExtensionBatchCancellingId(null);
     }
-  }, [ebayExtensionBatchId, ebayExtensionHighlightBatchId, fetchEbayExtensionBatches]);
+  }, [ebayExtensionBatchId, ebayExtensionHighlightBatchId, ebayExtensionShowDismissed, fetchEbayExtensionBatches]);
 
   // Listings Review redesign — root-cause fix: resume tracking every
   // batch that's still genuinely visible (in flight, or terminal but not
@@ -1908,7 +2001,7 @@ export default function ListingsReviewWorkspace() {
         // carried its id) and refreshes the panel so it's visible right
         // above, instead of leaving the user at a dead end.
         setEbayExtensionHighlightBatchId(body.blockingBatchId ?? null);
-        if (body.blockingBatchId) fetchEbayExtensionBatches();
+        if (body.blockingBatchId) fetchEbayExtensionBatches(ebayExtensionShowDismissed);
         return;
       }
       setEbayExtensionHighlightBatchId(null);
@@ -1925,7 +2018,7 @@ export default function ListingsReviewWorkspace() {
       // shown as-is; never fabricated client-side.
       setEbayExtensionBuildId(body.buildId ?? null);
       setEbayExtensionProjectRef(body.supabaseProjectRef ?? null);
-      await fetchEbayExtensionBatches();
+      await fetchEbayExtensionBatches(ebayExtensionShowDismissed);
     } catch {
       setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
     } finally {
@@ -1933,37 +2026,6 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
-  /**
-   * LIFECYCLE FIX (stale-batch review) — abandon a just-created eBay
-   * extension batch the user never paired: one atomic, service-role-only
-   * transactional cancel (parent + every live child, releasing
-   * ebay_extension_batch_items_live_draft_idx) so the listing is
-   * immediately free to send again, without waiting out the pairing-code
-   * window. Never deletes the listing, the legacy offer, or Feed Batch #1.
-   */
-  async function handleCancelEbayExtensionSend() {
-    if (!ebayExtensionBatchId || ebayExtensionCancelling) return;
-    setEbayExtensionCancelling(true);
-    try {
-      const response = await fetch(`/api/listing-studio/ebay-extension-batches/${ebayExtensionBatchId}`, { method: "DELETE" });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        setSendToEbayExtensionError(body.error || "Could not cancel this send.");
-        return;
-      }
-      setEbayExtensionPairingCode(null);
-      setEbayExtensionBatchId(null);
-      setEbayExtensionIsRetry(false);
-      setEbayExtensionBuildId(null);
-      setEbayExtensionProjectRef(null);
-      setSendToEbayExtensionError("");
-      await fetchEbayExtensionBatches();
-    } catch {
-      setSendToEbayExtensionError("Network error — could not cancel this send.");
-    } finally {
-      setEbayExtensionCancelling(false);
-    }
-  }
 
   // Multi-batch support — requires the exact immutable batch id; cancels
   // ONLY that one batch. Leaves every other batch's state completely
@@ -1985,6 +2047,21 @@ export default function ListingsReviewWorkspace() {
       window.setTimeout(() => setCodeCopiedBatchId(current => (current === batchId ? null : current)), 1600);
     } catch { /* clipboard access denied — the code remains visible/selectable regardless */ }
   }, [pairingCodeById]);
+
+  // CORRECTIVE PASS (controlled pairing test review, Phase 3) — the eBay
+  // pairing code's own Copy handler: only ever copies plaintext already
+  // held securely in THIS page session's own React state
+  // (ebayExtensionPairingCode) — never re-reads or reconstructs a code
+  // from the database (only its HMAC hash is ever stored server-side —
+  // see extension-pairing-code.ts's own hashPairingCode). Deliberately
+  // takes the code as a parameter (not read from state internally) so a
+  // caller can never accidentally copy a stale/wrong code.
+  const handleCopyEbayPairingCode = useCallback(async (code: string, source: "active-card" | "ready-panel") => {
+    const ok = await copyTextWithFallback(code);
+    if (!ok) return;
+    setEbayCodeCopiedSource(source);
+    window.setTimeout(() => setEbayCodeCopiedSource(current => (current === source ? null : current)), 1600);
+  }, []);
 
   // Multi-batch support — the "×" on a batch box. Only ever offered once a
   // batch is genuinely terminal (see ExtensionBatchGrid.tsx) — dismisses
@@ -2977,11 +3054,21 @@ export default function ListingsReviewWorkspace() {
         blocking a send. Deliberately separate from, and positioned above,
         the "Legacy Seller Hub Feed fallback" section further down — the
         two extension systems are never the same workflow. */}
-    {ebayExtensionBatches.length > 0 && (
+    {(ebayExtensionBatches.length > 0 || ebayExtensionShowDismissed) && (
       <div className="lr-ebay-extension-active-panel">
-        <p className="lr-ebay-extension-active-panel-title">eBay Extension batches</p>
+        <div className="lr-ebay-extension-active-panel-header">
+          <p className="lr-ebay-extension-active-panel-title">eBay Extension batches</p>
+          <label className="lr-ebay-extension-show-dismissed">
+            <input
+              type="checkbox" checked={ebayExtensionShowDismissed}
+              onChange={event => setEbayExtensionShowDismissed(event.target.checked)}
+            />
+            Show dismissed batches
+          </label>
+        </div>
         {ebayExtensionBatchesLoading && <p className="lr-ebay-extension-active-panel-hint">Refreshing…</p>}
-        {ebayExtensionBatches.map(batch => {
+        {ebayExtensionBatches.length === 0 && <p className="lr-ebay-extension-active-panel-hint">No dismissed batches.</p>}
+        {sortedEbayExtensionBatches.map(batch => {
           const showOwnPairingCode = batch.status === "pending_claim" && batch.batchId === ebayExtensionBatchId && Boolean(ebayExtensionPairingCode);
           return (
             <div
@@ -3005,10 +3092,19 @@ export default function ListingsReviewWorkspace() {
               )}
               {batch.item.errorMessage && <p className="lr-ebay-extension-active-card-error">{batch.item.errorMessage}</p>}
               {showOwnPairingCode && (
-                <p className="lr-ebay-extension-active-card-meta">Pairing code: <strong>{ebayExtensionPairingCode}</strong></p>
+                <p className="lr-ebay-extension-active-card-meta">
+                  Pairing code: <strong>{ebayExtensionPairingCode}</strong>
+                  <button
+                    type="button" className="lr-copy-code-button"
+                    aria-label={`Copy pairing code ${ebayExtensionPairingCode}`}
+                    onClick={() => handleCopyEbayPairingCode(ebayExtensionPairingCode!, "active-card")}
+                  >
+                    {ebayCodeCopiedSource === "active-card" ? "Copied" : "Copy"}
+                  </button>
+                </p>
               )}
               {batch.status === "pending_claim" && !showOwnPairingCode && (
-                <p className="lr-ebay-extension-active-card-hint">The pairing code was only shown once, when this batch was created. If it&apos;s lost, cancel this batch and send again.</p>
+                <p className="lr-ebay-extension-active-card-hint">Pairing code no longer available — cancel and create a new batch. It is only ever shown once, at the moment a batch is created, and is never retrievable afterward (only its hash is stored).</p>
               )}
               {batch.status === "expired" && (
                 <p className="lr-ebay-extension-active-card-hint">Expired — create a new extension batch.</p>
@@ -3023,6 +3119,26 @@ export default function ListingsReviewWorkspace() {
                     {ebayExtensionBatchCancellingId === batch.batchId ? "Cancelling…" : "Cancel extension batch"}
                   </button>
                 </div>
+              )}
+              {/* CORRECTIVE PASS (controlled pairing test review, Phase 4)
+                  — Dismiss is offered ONLY for a genuinely terminal batch
+                  (never active/waiting/processing — that's Cancel's job
+                  above, never substituted by Dismiss) and only while it
+                  isn't already dismissed. Never deletes the row — see
+                  handleDismissEbayExtensionBatch's own comment. */}
+              {!batch.isActive && !batch.boxDismissedAt && (
+                <div className="lr-ebay-extension-active-card-actions">
+                  <button
+                    type="button" className="button-secondary"
+                    disabled={ebayExtensionDismissingId === batch.batchId}
+                    onClick={() => handleDismissEbayExtensionBatch(batch.batchId)}
+                  >
+                    {ebayExtensionDismissingId === batch.batchId ? "Dismissing…" : "Dismiss"}
+                  </button>
+                </div>
+              )}
+              {batch.boxDismissedAt && (
+                <p className="lr-ebay-extension-active-card-hint">Dismissed {new Date(batch.boxDismissedAt).toLocaleString()} — still on record, hidden from the default view.</p>
               )}
             </div>
           );
@@ -3129,6 +3245,25 @@ export default function ListingsReviewWorkspace() {
               const onlyId = [...bulkSelectedIds][0];
               const row = listingsById.get(onlyId);
               if (!row?.ebay) return null;
+              // CORRECTIVE PASS (controlled pairing test review, Phase 5)
+              // — REQUIREMENT: "'Send to eBay extension' must be disabled
+              // while [an active batch] is active, with a direct
+              // link/scroll action to [it]." Proactive — checked BEFORE
+              // ever attempting a send, using the SAME active-batch map
+              // the row's own status badge already derives from, so this
+              // can never disagree with what the button would actually
+              // encounter as a 409 conflict.
+              const activeBatch = ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId);
+              if (activeBatch) {
+                return <button
+                  type="button"
+                  className="button-secondary"
+                  title="An eBay extension batch is already active for this listing — view it above"
+                  onClick={() => document.getElementById(`ebay-ext-batch-${activeBatch.batchId}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                >
+                  {`View active batch #${activeBatch.displayNumber}`}
+                </button>;
+              }
               return <button
                 type="button"
                 className="button"
@@ -3145,40 +3280,51 @@ export default function ListingsReviewWorkspace() {
                 vice versa). REQUIREMENT (Phase 7): only shown while the
                 active selected workflow is eBay — never a Vinted-mode
                 leftover, and never more than ONE eBay primary action. */}
-            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && <>
-              {/* REQUIREMENT (Phase 7): the Feed workflow is now clearly
-                  labelled as a secondary/legacy area, never the primary
-                  eBay action — "Send to eBay extension" above is that. */}
-              {/* CORRECTIVE PASS (blocking-batch visibility review) — renamed
-                  from "Seller Hub Feed fallback": with a real eBay Extension
-                  status panel now shown separately above, this label must
-                  say plainly which (older, CSV-task-based) pipeline it is,
-                  never leaving room to confuse it with an active extension
-                  batch. */}
-              <span className="lr-feed-fallback-label">Legacy Seller Hub Feed fallback</span>
-              <BulkEbayPolicyControl
-                eligibleCount={eligibleForPolicyCount}
-                policies={ebayPolicies}
-                onApply={handleApplyBulkEbayPolicy}
-              />
-              {eligibleEbayCount > 0 && (
-                <button
-                  type="button"
-                  className="button"
-                  disabled={ebayCreatingDrafts}
-                  title="Creates genuine, editable drafts in eBay Seller Hub — never publishes anything"
-                  onClick={handleOpenEbayCreatePreview}
-                >
-                  {`Create ${eligibleEbayCount} Seller Hub draft${eligibleEbayCount === 1 ? "" : "s"}`}
-                </button>
-              )}
-              {/* REQUIREMENT (Phase 7): a genuinely completed listing's one
-                  primary action is opening Seller Hub itself — never a
-                  disabled Create button, never squeezed beside Retry text. */}
-              {eligibleEbayCount === 0 && ebayAlreadyDraftedSingleSelection && (
-                <a className="button" href={SELLER_HUB_DRAFTS_URL} target="_blank" rel="noreferrer">Open Seller Hub Drafts ↗</a>
-              )}
-            </>}
+            {/* CORRECTIVE PASS (controlled pairing test review, Phase 5) —
+                "'Legacy Seller Hub Feed fallback' visually subordinate and
+                collapsed by default": a native <details> element — closed
+                by default with zero extra state, never competing for
+                visual priority with the eBay Extension panel/actions
+                above it. */}
+            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && (
+              <details className="lr-feed-fallback-details">
+                {/* REQUIREMENT (Phase 7): the Feed workflow is clearly
+                    labelled as a secondary/legacy area, never the primary
+                    eBay action — "Send to eBay extension" above is that.
+                    CORRECTIVE PASS (blocking-batch visibility review) —
+                    renamed from "Seller Hub Feed fallback": with a real
+                    eBay Extension status panel now shown separately above,
+                    this label must say plainly which (older, CSV-task-
+                    based) pipeline it is, never leaving room to confuse it
+                    with an active extension batch. */}
+                <summary className="lr-feed-fallback-label">Legacy Seller Hub Feed fallback</summary>
+                <div className="lr-feed-fallback-body">
+                  <BulkEbayPolicyControl
+                    eligibleCount={eligibleForPolicyCount}
+                    policies={ebayPolicies}
+                    onApply={handleApplyBulkEbayPolicy}
+                  />
+                  {eligibleEbayCount > 0 && (
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={ebayCreatingDrafts}
+                      title="Creates genuine, editable drafts in eBay Seller Hub — never publishes anything"
+                      onClick={handleOpenEbayCreatePreview}
+                    >
+                      {`Create ${eligibleEbayCount} Seller Hub draft${eligibleEbayCount === 1 ? "" : "s"}`}
+                    </button>
+                  )}
+                  {/* REQUIREMENT (Phase 7): a genuinely completed listing's
+                      one primary action is opening Seller Hub itself —
+                      never a disabled Create button, never squeezed beside
+                      Retry text. */}
+                  {eligibleEbayCount === 0 && ebayAlreadyDraftedSingleSelection && (
+                    <a className="button" href={SELLER_HUB_DRAFTS_URL} target="_blank" rel="noreferrer">Open Seller Hub Drafts ↗</a>
+                  )}
+                </div>
+              </details>
+            )}
           </div>
         </div>}
         {/* eBay Seller Hub extension drafter (Phase 7) — shown once, right
@@ -3198,6 +3344,13 @@ export default function ListingsReviewWorkspace() {
             )}
             <p className="lr-ebay-status-panel-body">
               Open the extension&apos;s side panel, select the eBay tab, and enter this code: <strong>{ebayExtensionPairingCode}</strong>
+              <button
+                type="button" className="lr-copy-code-button"
+                aria-label={`Copy pairing code ${ebayExtensionPairingCode}`}
+                onClick={() => handleCopyEbayPairingCode(ebayExtensionPairingCode!, "ready-panel")}
+              >
+                {ebayCodeCopiedSource === "ready-panel" ? "Copied" : "Copy"}
+              </button>
             </p>
             {/* CORRECTIVE PASS (environment provenance audit) — the SAME
                 two safe identifiers the extension's own settings
@@ -3210,10 +3363,22 @@ export default function ListingsReviewWorkspace() {
                 Server build <strong>{ebayExtensionBuildId ?? "unknown"}</strong> · Environment <strong>{ebayExtensionProjectRef ?? "unknown"}</strong> — compare against the extension&apos;s own settings panel before entering the code.
               </p>
             )}
+            {/* CORRECTIVE PASS (controlled pairing test review, Phase 5) —
+                "One canonical Cancel action rather than duplicated
+                confusing actions": this button now opens the SAME
+                confirmation dialog and calls the SAME handler
+                (handleCancelEbayExtensionBatch) as every other batch's
+                Cancel button in the panel above — never a second,
+                silent, no-confirmation cancel path for just this one
+                batch. */}
             {ebayExtensionBatchId && (
               <div className="lr-ebay-status-panel-actions">
-                <button type="button" className="button-secondary" disabled={ebayExtensionCancelling} onClick={handleCancelEbayExtensionSend}>
-                  {ebayExtensionCancelling ? "Cancelling…" : "Cancel this send"}
+                <button
+                  type="button" className="button-secondary"
+                  disabled={ebayExtensionBatchCancellingId === ebayExtensionBatchId}
+                  onClick={() => setEbayExtensionCancelConfirmBatchId(ebayExtensionBatchId)}
+                >
+                  {ebayExtensionBatchCancellingId === ebayExtensionBatchId ? "Cancelling…" : "Cancel this send"}
                 </button>
               </div>
             )}

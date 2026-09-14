@@ -335,8 +335,8 @@ describe("blocking-batch visibility review — one authoritative 'active' defini
     expect(listStart).toBeGreaterThan(-1);
     expect(listBody).toContain("stable");
     expect(listBody).not.toMatch(/\bvolatile\b/);
-    const grantIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid) to service_role");
-    const revokeIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid) from anon, authenticated");
+    const grantIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid, boolean) to service_role");
+    const revokeIdx = sql.indexOf("listing_studio_list_ebay_extension_batches(uuid, boolean) from anon, authenticated");
     expect(grantIdx).toBeGreaterThan(-1);
     expect(revokeIdx).toBeGreaterThan(-1);
     expect(revokeIdx).toBeLessThan(grantIdx);
@@ -362,11 +362,61 @@ describe("blocking-batch visibility review — one authoritative 'active' defini
     expect(verifierIdx).toBeGreaterThan(-1);
     for (const fnSig of [
       "public.listing_studio_is_ebay_extension_item_active(text, text)",
-      "public.listing_studio_list_ebay_extension_batches(uuid)",
+      // CORRECTIVE PASS (controlled pairing test review, Phase 4) — the
+      // list RPC's signature grew p_include_dismissed; the verifier's own
+      // signature string must match the function's real, current one.
+      "public.listing_studio_list_ebay_extension_batches(uuid, boolean)",
     ]) {
       for (const role of ["anon", "authenticated", "service_role"]) {
         expect(sql).toContain(`has_function_privilege('${role}', '${fnSig}', 'EXECUTE')`);
       }
+    }
+  });
+});
+
+describe("controlled pairing test review — Phase 4 (dismiss terminal batches)", () => {
+  const listStart = sql.indexOf("create or replace function public.listing_studio_list_ebay_extension_batches");
+  const listBody = sql.slice(listStart, sql.indexOf("\n$$;", listStart));
+  const dismissStart = sql.indexOf("create or replace function public.listing_studio_dismiss_ebay_extension_batch");
+  const dismissBody = sql.slice(dismissStart, sql.indexOf("\n$$;", dismissStart));
+
+  it("REQUIREMENT: the list RPC gained p_include_dismissed with a false default — every EXISTING caller's behaviour (the app route's own single-arg call) is unchanged", () => {
+    expect(listBody).toContain("p_include_dismissed boolean default false");
+    expect(listBody).toContain("and (p_include_dismissed or b.box_dismissed_at is null)");
+  });
+
+  it("REQUIREMENT: listing_studio_dismiss_ebay_extension_batch exists, is service-role only, and is a hard no-op for anything not already completed/cancelled/expired — dismissal can never substitute for Cancel on a genuinely active batch", () => {
+    expect(dismissStart).toBeGreaterThan(-1);
+    expect(dismissBody).toContain("v_status not in ('completed', 'cancelled', 'expired')");
+    expect(dismissBody).toContain("then\n    return;\n  end if;");
+    const grantIdx = sql.indexOf("listing_studio_dismiss_ebay_extension_batch(uuid, uuid) to service_role");
+    const revokeIdx = sql.indexOf("listing_studio_dismiss_ebay_extension_batch(uuid, uuid) from anon, authenticated");
+    expect(grantIdx).toBeGreaterThan(-1);
+    expect(revokeIdx).toBeGreaterThan(-1);
+    expect(revokeIdx).toBeLessThan(grantIdx);
+  });
+
+  it("REQUIREMENT: dismissal is owner-checked (a different owner's batch id is a hard no-op, never an error revealing existence) and only ever writes box_dismissed_at — never touches status, completed_at, or any other column", () => {
+    expect(dismissBody).toContain("v_owner_id <> p_owner_id");
+    const updateIdx = dismissBody.indexOf("update public.ebay_extension_batches");
+    const updateStatement = dismissBody.slice(updateIdx, dismissBody.indexOf(";", updateIdx));
+    expect(updateStatement).toContain("box_dismissed_at = coalesce(b.box_dismissed_at, now())");
+    expect(updateStatement).not.toContain("status =");
+    expect(updateStatement).not.toContain("completed_at =");
+  });
+
+  it("REQUIREMENT: dismissal is idempotent — a second dismiss call never resets an already-set box_dismissed_at (coalesce, not a bare now())", () => {
+    expect(dismissBody).toContain("coalesce(b.box_dismissed_at, now())");
+  });
+
+  it("REQUIREMENT: the box_dismissed_at column and its owner-scoped display-number partial unique index already existed on this table before this pass (Vinted-style pattern never finished for eBay) — this pass only adds the missing WRITE path, never a schema change to the table itself", () => {
+    expect(sql).toContain("box_dismissed_at timestamptz,");
+    expect(sql).toContain("where box_dismissed_at is null;");
+  });
+
+  it("REQUIREMENT: the permission-verifier covers the new dismiss function across anon/authenticated/service_role", () => {
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      expect(sql).toContain(`has_function_privilege('${role}', 'public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid)', 'EXECUTE')`);
     }
   });
 });

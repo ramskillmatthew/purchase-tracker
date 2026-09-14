@@ -1309,4 +1309,133 @@ describe("environment provenance audit — shared App URL resolution (shared/app
     expect(source).toContain('from "./shared/app-settings.js"');
     expect(source).not.toMatch(/const DEFAULT_APP_BASE_URL\s*=/);
   });
+
+  // CORRECTIVE PASS (controlled pairing test review) — the exact root
+  // cause of a real, reproduced 404: the OLD save handler stripped at
+  // most one trailing slash and saved whatever remained, so a value like
+  // "http://localhost:3000/listings-review" (a copy-pasted PAGE url, not
+  // the app's origin) saved silently and broke every subsequent request.
+  it("REQUIREMENT: canonicalizeAppBaseUrl always returns a bare, usable origin — strips a path/trailing-slash/query rather than ever producing a broken URL a real fetch would be built from", async () => {
+    const { canonicalizeAppBaseUrl, DEFAULT_APP_BASE_URL } = await import("../vinted-draft-queue-extension/shared/app-settings.js");
+    expect(canonicalizeAppBaseUrl("http://localhost:3000")).toBe("http://localhost:3000");
+    expect(canonicalizeAppBaseUrl("http://localhost:3000/")).toBe("http://localhost:3000");
+    expect(canonicalizeAppBaseUrl("http://localhost:3000/listings-review")).toBe("http://localhost:3000");
+    expect(canonicalizeAppBaseUrl("http://localhost:3000/listings-review/")).toBe("http://localhost:3000");
+    expect(canonicalizeAppBaseUrl("not a url at all")).toBe(DEFAULT_APP_BASE_URL);
+    expect(canonicalizeAppBaseUrl("")).toBe(DEFAULT_APP_BASE_URL);
+    expect(canonicalizeAppBaseUrl(null)).toBe(DEFAULT_APP_BASE_URL);
+  });
+
+  it("REQUIREMENT: validateAppBaseUrlInput REJECTS (never silently strips) an App URL containing /listings-review or any other pathname, explaining exactly what to remove", async () => {
+    const { validateAppBaseUrlInput } = await import("../vinted-draft-queue-extension/shared/app-settings.js");
+    const result = validateAppBaseUrlInput("http://localhost:3000/listings-review");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("/listings-review");
+    expect(result.error).toContain("http://localhost:3000");
+  });
+
+  it("REQUIREMENT: validateAppBaseUrlInput rejects a trailing-slash-only value's underlying malformed input class too (query/hash), and accepts a clean bare origin (with or without a trailing slash, normalizing it away)", async () => {
+    const { validateAppBaseUrlInput } = await import("../vinted-draft-queue-extension/shared/app-settings.js");
+    expect(validateAppBaseUrlInput("http://localhost:3000").ok).toBe(true);
+    expect(validateAppBaseUrlInput("http://localhost:3000").url).toBe("http://localhost:3000");
+    expect(validateAppBaseUrlInput("http://localhost:3000/").url).toBe("http://localhost:3000");
+    expect(validateAppBaseUrlInput("http://localhost:3000?x=1").ok).toBe(false);
+    expect(validateAppBaseUrlInput("not a url").ok).toBe(false);
+    expect(validateAppBaseUrlInput("ftp://localhost:3000").ok).toBe(false);
+    // Explicitly clearing the field (empty input) is allowed — falls back
+    // to the default at resolve time, exactly like an absent stored key.
+    expect(validateAppBaseUrlInput("").ok).toBe(true);
+    expect(validateAppBaseUrlInput("").url).toBe("");
+  });
+
+  it("REQUIREMENT: resolveAppBaseUrl normalizes a legacy bad stored value too (e.g. saved before this pass's stricter validator existed) — a stale /listings-review-suffixed value can never permanently break every request going forward", async () => {
+    const { resolveAppBaseUrl } = await import("../vinted-draft-queue-extension/shared/app-settings.js");
+    expect(resolveAppBaseUrl({ appBaseUrl: "http://localhost:3000/listings-review" })).toBe("http://localhost:3000");
+    expect(resolveAppBaseUrl({ appBaseUrl: "http://localhost:3000//" })).toBe("http://localhost:3000");
+  });
+});
+
+describe("controlled pairing test review — App URL Save rejects an invalid value in the real UI", () => {
+  it("REQUIREMENT: saving an App URL containing /listings-review is REJECTED with an inline explanation — never silently saved, never sent to chrome.storage.local", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    (document.getElementById("app-url-edit") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const input = document.getElementById("app-base-url") as HTMLInputElement;
+    input.value = "http://localhost:3000/listings-review";
+    (document.getElementById("app-url-save") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const error = document.getElementById("app-url-error") as HTMLElement;
+    expect(error.hidden).toBe(false);
+    expect(error.textContent).toContain("/listings-review");
+    // Still in edit mode — the bad value was never committed.
+    expect((document.getElementById("app-base-url") as HTMLInputElement).hidden).toBe(false);
+  });
+
+  it("REQUIREMENT: saving a clean bare origin succeeds — error cleared, value persisted via chrome.storage.local.set", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    (document.getElementById("app-url-edit") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const input = document.getElementById("app-base-url") as HTMLInputElement;
+    input.value = "http://localhost:3006/";
+    (document.getElementById("app-url-save") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect((document.getElementById("app-url-error") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("app-url-display") as HTMLElement).textContent).toBe("http://localhost:3006");
+  });
+});
+
+describe("controlled pairing test review — 'Test pairing endpoint' diagnostic", () => {
+  it("REQUIREMENT: a 400 from the real claim route (the deliberate 'invalid code' response) is shown as reachable — a harmless probe, never claiming a real batch", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/health")) return new Response(JSON.stringify({ ok: true, buildId: "x", supabaseProjectRef: "y" }), { status: 200 });
+      if (u.includes("/claim")) return new Response(JSON.stringify({ error: "This code is invalid or has expired." }), { status: 400 });
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    (document.getElementById("test-pairing-endpoint") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const result = document.getElementById("test-pairing-result") as HTMLElement;
+    expect(result.hidden).toBe(false);
+    expect(result.textContent).toContain("reachable");
+    expect(result.classList.contains("tone-success")).toBe(true);
+  });
+
+  it("REQUIREMENT: a 404 from the claim route is shown as NOT reachable, naming the destination origin — proves the route-not-found case without ever claiming a batch", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/health")) return new Response(JSON.stringify({ ok: true, buildId: "x", supabaseProjectRef: "y" }), { status: 200 });
+      if (u.includes("/claim")) return new Response(null, { status: 404 });
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    (document.getElementById("test-pairing-endpoint") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const result = document.getElementById("test-pairing-result") as HTMLElement;
+    expect(result.textContent).toContain("404");
+    expect(result.textContent).toContain("http://test-app.local");
+    expect(result.classList.contains("tone-danger")).toBe(true);
+  });
+
+  it("REQUIREMENT: the probe never sends the real, currently-active pairing code — only a fixed, reserved test code", async () => {
+    let sentBody: string | undefined;
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async (url: unknown, init?: any) => {
+      const u = String(url);
+      if (u.includes("/health")) return new Response(JSON.stringify({ ok: true, buildId: "x", supabaseProjectRef: "y" }), { status: 200 });
+      if (u.includes("/claim")) { sentBody = init?.body; return new Response(JSON.stringify({ error: "invalid" }), { status: 400 }); }
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    (document.getElementById("test-pairing-endpoint") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(sentBody).toBeDefined();
+    const parsed = JSON.parse(sentBody!);
+    expect(parsed.pairingCode).not.toBe("NHM7Q9TW"); // never the real code from this review's own report
+    expect(typeof parsed.pairingCode).toBe("string");
+  });
 });

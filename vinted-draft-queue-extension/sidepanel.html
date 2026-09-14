@@ -184,6 +184,13 @@
         <button id="app-url-edit" class="button-outline button-sm" type="button">Change</button>
         <button id="app-url-save" class="button-primary button-sm" type="button" hidden>Save</button>
       </div>
+      <!-- CORRECTIVE PASS (controlled pairing test review) — a bare
+           validation message shown ONLY while a Save attempt was just
+           rejected (shared/app-settings.js's own validateAppBaseUrlInput);
+           never saved silently, so a copy-pasted page URL (e.g.
+           ".../listings-review") is explained rather than quietly
+           breaking every future request. -->
+      <p id="app-url-error" class="field-error" role="alert" hidden></p>
       <!-- CORRECTIVE PASS (environment provenance audit) — a pairing
            failure that "shouldn't happen" is very often the extension and
            the app quietly talking to two different backends (two dev
@@ -199,7 +206,20 @@
         <div class="diagnostics-item"><span class="field-caption">Server build</span><span id="diagnostics-build-id" class="field-value">—</span></div>
         <div class="diagnostics-item"><span class="field-caption">Environment</span><span id="diagnostics-project-ref" class="field-value">—</span></div>
       </div>
-      <button id="diagnostics-refresh" class="button-outline button-sm" type="button">Check connection</button>
+      <div class="diagnostics-actions">
+        <button id="diagnostics-refresh" class="button-outline button-sm" type="button">Check connection</button>
+        <!-- CORRECTIVE PASS (controlled pairing test review) — a harmless
+             probe against the REAL eBay claim route (a reserved,
+             never-real pairing code that always fails lookup, so this can
+             never claim a real batch) that proves the route exists at the
+             configured App URL without needing a real pairing attempt —
+             see runTestPairingEndpoint in sidepanel.js for exactly why
+             this is safe. Distinguishes "route reachable" from "route not
+             found (wrong App URL / server build)" from "can't reach this
+             origin at all". -->
+        <button id="test-pairing-endpoint" class="button-outline button-sm" type="button">Test pairing endpoint</button>
+      </div>
+      <p id="test-pairing-result" class="field-value diagnostics-inline-result" role="status" hidden></p>
     </section>
 
     <!-- Pairing — shown only while not paired. -->

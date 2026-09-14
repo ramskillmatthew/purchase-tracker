@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { supabaseRequest } from "@/lib/supabase";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 
 export const runtime = "nodejs";
+
+const dismissRequestSchema = z.object({ action: z.literal("dismiss") }).strict();
 
 /**
  * eBay Seller Hub extension drafter — the owner-authenticated user Cancel
@@ -37,4 +40,31 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 
     return NextResponse.json({ ok: true });
   } catch (error) { return safeApiError(error, "Could not cancel this eBay extension batch."); }
+}
+
+/**
+ * CORRECTIVE PASS (controlled pairing test review, Phase 4) — clears a
+ * TERMINAL batch's card from Listings Review without hard-deleting the
+ * audit row (review requirement: "Do not hard-delete audit records").
+ * Owner-authenticated (requireOwner, same as every route in this file);
+ * the actual write — and the "only a terminal batch can be dismissed"
+ * guard — lives entirely in the RPC
+ * (listing_studio_dismiss_ebay_extension_batch), which this route never
+ * duplicates. A hard no-op for a genuinely active batch, a wrong owner,
+ * or an already-dismissed one — never an error, never a partial write.
+ */
+export async function PATCH(request: Request, { params }: { params: Promise<{ batchId: string }> }) {
+  try {
+    const user = await requireOwner();
+    const { batchId } = await params;
+    if (!uuidSchema.safeParse(batchId).success) return NextResponse.json({ error: "Invalid batch id." }, { status: 400 });
+    dismissRequestSchema.parse(await request.json());
+
+    await supabaseRequest("rpc/listing_studio_dismiss_ebay_extension_batch", {
+      method: "POST", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ p_owner_id: user.id, p_batch_id: batchId }),
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (error) { return safeApiError(error, "Could not dismiss this eBay extension batch."); }
 }

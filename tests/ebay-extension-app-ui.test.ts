@@ -11,8 +11,14 @@ describe("eBay Seller Hub extension drafter — app UI wiring (Phase 7)", () => 
   });
 
   it("Send to eBay extension is gated by workflowMarketplaceView === \"EBAY_UK\" — never shown in Vinted mode", () => {
+    // CORRECTIVE PASS (controlled pairing test review, Phase 5) — widened
+    // from 600: the proactive "View active batch" branch (added ahead of
+    // the ordinary Send button, inside the SAME guarded IIFE) pushed the
+    // real handleSendToEbayExtension call further from the guard
+    // condition's own text — never weakened, only widened to keep
+    // reaching the SAME guard.
     const idx = workspaceSource.indexOf("handleSendToEbayExtension(row.ebay!.marketplaceDraftId)");
-    const before = workspaceSource.slice(Math.max(0, idx - 600), idx);
+    const before = workspaceSource.slice(Math.max(0, idx - 1900), idx);
     expect(before).toMatch(/workflowMarketplaceView === "EBAY_UK"/);
   });
 

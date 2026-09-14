@@ -312,7 +312,7 @@ describe("GET /api/listing-studio/ebay-extension-batches", () => {
       if (path.startsWith("listing_drafts")) return [{ id: "pdraft-1", sku: "1644" }] as unknown as typeof MARKETPLACE_DRAFT[];
       return [];
     });
-    const response = await listRoute();
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.batches).toHaveLength(1);
@@ -338,7 +338,7 @@ describe("GET /api/listing-studio/ebay-extension-batches", () => {
       if (path.startsWith("listing_drafts")) return [{ id: "pdraft-1", sku: "1644" }] as unknown as typeof MARKETPLACE_DRAFT[];
       return [];
     });
-    const response = await listRoute();
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
     const body = await response.json();
     expect(expireCalledWith).toEqual({ p_batch_id: BATCH_ID });
     const [batch] = body.batches;
@@ -357,7 +357,7 @@ describe("GET /api/listing-studio/ebay-extension-batches", () => {
       if (path.startsWith("listing_drafts")) return [{ id: "pdraft-1", sku: "1644" }] as unknown as typeof MARKETPLACE_DRAFT[];
       return [];
     });
-    const response = await listRoute();
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
     const body = await response.json();
     expect(body.batches[0].item.status).toBe("cancelled");
   });
@@ -374,7 +374,7 @@ describe("GET /api/listing-studio/ebay-extension-batches", () => {
       if (path.startsWith("listing_drafts")) return [{ id: "pdraft-1", sku: "1644" }] as unknown as typeof MARKETPLACE_DRAFT[];
       return [];
     });
-    const response = await listRoute();
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
     const body = await response.json();
     expect(body.batches[0].isActive).toBe(false);
     expect(body.batches[0].status).toBe("cancelled");
@@ -387,9 +387,38 @@ describe("GET /api/listing-studio/ebay-extension-batches", () => {
       throw new Error(`unexpected rpc call: ${path}`);
     });
     supabaseRequestAll.mockImplementation(async () => []);
-    const response = await listRoute();
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.batches).toEqual([]);
+  });
+
+  // CORRECTIVE PASS (controlled pairing test review, Phase 4)
+  it("REQUIREMENT: defaults to p_include_dismissed: false when the query param is absent — the exact prior behaviour, unchanged", async () => {
+    let rpcBody: unknown;
+    supabaseRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === LIST_RPC_PATH) { rpcBody = init?.body ? JSON.parse(init.body as string) : null; return new Response(JSON.stringify([])); }
+      throw new Error(`unexpected rpc call: ${path}`);
+    });
+    supabaseRequestAll.mockImplementation(async () => []);
+    await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches"));
+    expect(rpcBody).toMatchObject({ p_include_dismissed: false });
+  });
+
+  it("REQUIREMENT: ?includeDismissed=true is forwarded as p_include_dismissed: true to the list RPC — the 'Show dismissed batches' toggle", async () => {
+    let rpcBody: unknown;
+    supabaseRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === LIST_RPC_PATH) { rpcBody = init?.body ? JSON.parse(init.body as string) : null; return new Response(JSON.stringify([listRow({ is_active: false, box_dismissed_at: "2026-09-01T00:00:00.000Z" })])); }
+      throw new Error(`unexpected rpc call: ${path}`);
+    });
+    supabaseRequestAll.mockImplementation(async (path: string) => {
+      if (path.startsWith("listing_marketplace_drafts")) return [{ id: MDRAFT_ID, product_draft_id: "pdraft-1", title: "On Running Cloud 5" }] as unknown as typeof MARKETPLACE_DRAFT[];
+      if (path.startsWith("listing_drafts")) return [{ id: "pdraft-1", sku: "1644" }] as unknown as typeof MARKETPLACE_DRAFT[];
+      return [];
+    });
+    const response = await listRoute(new Request("http://test/api/listing-studio/ebay-extension-batches?includeDismissed=true"));
+    expect(rpcBody).toMatchObject({ p_include_dismissed: true });
+    const body = await response.json();
+    expect(body.batches[0].boxDismissedAt).toBe("2026-09-01T00:00:00.000Z");
   });
 });

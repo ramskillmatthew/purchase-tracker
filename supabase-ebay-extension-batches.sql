@@ -216,6 +216,24 @@
 -- instructions in the final report) and, ideally, exercise the rejection
 -- cases against a real (or staging) database themselves before relying on
 -- it live.
+--
+-- CORRECTIVE PASS (controlled pairing test review, Phase 4) — the user
+-- needs a way to clear a TERMINAL (expired/cancelled/completed) batch's
+-- card from Listings Review without hard-deleting the audit row. This
+-- table already had a box_dismissed_at column (added for a Vinted-style
+-- dismiss pattern this eBay feature never finished wiring up) and
+-- listing_studio_list_ebay_extension_batches already filtered by it — but
+-- nothing ever WROTE it for an eBay batch. Two changes below:
+--   1. listing_studio_list_ebay_extension_batches gained
+--      p_include_dismissed (default false — every existing caller's
+--      behaviour is unchanged) so the SAME query also serves an optional
+--      "Show dismissed batches" toggle, rather than a second query.
+--   2. listing_studio_dismiss_ebay_extension_batch — the ONE place that
+--      writes box_dismissed_at. A hard no-op for anything not already
+--      'completed'/'cancelled'/'expired' — dismissal can never become a
+--      silent substitute for the guarded Cancel action on a genuinely
+--      active batch. Owner-checked and idempotent exactly like
+--      cancel/expire above.
 
 create table if not exists public.ebay_extension_batches (
   id uuid primary key default gen_random_uuid(),
@@ -1000,8 +1018,18 @@ end $$;
 -- (returns zero rows, never an error) — this is a read, never a
 -- capability an unauthenticated caller should ever reach (service-role
 -- only, same as every other function here).
+-- CORRECTIVE PASS (controlled pairing test review, Phase 4) — added
+-- p_include_dismissed (default false, so every existing caller — the app
+-- route's own default request — keeps its exact current behaviour
+-- unchanged) so the SAME function also serves the new "Show dismissed
+-- batches" toggle, rather than a second, parallel query. Dismissal
+-- (box_dismissed_at) is a per-owner UI preference, never a deletion — a
+-- dismissed row is still returned here whenever p_include_dismissed is
+-- true, in full, with its own is_active/is_expired_unreconciled computed
+-- exactly the same way as any other row.
 create or replace function public.listing_studio_list_ebay_extension_batches(
-  p_owner_id uuid
+  p_owner_id uuid,
+  p_include_dismissed boolean default false
 )
 returns table(
   batch_id uuid, display_number integer, batch_status text,
@@ -1036,22 +1064,74 @@ begin
   from public.ebay_extension_batches b
   join public.ebay_extension_batch_items bi on bi.batch_id = b.id
   where b.owner_id = p_owner_id
-    and b.box_dismissed_at is null
+    and (p_include_dismissed or b.box_dismissed_at is null)
   order by b.created_at desc;
 end;
 $$;
 
-revoke all on function public.listing_studio_list_ebay_extension_batches(uuid) from public;
+revoke all on function public.listing_studio_list_ebay_extension_batches(uuid, boolean) from public;
 do $$
 begin
-  revoke all on function public.listing_studio_list_ebay_extension_batches(uuid) from anon, authenticated;
-  grant execute on function public.listing_studio_list_ebay_extension_batches(uuid) to service_role;
+  revoke all on function public.listing_studio_list_ebay_extension_batches(uuid, boolean) from anon, authenticated;
+  grant execute on function public.listing_studio_list_ebay_extension_batches(uuid, boolean) to service_role;
+end $$;
+
+-- CORRECTIVE PASS (controlled pairing test review, Phase 4) — clears a
+-- TERMINAL batch's card from Listings Review without hard-deleting the
+-- audit row: sets ONLY box_dismissed_at (an existing column on this
+-- table, already read by this file's own list RPC above — this is the
+-- FIRST function that ever WRITES it for an eBay extension batch). A hard
+-- no-op for a genuinely active (pending_claim/claimed/in_progress) batch
+-- — dismissal must never become a silent substitute for the guarded
+-- Cancel action; only 'completed'/'cancelled'/'expired' can be
+-- dismissed. Owner-checked exactly like cancel/expire: belongs to a
+-- different owner is a hard no-op, never an error (never reveals whether
+-- the id exists under a different owner). Idempotent — dismissing an
+-- already-dismissed batch a second time leaves its original
+-- box_dismissed_at untouched (coalesce), never resets a timestamp a
+-- concurrent call already set.
+create or replace function public.listing_studio_dismiss_ebay_extension_batch(
+  p_owner_id uuid,
+  p_batch_id uuid
+)
+returns void
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+  v_owner_id uuid;
+  v_status text;
+begin
+  if p_owner_id is null or p_batch_id is null then
+    raise exception 'ARGUMENTS_REQUIRED' using errcode = 'P0001';
+  end if;
+
+  select b.owner_id, b.status into v_owner_id, v_status
+  from public.ebay_extension_batches b
+  where b.id = p_batch_id
+  for update;
+
+  if not found or v_owner_id <> p_owner_id or v_status not in ('completed', 'cancelled', 'expired') then
+    return;
+  end if;
+
+  update public.ebay_extension_batches b
+  set box_dismissed_at = coalesce(b.box_dismissed_at, now())
+  where b.id = p_batch_id;
+end;
+$$;
+
+revoke all on function public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid) from public;
+do $$
+begin
+  revoke all on function public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid) from anon, authenticated;
+  grant execute on function public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid) to service_role;
 end $$;
 
 -- READ-ONLY PERMISSION VERIFIER — run this manually in the Supabase SQL
 -- editor AFTER applying the migration above (never as part of it). Expected
 -- (not yet verified): every *_execute column true for service_role only
--- and false for anon/authenticated on ALL SIX functions, AND every
+-- and false for anon/authenticated on ALL SEVEN functions, AND every
 -- table-privilege boolean false for both anon and authenticated (proving
 -- neither role can read either table directly, not just that they can't
 -- call the functions).
@@ -1072,9 +1152,12 @@ end $$;
 --   has_function_privilege('anon', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as anon_execute_is_active,
 --   has_function_privilege('authenticated', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as authenticated_execute_is_active,
 --   has_function_privilege('service_role', 'public.listing_studio_is_ebay_extension_item_active(text, text)', 'EXECUTE') as service_role_execute_is_active,
---   has_function_privilege('anon', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as anon_execute_list,
---   has_function_privilege('authenticated', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as authenticated_execute_list,
---   has_function_privilege('service_role', 'public.listing_studio_list_ebay_extension_batches(uuid)', 'EXECUTE') as service_role_execute_list,
+--   has_function_privilege('anon', 'public.listing_studio_list_ebay_extension_batches(uuid, boolean)', 'EXECUTE') as anon_execute_list,
+--   has_function_privilege('authenticated', 'public.listing_studio_list_ebay_extension_batches(uuid, boolean)', 'EXECUTE') as authenticated_execute_list,
+--   has_function_privilege('service_role', 'public.listing_studio_list_ebay_extension_batches(uuid, boolean)', 'EXECUTE') as service_role_execute_list,
+--   has_function_privilege('anon', 'public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as anon_execute_dismiss,
+--   has_function_privilege('authenticated', 'public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as authenticated_execute_dismiss,
+--   has_function_privilege('service_role', 'public.listing_studio_dismiss_ebay_extension_batch(uuid, uuid)', 'EXECUTE') as service_role_execute_dismiss,
 --   has_table_privilege('anon', 'public.ebay_extension_batches', 'SELECT') as anon_select_batches,
 --   has_table_privilege('authenticated', 'public.ebay_extension_batches', 'SELECT') as authenticated_select_batches,
 --   has_table_privilege('anon', 'public.ebay_extension_batch_items', 'SELECT') as anon_select_items,

@@ -246,6 +246,17 @@ button, input { font: inherit; color: inherit; }
 .app-url-copy { flex: 1 1 auto; min-width: 0; }
 .field-caption { margin: 0; color: var(--subtle); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .field-value { margin: 1px 0 0; overflow: hidden; font-size: 13.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+/* CORRECTIVE PASS (controlled pairing test review) — the App URL Save
+   handler's own rejection message (shared/app-settings.js's
+   validateAppBaseUrlInput) — a full-width, wrapping line, never clipped
+   like the single-line field-value above, since this is often a longer
+   explanation ("remove /listings-review from the end..."). */
+.field-error { margin: var(--space-2) 0 0; color: var(--danger); font-size: 11.5px; line-height: 1.4; }
+.diagnostics-actions { display: flex; gap: var(--space-3); margin-top: var(--space-3); flex-wrap: wrap; }
+.diagnostics-actions > button { margin-top: 0; }
+.diagnostics-inline-result { margin-top: var(--space-2); white-space: normal; font-size: 11.5px; font-weight: 600; }
+.diagnostics-inline-result.tone-success { color: var(--success); }
+.diagnostics-inline-result.tone-danger { color: var(--danger); }
 
 /* CORRECTIVE PASS (environment provenance audit) — a 2-column grid at
    normal widths, dropping to 1 column at very narrow widths (see the
@@ -257,7 +268,6 @@ button, input { font: inherit; color: inherit; }
 .diagnostics-item .field-value { color: var(--text); }
 .diagnostics-item .field-value.tone-danger { color: var(--danger); }
 .diagnostics-item .field-value.tone-success { color: var(--success); }
-#diagnostics-refresh { margin-top: var(--space-3); }
 .app-url-input {
   width: 100%;
   margin-top: 2px;

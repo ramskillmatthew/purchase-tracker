@@ -1912,7 +1912,14 @@ h1 { font-size: 1.5rem; font-weight: 720; }
    extension"). flex-basis: 100% + order pushes it onto its own line
    directly above the Feed button group, mirroring the same non-absolute
    flex-wrap technique .lr-bulk-ebay-policy-panel already uses. */
-.lr-feed-fallback-label { flex-basis: 100%; margin-top: 4px; color: var(--lr-muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+/* CORRECTIVE PASS (controlled pairing test review, Phase 5) — now a
+   native <details> (closed by default, no extra state) rather than a bare
+   flex-basis: 100% label — the wrapper carries that same flex-basis:100%
+   so it still forces its own line within .lr-bulk-bar-actions exactly
+   like before. */
+.lr-feed-fallback-details { flex-basis: 100%; margin-top: 4px; }
+.lr-feed-fallback-label { cursor: pointer; color: var(--lr-muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.lr-feed-fallback-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
 .lr-bulk-bar-actions .button { background: var(--lr-violet); border-color: var(--lr-violet); }
 .lr-bulk-bar-actions .button, .lr-bulk-bar-actions .button-secondary, .lr-bulk-bar-actions .button-danger { min-height: 36px; padding: 0 14px; font-size: 11px; white-space: nowrap; }
 
@@ -2881,7 +2888,11 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
    a 409 conflict's own "View this batch" button) gets a visibly distinct
    border so it's unmistakable which one is blocking a send. */
 .lr-ebay-extension-active-panel { display: flex; flex-direction: column; gap: 10px; width: 100%; margin: 0 0 16px; }
+.lr-ebay-extension-active-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .lr-ebay-extension-active-panel-title { margin: 0; color: var(--lr-text); font-size: 13px; font-weight: 700; }
+/* CORRECTIVE PASS (controlled pairing test review, Phase 4) — "Show
+   dismissed batches", off by default. */
+.lr-ebay-extension-show-dismissed { display: inline-flex; align-items: center; gap: 6px; color: var(--lr-muted); font-size: 11px; font-weight: 600; cursor: pointer; }
 .lr-ebay-extension-active-panel-hint { margin: 0; color: var(--lr-muted); font-size: 11px; }
 .lr-ebay-extension-active-card { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); }
 .lr-ebay-extension-active-card--highlight { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
@@ -2894,3 +2905,16 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-ebay-extension-active-card-hint { margin: 0; color: var(--lr-muted); font-size: 11px; font-style: italic; }
 .lr-ebay-extension-active-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .lr-ebay-extension-active-card-actions .button-secondary { min-height: 32px; padding: 0 12px; font-size: 10.5px; }
+
+/* CORRECTIVE PASS (controlled pairing test review, Phase 3) — a small,
+   inline Copy button sitting right next to the pairing code itself
+   (never a separate row, never requiring a scroll to find it), in both
+   places a pairing code is shown: the active-batch card above and the
+   "Ready for the eBay extension" panel (.lr-ebay-status-panel-body). */
+.lr-copy-code-button {
+  display: inline-flex; align-items: center; margin-left: 8px; padding: 2px 8px;
+  border: 1px solid var(--lr-border); border-radius: 6px; background: var(--lr-surface);
+  color: var(--lr-text); font-size: 10.5px; font-weight: 600; line-height: 1.6; cursor: pointer;
+}
+.lr-copy-code-button:hover { background: var(--primary-soft); border-color: var(--primary); }
+.lr-copy-code-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
