@@ -25,8 +25,11 @@ import { htmlToPlainText, isAllowedEbayDescriptionUrl } from "./shared/ebay-desc
 import { EBAY_PANEL_TO_WORKER, EBAY_WORKER_TO_CONTENT, EBAY_CONTENT_TO_WORKER, makeEbayMessage } from "./shared/ebay-messages.js";
 import * as EbayQueueState from "./shared/ebay-queue-state.js";
 import { EBAY_EXTENSION_STALL_TIMEOUT_MS } from "./shared/ebay-constants.js";
-
-const DEFAULT_APP_BASE_URL = "http://localhost:3000";
+// CORRECTIVE PASS (environment provenance audit) — moved to a shared
+// module so sidepanel.js's own diagnostics panel can resolve the SAME
+// effective App URL a real request would use, rather than risking a
+// second, silently-drifting definition. See that module's own comment.
+import { resolveAppBaseUrl } from "./shared/app-settings.js";
 const VINTED_URL_PATTERN = "https://www.vinted.co.uk/*";
 const CREATE_LISTING_TAB_PATTERN = /^https:\/\/www\.vinted\.co\.uk\/items\/new(?:[/?#]|$)/;
 // Also allowed (beyond the bare Create Listing form): every page Vinted
@@ -485,7 +488,12 @@ async function downloadPhotoForContentScript(itemId, position) {
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get("settings");
-  return { appBaseUrl: DEFAULT_APP_BASE_URL, ...settings };
+  // CORRECTIVE PASS (environment provenance audit) — resolveAppBaseUrl is
+  // the SAME resolution sidepanel.js's diagnostics panel uses; proven
+  // behaviourally identical to the previous inline
+  // `{ appBaseUrl: DEFAULT_APP_BASE_URL, ...settings }` for every case
+  // (absent key, a real URL, or an explicitly-saved empty string).
+  return { ...settings, appBaseUrl: resolveAppBaseUrl(settings) };
 }
 export async function setSettings(patch) {
   const current = await getSettings();

@@ -22,6 +22,11 @@ import {
 // (see shared/ebay-messages.js's own top comment).
 import { EBAY_PANEL_TO_WORKER } from "./shared/ebay-messages.js";
 import { EBAY_ITEM_STATUSES } from "./shared/ebay-queue-state.js";
+// CORRECTIVE PASS (environment provenance audit) — the SAME App URL
+// resolution service-worker.js's own getSettings() uses, so the
+// diagnostics panel can never report against a different effective URL
+// than what a real request would actually hit. See that module's own comment.
+import { resolveAppBaseUrl } from "./shared/app-settings.js";
 
 const IN_FLIGHT_STATUSES = new Set([ITEM_STATUSES.PREPARING, ITEM_STATUSES.FILLING, ITEM_STATUSES.SAVING]);
 // Follow-up correction (native browser reload-confirmation bug) — mirrors
@@ -80,6 +85,11 @@ const els = {
   appUrlSaved: document.getElementById("app-url-saved"),
   appUrlEdit: document.getElementById("app-url-edit"),
   appUrlSave: document.getElementById("app-url-save"),
+  diagnosticsExtensionVersion: document.getElementById("diagnostics-extension-version"),
+  diagnosticsReachable: document.getElementById("diagnostics-reachable"),
+  diagnosticsBuildId: document.getElementById("diagnostics-build-id"),
+  diagnosticsProjectRef: document.getElementById("diagnostics-project-ref"),
+  diagnosticsRefresh: document.getElementById("diagnostics-refresh"),
 
   pairingPanel: document.getElementById("pairing-panel"),
   pairingCode: document.getElementById("pairing-code"),
@@ -244,7 +254,57 @@ els.appUrlSave.addEventListener("click", async () => {
   appUrlEditing = false;
   lastSettings = nextSettings;
   renderSettingsPanel(lastState, nextSettings);
+  // CORRECTIVE PASS (environment provenance audit) — the App URL just
+  // changed, so whatever reachable/build/environment info was showing is
+  // now stale for the NEW target; re-check immediately rather than leaving
+  // it showing the PREVIOUS target's identifiers under the new URL.
+  runDiagnosticsCheck();
 });
+
+// ---------------------------------------------------------------------
+// CORRECTIVE PASS (environment provenance audit) — a pairing failure that
+// "shouldn't happen" is very often the extension and the app quietly
+// talking to two different backends (two dev servers on different ports,
+// a stale App URL, a different Supabase project — the exact class of bug
+// a live investigation traced a real pairing failure to: a second,
+// independent dev server process, on a different port, serving stale/
+// corrupted output). This never requires a live pairing attempt to
+// surface — it pings the SAME safe, unauthenticated diagnostics endpoint
+// (GET .../health — no token, no batch, no secrets) the moment the panel
+// loads and whenever "Check connection" is clicked or the App URL is
+// changed, and shows exactly what it gets back (or that it got nothing
+// back at all) so a mismatch is visible before typing a pairing code.
+// ---------------------------------------------------------------------
+els.diagnosticsExtensionVersion.textContent = `v${chrome.runtime.getManifest().version}`;
+
+async function runDiagnosticsCheck() {
+  els.diagnosticsReachable.textContent = "Checking…";
+  els.diagnosticsReachable.classList.remove("tone-success", "tone-danger");
+  els.diagnosticsBuildId.textContent = "—";
+  els.diagnosticsProjectRef.textContent = "—";
+
+  const { settings } = await chrome.storage.local.get("settings");
+  const appBaseUrl = resolveAppBaseUrl(settings);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${appBaseUrl}/api/extension/ebay-batch/health`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    const body = await response.json();
+    els.diagnosticsReachable.textContent = "Reachable";
+    els.diagnosticsReachable.classList.add("tone-success");
+    els.diagnosticsBuildId.textContent = body.buildId || "unknown";
+    els.diagnosticsProjectRef.textContent = body.supabaseProjectRef || "unknown";
+  } catch {
+    clearTimeout(timeoutId);
+    els.diagnosticsReachable.textContent = "Unreachable";
+    els.diagnosticsReachable.classList.add("tone-danger");
+  }
+}
+
+els.diagnosticsRefresh.addEventListener("click", () => runDiagnosticsCheck());
+runDiagnosticsCheck();
 
 // ---------------------------------------------------------------------
 // Pairing / connection summary

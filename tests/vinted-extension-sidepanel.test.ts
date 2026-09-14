@@ -72,7 +72,20 @@ function baseState(itemOverrides: Record<string, unknown> = {}, batchOverrides: 
  * loadSettings()/refresh() as an import-time side effect, so the initial
  * GET_STATE response is always awaited before this resolves.
  */
-async function loadSidepanel(sendMessageHandler: (type: string, payload: Record<string, unknown>) => any) {
+// CORRECTIVE PASS (environment provenance audit) — sidepanel.js now calls
+// the real global fetch() unconditionally at import time (runDiagnosticsCheck,
+// for the new diagnostics panel — see its own comment). Node's OWN native
+// fetch is otherwise reachable from this test process, so EVERY test using
+// this harness — not just the ones about diagnostics — must have it
+// stubbed, or every one of them would attempt a real, unmocked network
+// request the moment sidepanel.js loads. Defaults to a rejection (the
+// safest possible default: "unreachable", never a real network attempt);
+// pass fetchImpl to control it explicitly for tests that care.
+async function loadSidepanel(
+  sendMessageHandler: (type: string, payload: Record<string, unknown>) => any,
+  fetchImpl: (...args: unknown[]) => unknown = async () => { throw new Error("fetch is stubbed in tests — pass fetchImpl to loadSidepanel to control it"); },
+) {
+  vi.stubGlobal("fetch", vi.fn(fetchImpl));
   const dom = new JSDOM(SIDEPANEL_HTML, { url: "http://localhost/sidepanel.html" });
   vi.stubGlobal("window", dom.window as any);
   vi.stubGlobal("document", dom.window.document);
@@ -1186,5 +1199,114 @@ describe("pairing failure review — visible, truthful pairing states (Phase 5)"
 
     expect(attempt).toBe(2);
     expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+});
+
+// ============================================================================
+// CORRECTIVE PASS (environment provenance audit) — a pairing failure that
+// "shouldn't happen" is very often the extension and the app quietly
+// talking to two different backends. A real, read-only investigation this
+// pass traced a genuine pairing failure to exactly that: a second,
+// independent `next dev` process on a different port, sharing this
+// session's own `.next` build directory, serving stale/corrupted output
+// (a route that objectively exists returned 404; the rendered page
+// included a navigation link that appears nowhere in the actual source
+// tree). This diagnostics panel makes that comparable at a glance, without
+// needing a live pairing attempt to discover it.
+// ============================================================================
+
+const NO_NETWORK_FETCH = async () => { throw new Error("no network access in tests"); };
+
+describe("environment provenance audit — extension settings diagnostics panel", () => {
+  it("REQUIREMENT: shows the extension's own version, independent of server reachability", async () => {
+    const manifest = JSON.parse(readFileSync(path.resolve("vinted-draft-queue-extension/manifest.json"), "utf8"));
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), NO_NETWORK_FETCH);
+    expect((document.getElementById("diagnostics-extension-version") as HTMLElement).textContent).toBe(`v${manifest.version}`);
+  });
+
+  it("REQUIREMENT: shows 'Unreachable' (danger tone) when the configured App URL cannot be reached — never silently blank, never a false 'Reachable'", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), NO_NETWORK_FETCH);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const reachable = document.getElementById("diagnostics-reachable") as HTMLElement;
+    expect(reachable.textContent).toBe("Unreachable");
+    expect(reachable.classList.contains("tone-danger")).toBe(true);
+    expect((document.getElementById("diagnostics-build-id") as HTMLElement).textContent).toBe("—");
+    expect((document.getElementById("diagnostics-project-ref") as HTMLElement).textContent).toBe("—");
+  });
+
+  it("REQUIREMENT: shows 'Reachable' plus the REAL server-reported build id and environment identifier when the health check succeeds — never fabricated locally", async () => {
+    const { document } = await loadSidepanel(
+      withVintedFallback(() => ({})),
+      async () => new Response(JSON.stringify({ ok: true, buildId: "82e178a", supabaseProjectRef: "qpgbatdcenwopkqcxnmz" }), { status: 200 }),
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const reachable = document.getElementById("diagnostics-reachable") as HTMLElement;
+    expect(reachable.textContent).toBe("Reachable");
+    expect(reachable.classList.contains("tone-success")).toBe(true);
+    expect((document.getElementById("diagnostics-build-id") as HTMLElement).textContent).toBe("82e178a");
+    expect((document.getElementById("diagnostics-project-ref") as HTMLElement).textContent).toBe("qpgbatdcenwopkqcxnmz");
+  });
+
+  it("REQUIREMENT: a non-2xx health response (e.g. the exact 404 a stale/corrupted second dev-server instance returned) is treated as unreachable — never a false 'Reachable'", async () => {
+    const { document } = await loadSidepanel(
+      withVintedFallback(() => ({})),
+      async () => new Response("<html>404</html>", { status: 404 }),
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect((document.getElementById("diagnostics-reachable") as HTMLElement).textContent).toBe("Unreachable");
+  });
+
+  it("REQUIREMENT: pings the CONFIGURED App URL, exactly the same effective URL a real request would use (resolveAppBaseUrl, shared with service-worker.js)", async () => {
+    let requestedUrl: string | undefined;
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async (url: unknown) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({ ok: true, buildId: "x", supabaseProjectRef: "y" }), { status: 200 });
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(requestedUrl).toBe("http://test-app.local/api/extension/ebay-batch/health");
+    void document;
+  });
+
+  it("REQUIREMENT: the 'Check connection' button re-runs the check on demand", async () => {
+    let calls = 0;
+    const { document } = await loadSidepanel(withVintedFallback(() => ({})), async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ ok: true, buildId: "x", supabaseProjectRef: "y" }), { status: 200 });
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+    (document.getElementById("diagnostics-refresh") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toBe(2);
+  });
+
+  it("REGRESSION: never leaks any secret into the panel — the diagnostics elements' text content never contains a Supabase key shape or the extension batch secret", async () => {
+    const { document } = await loadSidepanel(
+      withVintedFallback(() => ({})),
+      async () => new Response(JSON.stringify({ ok: true, buildId: "82e178a", supabaseProjectRef: "qpgbatdcenwopkqcxnmz" }), { status: 200 }),
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const panelText = (document.getElementById("settings-panel") as HTMLElement).textContent || "";
+    expect(panelText).not.toMatch(/sb_secret_|eyJ[A-Za-z0-9_-]{10,}/); // no raw key/JWT shapes
+  });
+});
+
+describe("environment provenance audit — shared App URL resolution (shared/app-settings.js)", () => {
+  it("REQUIREMENT: resolveAppBaseUrl matches service-worker.js's own getSettings() behaviour exactly for every case — an absent key, a real URL, and an explicitly-saved empty string", async () => {
+    const { resolveAppBaseUrl, DEFAULT_APP_BASE_URL } = await import("../vinted-draft-queue-extension/shared/app-settings.js");
+    expect(resolveAppBaseUrl(undefined)).toBe(DEFAULT_APP_BASE_URL);
+    expect(resolveAppBaseUrl({})).toBe(DEFAULT_APP_BASE_URL);
+    expect(resolveAppBaseUrl({ appBaseUrl: "http://example.test:3005" })).toBe("http://example.test:3005");
+    // An explicitly-saved empty string is NOT the same as "never configured"
+    // — it must NOT silently fall back to the default (matching the
+    // pre-existing `{ appBaseUrl: DEFAULT, ...settings }` spread semantics
+    // this replaced — see that module's own comment).
+    expect(resolveAppBaseUrl({ appBaseUrl: "" })).toBe("");
+  });
+
+  it("REGRESSION: service-worker.js imports this SAME shared resolver — never a second, independently-drifting definition of the default App URL", () => {
+    const source = readFileSync("vinted-draft-queue-extension/service-worker.js", "utf8");
+    expect(source).toContain('from "./shared/app-settings.js"');
+    expect(source).not.toMatch(/const DEFAULT_APP_BASE_URL\s*=/);
   });
 });

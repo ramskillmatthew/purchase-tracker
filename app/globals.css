@@ -2866,6 +2866,8 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-ebay-status-panel { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 8px; padding: 12px 14px; border: 1px solid var(--lr-border); border-radius: 10px; background: var(--lr-surface); }
 .lr-ebay-status-panel-title { margin: 0; color: var(--lr-text); font-size: 12px; font-weight: 700; }
 .lr-ebay-status-panel-body { margin: 0; color: var(--lr-muted); font-size: 11px; line-height: 1.5; }
+/* CORRECTIVE PASS (environment provenance audit) — the build id/environment line uses a monospace face for the identifiers themselves, matching the extension's own diagnostics panel convention. */
+.lr-ebay-status-panel-diagnostics strong { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .lr-ebay-status-panel-reasons { margin: 0; padding-left: 18px; list-style: disc; color: var(--lr-muted); font-size: 11px; line-height: 1.6; }
 .lr-ebay-status-panel-reasons li { margin: 2px 0; overflow-wrap: anywhere; }
 .lr-ebay-status-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }

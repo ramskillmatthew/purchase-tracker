@@ -246,6 +246,18 @@ button, input { font: inherit; color: inherit; }
 .app-url-copy { flex: 1 1 auto; min-width: 0; }
 .field-caption { margin: 0; color: var(--subtle); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .field-value { margin: 1px 0 0; overflow: hidden; font-size: 13.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+
+/* CORRECTIVE PASS (environment provenance audit) — a 2-column grid at
+   normal widths, dropping to 1 column at very narrow widths (see the
+   @container block below) so neither cell is ever forced narrower than
+   its content can shrink to (minmax(0, 1fr), same reasoning as every
+   other grid in this file). */
+.diagnostics-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-4); margin-top: var(--space-4); }
+.diagnostics-item { min-width: 0; }
+.diagnostics-item .field-value { color: var(--text); }
+.diagnostics-item .field-value.tone-danger { color: var(--danger); }
+.diagnostics-item .field-value.tone-success { color: var(--success); }
+#diagnostics-refresh { margin-top: var(--space-3); }
 .app-url-input {
   width: 100%;
   margin-top: 2px;
@@ -640,6 +652,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .action-bar { flex-wrap: wrap; margin-left: calc(var(--space-3) * -1); margin-right: calc(var(--space-3) * -1); padding-left: var(--space-3); padding-right: var(--space-3); }
   .action-button { flex: 1 1 calc(50% - var(--space-2) / 2); font-size: 11.5px; padding: 0 8px; }
   .action-button.primary { flex-basis: 100%; }
+  /* CORRECTIVE PASS (environment provenance audit) — four short
+     label/value pairs in two columns is fine down to ~380px; below that,
+     one column reads more comfortably than four cramped half-cells. */
+  .diagnostics-row { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Never allow horizontal scrolling regardless of width. */

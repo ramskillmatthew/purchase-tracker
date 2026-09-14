@@ -184,6 +184,22 @@
         <button id="app-url-edit" class="button-outline button-sm" type="button">Change</button>
         <button id="app-url-save" class="button-primary button-sm" type="button" hidden>Save</button>
       </div>
+      <!-- CORRECTIVE PASS (environment provenance audit) — a pairing
+           failure that "shouldn't happen" is very often the extension and
+           the app quietly talking to two different backends (two dev
+           servers on different ports, a stale App URL, a different
+           Supabase project). This panel makes that comparable at a
+           glance, without needing a live pairing attempt to discover it —
+           see GET /api/extension/ebay-batch/health's own top comment for
+           exactly what these two identifiers are and why they're safe to
+           show (no secrets, no keys). -->
+      <div class="diagnostics-row">
+        <div class="diagnostics-item"><span class="field-caption">Extension version</span><span id="diagnostics-extension-version" class="field-value">—</span></div>
+        <div class="diagnostics-item"><span class="field-caption">App status</span><span id="diagnostics-reachable" class="field-value">Checking…</span></div>
+        <div class="diagnostics-item"><span class="field-caption">Server build</span><span id="diagnostics-build-id" class="field-value">—</span></div>
+        <div class="diagnostics-item"><span class="field-caption">Environment</span><span id="diagnostics-project-ref" class="field-value">—</span></div>
+      </div>
+      <button id="diagnostics-refresh" class="button-outline button-sm" type="button">Check connection</button>
     </section>
 
     <!-- Pairing — shown only while not paired. -->

@@ -70,6 +70,29 @@ describe("POST /api/listing-studio/ebay-extension-batches", () => {
     expect(body.pairingCode).toMatch(/^[A-Z0-9]{8}$/);
   });
 
+  // CORRECTIVE PASS (environment provenance audit) — the pairing card's
+  // own environment identifiers, resolved server-side, never fabricated
+  // client-side. Real values (a git SHA, a Supabase hostname) depend on
+  // the ambient test-process environment, which this file doesn't
+  // control — see tests/ebay-extension-health-route.test.ts for the
+  // deterministic module-load-time resolution tests. This just proves the
+  // route actually forwards them.
+  it("REQUIREMENT: the response includes the SAME safe build/environment identifiers the extension's own health check reports — never fabricated client-side", async () => {
+    const response = await createRoute(jsonRequest({ marketplaceDraftIds: [MDRAFT_ID] }));
+    const body = await response.json();
+    expect(typeof body.buildId).toBe("string");
+    expect(body.buildId.length).toBeGreaterThan(0);
+    expect(typeof body.supabaseProjectRef).toBe("string");
+    expect(body.supabaseProjectRef.length).toBeGreaterThan(0);
+  });
+
+  it("REGRESSION: the create route resolves these identifiers from the SAME shared module the health route uses — never a second, independent implementation that could drift", async () => {
+    const source = await import("node:fs").then(fs => fs.readFileSync("app/api/listing-studio/ebay-extension-batches/route.ts", "utf8"));
+    expect(source).toContain('from "@/lib/listing-studio/server-diagnostics"');
+    const healthSource = await import("node:fs").then(fs => fs.readFileSync("app/api/extension/ebay-batch/health/route.ts", "utf8"));
+    expect(healthSource).toContain('from "@/lib/listing-studio/server-diagnostics"');
+  });
+
   it("rejects a marketplace draft missing required eBay fields, with a specific reason per field", async () => {
     supabaseRequestAll.mockImplementation(async (path: string) => {
       if (path.startsWith("listing_marketplace_drafts")) return [{ ...MARKETPLACE_DRAFT, price_pence: null } as unknown as typeof MARKETPLACE_DRAFT];

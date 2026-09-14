@@ -430,6 +430,16 @@ export default function ListingsReviewWorkspace() {
   // client-side; this is honest, post-hoc framing of what the server
   // actually did, shown in the pairing-code panel below.
   const [ebayExtensionIsRetry, setEbayExtensionIsRetry] = useState(false);
+  // CORRECTIVE PASS (environment provenance audit) — the SAME two safe,
+  // non-secret identifiers the extension's own diagnostics panel shows
+  // (GET /api/extension/ebay-batch/health), resolved server-side by THIS
+  // app instance. Shown on the pairing card so a human can compare them
+  // against the extension's panel and catch a genuine environment
+  // mismatch (two different app instances, two different Supabase
+  // projects) before ever attempting to pair — see
+  // lib/listing-studio/server-diagnostics.ts's own top comment.
+  const [ebayExtensionBuildId, setEbayExtensionBuildId] = useState<string | null>(null);
+  const [ebayExtensionProjectRef, setEbayExtensionProjectRef] = useState<string | null>(null);
   // Follow-up correction (orphaned extension batch recovery) — the batch
   // named by the create route's own DRAFT_ALREADY_IN_ACTIVE_BATCH 409
   // response, if any, so the error can offer a real "View active batch" /
@@ -1719,6 +1729,8 @@ export default function ListingsReviewWorkspace() {
     setEbayExtensionPairingCode(null);
     setEbayExtensionBatchId(null);
     setEbayExtensionIsRetry(false);
+    setEbayExtensionBuildId(null);
+    setEbayExtensionProjectRef(null);
     try {
       const response = await fetch("/api/listing-studio/ebay-extension-batches", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ marketplaceDraftIds: [marketplaceDraftId] }),
@@ -1734,6 +1746,10 @@ export default function ListingsReviewWorkspace() {
       // excluded from the create RPC's own conflict check, so this send
       // works exactly like a first send; only the panel copy differs.
       setEbayExtensionIsRetry(Boolean(body.isRetry));
+      // CORRECTIVE PASS (environment provenance audit) — server-derived,
+      // shown as-is; never fabricated client-side.
+      setEbayExtensionBuildId(body.buildId ?? null);
+      setEbayExtensionProjectRef(body.supabaseProjectRef ?? null);
     } catch {
       setSendToEbayExtensionError("Network error — could not send this listing to the eBay extension.");
     } finally {
@@ -1762,6 +1778,8 @@ export default function ListingsReviewWorkspace() {
       setEbayExtensionPairingCode(null);
       setEbayExtensionBatchId(null);
       setEbayExtensionIsRetry(false);
+      setEbayExtensionBuildId(null);
+      setEbayExtensionProjectRef(null);
       setSendToEbayExtensionError("");
     } catch {
       setSendToEbayExtensionError("Network error — could not cancel this send.");
@@ -2917,6 +2935,17 @@ export default function ListingsReviewWorkspace() {
             <p className="lr-ebay-status-panel-body">
               Open the extension&apos;s side panel, select the eBay tab, and enter this code: <strong>{ebayExtensionPairingCode}</strong>
             </p>
+            {/* CORRECTIVE PASS (environment provenance audit) — the SAME
+                two safe identifiers the extension's own settings
+                diagnostics panel shows. Compare them there before typing
+                the code: if either differs, the extension and this app
+                are not talking to the same backend, and pairing WILL fail
+                no matter how carefully the code is typed. */}
+            {(ebayExtensionBuildId || ebayExtensionProjectRef) && (
+              <p className="lr-ebay-status-panel-body lr-ebay-status-panel-diagnostics">
+                Server build <strong>{ebayExtensionBuildId ?? "unknown"}</strong> · Environment <strong>{ebayExtensionProjectRef ?? "unknown"}</strong> — compare against the extension&apos;s own settings panel before entering the code.
+              </p>
+            )}
             {ebayExtensionBatchId && (
               <div className="lr-ebay-status-panel-actions">
                 <button type="button" className="button-secondary" disabled={ebayExtensionCancelling} onClick={handleCancelEbayExtensionSend}>

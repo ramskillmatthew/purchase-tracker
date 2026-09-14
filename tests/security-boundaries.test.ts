@@ -16,6 +16,8 @@ describe("server security boundaries",()=>{
       const isClaimRoute=normalised.endsWith("app/api/extension/claim/route.ts")||normalised.endsWith("app/api/extension/ebay-batch/claim/route.ts");
       if(isClaimRoute) expect(source,route).toContain("enforceRateLimit");
       else if(normalised.endsWith("app/api/extension/ebay-imports/route.ts")) expect(source,route).toContain("verifyConnectionToken");
+      // CORRECTIVE PASS (environment provenance audit) — GET /api/extension/ebay-batch/health is deliberately unauthenticated, like claim, since the extension has no session before pairing; unlike claim it needs no rate limit (no rate limit-worthy operation — safe, read-only, non-secret build/environment identifiers only), which this test itself proves by asserting the response never contains a key/secret (see tests/ebay-extension-health-route.test.ts).
+      else if(normalised.endsWith("app/api/extension/ebay-batch/health/route.ts")) expect(source,route).not.toContain("supabaseRequest");
       else expect(source,route).toContain("verifyBatchToken");
     }
   });

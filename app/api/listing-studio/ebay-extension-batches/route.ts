@@ -7,6 +7,7 @@ import { uuidSchema } from "@/lib/validation/listing-studio-uploads";
 import { generatePairingCode, hashPairingCode } from "@/lib/listing-studio/extension-pairing-code";
 import { MAX_EBAY_EXTENSION_BATCH_LISTINGS, EBAY_EXTENSION_BATCH_EXPIRY_SECONDS } from "@/lib/listing-studio/ebay-extension-batch-schema";
 import { enforceRateLimit } from "@/lib/security/activity";
+import { SERVER_BUILD_ID, SUPABASE_PROJECT_REF } from "@/lib/listing-studio/server-diagnostics";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -128,9 +129,17 @@ export async function POST(request: Request) {
       throw error;
     }
 
+    // CORRECTIVE PASS (environment provenance audit) — the SAME two safe,
+    // non-secret identifiers GET /api/extension/ebay-batch/health reports,
+    // resolved from the SAME shared module. The Listings Review pairing
+    // card shows these alongside the pairing code so a human can compare
+    // them against the extension's own diagnostics panel and catch a
+    // genuine environment mismatch (two different app instances, two
+    // different Supabase projects) before ever attempting to pair.
     return NextResponse.json({
       batchId: created.batch_id, displayNumber: created.display_number, pairingCode, expiresAt: expiresAtIso, listingCount: foundIds.length,
       isRetry: created.retry_of_item_id !== null,
+      buildId: SERVER_BUILD_ID, supabaseProjectRef: SUPABASE_PROJECT_REF,
     });
   } catch (error) { return safeApiError(error, "Could not create an eBay extension batch."); }
 }
