@@ -11,6 +11,11 @@
 export const EBAY_PANEL_TO_WORKER = Object.freeze({
   EBAY_GET_STATE: "EBAY_GET_STATE",
   EBAY_CLAIM_BATCH: "EBAY_CLAIM_BATCH",
+  // CORRECTIVE PASS (claim state-machine review) — re-attempts loading an
+  // ALREADY-claimed batch's payload only; never resubmits a pairing code,
+  // never re-claims. Safe to send any number of times — see
+  // service-worker.js's own refreshEbayBatch comment.
+  EBAY_REFRESH_BATCH: "EBAY_REFRESH_BATCH",
   // Sends exactly one queued item — this milestone's batches only ever
   // contain one item (MAX_EBAY_EXTENSION_BATCH_LISTINGS = 1), but the verb
   // is deliberately per-item (not "START_BATCH") so a later multi-item

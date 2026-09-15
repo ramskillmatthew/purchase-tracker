@@ -34,12 +34,26 @@ export function isTerminalEbayStatus(status) {
   return TERMINAL_STATUSES.has(status);
 }
 
+// CORRECTIVE PASS (claim state-machine review) — payloadError is a
+// genuinely DISTINCT, persisted state from "batch: null": it means the
+// claim itself succeeded (pairing is set) but loading the claimed
+// batch's own listing payload failed for a real reason (network, server,
+// malformed response) — never the ordinary, momentary "about to load"
+// gap right after a fresh claim. Persisting it (not just holding it in a
+// local variable) is what lets a reopened panel reconstruct this EXACT
+// state from storage rather than falling back to the ambiguous "waiting"
+// display — see sidepanel.js's own renderEbayDrafterState for the three
+// now-distinct branches this enables.
 export function createInitialEbayState() {
-  return { pairing: null, batch: null };
+  return { pairing: null, batch: null, payloadError: null };
 }
 
 export function applyEbayClaim(state, { batchId, batchToken, expiresAt, claimedAt }) {
-  return { ...state, pairing: { batchId, batchToken, expiresAt, claimedAt } };
+  return { ...state, pairing: { batchId, batchToken, expiresAt, claimedAt }, payloadError: null };
+}
+
+export function applyEbayPayloadError(state, message) {
+  return { ...state, payloadError: message };
 }
 
 // Mirrors queue-state.js's own QUEUE_CONTROLLED_FIELDS convention exactly —
@@ -88,6 +102,8 @@ export function applyEbayBatchPayload(state, payload, nowIso) {
       // listing tab initially."
       ebayTabId: null,
     },
+    // A successful payload load supersedes any earlier load failure.
+    payloadError: null,
   };
 }
 

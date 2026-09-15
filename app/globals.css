@@ -2889,6 +2889,11 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
    border so it's unmistakable which one is blocking a send. */
 .lr-ebay-extension-active-panel { display: flex; flex-direction: column; gap: 10px; width: 100%; margin: 0 0 16px; }
 .lr-ebay-extension-active-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* CORRECTIVE PASS (claim state-machine review) — groups the manual
+   Refresh button with "Show dismissed batches" on the same side of the
+   header, never crowding the title on narrow widths (wraps as one unit). */
+.lr-ebay-extension-active-panel-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.lr-ebay-extension-refresh-button { min-height: 28px; padding: 0 10px; font-size: 10.5px; }
 .lr-ebay-extension-active-panel-title { margin: 0; color: var(--lr-text); font-size: 13px; font-weight: 700; }
 /* CORRECTIVE PASS (controlled pairing test review, Phase 4) — "Show
    dismissed batches", off by default. */

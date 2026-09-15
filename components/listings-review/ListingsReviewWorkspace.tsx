@@ -778,6 +778,29 @@ export default function ListingsReviewWorkspace() {
     timeoutId = window.setTimeout(tick, 1000);
     return () => { cancelled = true; if (timeoutId !== undefined) window.clearTimeout(timeoutId); };
   }, [ebayExtensionBatches]);
+  // CORRECTIVE PASS (claim state-machine review) — REQUIREMENT: "Listings
+  // Review must refresh promptly after claim and show claimed, not wait
+  // for slow polling." A real claim happens entirely inside the
+  // extension's own side panel — this page has no way to know it happened
+  // except by asking again. Self-rescheduling setTimeout (never
+  // setInterval — same established convention as the countdown tick
+  // above and this file's own poll() function), at the SAME 4s cadence
+  // this file's other batch polling already uses, and ONLY while a batch
+  // genuinely is still 'pending_claim' — stops itself the moment none
+  // are, so this never polls forever once everything is claimed/terminal.
+  useEffect(() => {
+    if (!ebayExtensionBatches.some(batch => batch.status === "pending_claim")) return;
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    function poll() {
+      if (cancelled) return;
+      fetchEbayExtensionBatches(ebayExtensionShowDismissed).finally(() => {
+        if (!cancelled) timeoutId = window.setTimeout(poll, 4000);
+      });
+    }
+    timeoutId = window.setTimeout(poll, 4000);
+    return () => { cancelled = true; if (timeoutId !== undefined) window.clearTimeout(timeoutId); };
+  }, [ebayExtensionBatches, ebayExtensionShowDismissed, fetchEbayExtensionBatches]);
 
   /**
    * CORRECTIVE PASS (blocking-batch visibility review; consolidated,
@@ -3058,13 +3081,27 @@ export default function ListingsReviewWorkspace() {
       <div className="lr-ebay-extension-active-panel">
         <div className="lr-ebay-extension-active-panel-header">
           <p className="lr-ebay-extension-active-panel-title">eBay Extension batches</p>
-          <label className="lr-ebay-extension-show-dismissed">
-            <input
-              type="checkbox" checked={ebayExtensionShowDismissed}
-              onChange={event => setEbayExtensionShowDismissed(event.target.checked)}
-            />
-            Show dismissed batches
-          </label>
+          <div className="lr-ebay-extension-active-panel-header-actions">
+            {/* CORRECTIVE PASS (claim state-machine review) — REQUIREMENT:
+                "Add a manual Refresh status control." A claim happening in
+                the extension is invisible to this page until something
+                re-fetches; this is the explicit, always-available way to
+                do that without waiting for the prompt-refresh poll below. */}
+            <button
+              type="button" className="button-secondary lr-ebay-extension-refresh-button"
+              disabled={ebayExtensionBatchesLoading}
+              onClick={() => fetchEbayExtensionBatches(ebayExtensionShowDismissed)}
+            >
+              {ebayExtensionBatchesLoading ? "Refreshing…" : "Refresh status"}
+            </button>
+            <label className="lr-ebay-extension-show-dismissed">
+              <input
+                type="checkbox" checked={ebayExtensionShowDismissed}
+                onChange={event => setEbayExtensionShowDismissed(event.target.checked)}
+              />
+              Show dismissed batches
+            </label>
+          </div>
         </div>
         {ebayExtensionBatchesLoading && <p className="lr-ebay-extension-active-panel-hint">Refreshing…</p>}
         {ebayExtensionBatches.length === 0 && <p className="lr-ebay-extension-active-panel-hint">No dismissed batches.</p>}

@@ -1712,6 +1712,28 @@ function classifyEbayClaimFailure(response, body, requestOrigin) {
   return { kind: "server_failure", message: body.error || `The app reported a problem (status ${response.status}). Try again in a moment.` };
 }
 
+/**
+ * CORRECTIVE PASS (claim state-machine review) — REQUIREMENT: "On
+ * successful claim, immediately show the claimed batch... Never clear the
+ * pairing form unless a valid claimed batch has been received and
+ * persisted." The REAL bug a real, reproduced claim exposed: this
+ * function used to persist the claim (updateEbayState -> WRITE-1, pairing
+ * set, batch still null), then internally call fetchEbayBatchPayload()
+ * (which persists AGAIN -> WRITE-2, batch now populated) — but returned
+ * the `next` snapshot captured right after WRITE-1, a STALE object
+ * (paired, batch: null) that was never wrong about storage (storage
+ * itself ended up correct, at WRITE-2), only wrong as the VALUE handed
+ * back to the panel's own click handler, which re-rendered from it
+ * unconditionally, briefly (and in the reported case, durably enough
+ * to observe) clobbering the correct render chrome.storage.onChanged had
+ * already produced from WRITE-2 — the "Waiting for connection" report.
+ * Fixed by returning whatever fetchEbayBatchPayload() itself actually
+ * resolved to — the freshest possible state — and by giving the caller a
+ * DISTINCT signal when the claim persisted but the payload fetch itself
+ * failed (paired, batch still empty for a REAL reason), so the panel can
+ * show that as its own honest, non-ambiguous state instead of silently
+ * reusing the pre-payload snapshot.
+ */
 async function claimEbayBatch(pairingCode) {
   if (!isValidPairingCodeShape(pairingCode)) return { error: "Enter the pairing code shown in the app.", errorKind: "code_rejected" };
   const { appBaseUrl } = await getSettings();
@@ -1727,11 +1749,49 @@ async function claimEbayBatch(pairingCode) {
   }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) { const failure = classifyEbayClaimFailure(response, body, appBaseUrl); return { error: failure.message, errorKind: failure.kind }; }
-  const next = await updateEbayState(s => EbayQueueState.applyEbayClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: new Date().toISOString() }));
-  await fetchEbayBatchPayload();
-  return { state: next };
+  // The claim itself is now genuinely persisted (server-side committed,
+  // and this WRITE-1 makes it locally durable too) — from this point on,
+  // the pairing code is single-use and MUST NOT be resubmitted; every
+  // path below only ever loads or retries loading the ALREADY-claimed
+  // batch's payload, never claims again.
+  await updateEbayState(s => EbayQueueState.applyEbayClaim(s, { batchId: body.batchId, batchToken: body.batchToken, expiresAt: body.expiresAt, claimedAt: new Date().toISOString() }));
+  const payloadResult = await fetchEbayBatchPayload();
+  if (payloadResult.error) {
+    // Claimed and persisted, but loading the listing itself failed — a
+    // real, distinct, honest state (never the ambiguous empty "waiting"
+    // one, never silently discarded). The panel can retry loading via
+    // EBAY_REFRESH_BATCH without ever resubmitting the (already
+    // consumed) code.
+    return { claimed: true, payloadError: payloadResult.error, state: await getEbayState() };
+  }
+  return { state: payloadResult.state };
 }
 
+/**
+ * CORRECTIVE PASS (claim state-machine review) — "Add a manual Refresh
+ * status control" / recovery for "claimed batch waiting for an eBay tab"
+ * or "claim succeeded but the payload fetch itself failed": re-attempts
+ * ONLY the payload load for an ALREADY-claimed batch — never resubmits
+ * the pairing code, never re-claims, so it is safe to call any number of
+ * times (including automatically, from the panel's own reopen path) and
+ * can never double-consume a single-use code.
+ */
+async function refreshEbayBatch() {
+  const state = await getEbayState();
+  if (!state.pairing?.batchToken) return { error: "No active batch to refresh.", state };
+  const payloadResult = await fetchEbayBatchPayload();
+  if (payloadResult.error) return { error: payloadResult.error, state: await getEbayState() };
+  return { state: payloadResult.state };
+}
+
+/**
+ * CORRECTIVE PASS (claim state-machine review) — a load failure is now
+ * PERSISTED (applyEbayPayloadError), not just returned to the immediate
+ * caller — so it survives a service-worker restart or a panel
+ * reopen/close and is reconstructed from storage exactly like every
+ * other part of this state, rather than being lost the instant this
+ * function's own return value goes out of scope.
+ */
 async function fetchEbayBatchPayload() {
   const state = await getEbayState();
   if (!state.pairing?.batchToken) return { error: "No active batch." };
@@ -1739,9 +1799,17 @@ async function fetchEbayBatchPayload() {
   let response;
   try {
     response = await fetch(`${appBaseUrl}/api/extension/ebay-batch`, { headers: { Authorization: `Bearer ${state.pairing.batchToken}` } });
-  } catch (error) { return { error: `Could not reach the app (${error?.name || "Error"}).` }; }
+  } catch (error) {
+    const message = `Could not reach the app (${error?.name || "Error"}).`;
+    await updateEbayState(s => EbayQueueState.applyEbayPayloadError(s, message));
+    return { error: message };
+  }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) return { error: body.error || "Could not load this batch." };
+  if (!response.ok) {
+    const message = body.error || "Could not load this batch.";
+    await updateEbayState(s => EbayQueueState.applyEbayPayloadError(s, message));
+    return { error: message };
+  }
   const next = await updateEbayState(s => EbayQueueState.applyEbayBatchPayload(s, body, new Date().toISOString()));
   return { state: next };
 }
@@ -1913,6 +1981,7 @@ async function handleEbayMessage(message, sender) {
   switch (message?.type) {
     case EBAY_PANEL_TO_WORKER.EBAY_GET_STATE: return { state: await getEbayState(), settings: await getSettings() };
     case EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH: return claimEbayBatch(message.pairingCode);
+    case EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH: return refreshEbayBatch();
     case EBAY_PANEL_TO_WORKER.EBAY_START_ITEM: return startEbayItem(message.itemId);
     case EBAY_PANEL_TO_WORKER.EBAY_CANCEL_ITEM: return cancelEbayItem(message.itemId);
     case EBAY_PANEL_TO_WORKER.EBAY_CLEAR_BATCH: return clearEbayBatch();

@@ -50,10 +50,18 @@ const els = {
   ebayDrafterPairingError: document.getElementById("ebay-drafter-pairing-error"),
   ebayDrafterClaimButton: document.getElementById("ebay-drafter-claim-button"),
   ebayDrafterEmptyState: document.getElementById("ebay-drafter-empty-state"),
+  // CORRECTIVE PASS (claim state-machine review) — the three states that
+  // used to share the single, ambiguous "Waiting for connection" panel.
+  ebayDrafterLoadingBatchState: document.getElementById("ebay-drafter-loading-batch-state"),
+  ebayDrafterRefreshBatch: document.getElementById("ebay-drafter-refresh-batch"),
+  ebayDrafterPayloadErrorState: document.getElementById("ebay-drafter-payload-error-state"),
+  ebayDrafterPayloadErrorMessage: document.getElementById("ebay-drafter-payload-error-message"),
+  ebayDrafterPayloadErrorRetry: document.getElementById("ebay-drafter-payload-error-retry"),
   ebayDrafterItemCard: document.getElementById("ebay-drafter-item-card"),
   ebayDrafterItemTitle: document.getElementById("ebay-drafter-item-title"),
   ebayDrafterItemStatus: document.getElementById("ebay-drafter-item-status"),
   ebayDrafterItemError: document.getElementById("ebay-drafter-item-error"),
+  ebayDrafterItemRefresh: document.getElementById("ebay-drafter-item-refresh"),
   ebayDrafterStart: document.getElementById("ebay-drafter-start"),
   ebayDrafterRetryInstructions: document.getElementById("ebay-drafter-retry-instructions"),
   ebayDrafterCancel: document.getElementById("ebay-drafter-cancel"),
@@ -962,6 +970,8 @@ function showEbayDrafterError(message) {
   els.ebayDrafterLoadingState.hidden = true;
   els.ebayDrafterPairingPanel.hidden = true;
   els.ebayDrafterEmptyState.hidden = true;
+  els.ebayDrafterLoadingBatchState.hidden = true;
+  els.ebayDrafterPayloadErrorState.hidden = true;
   els.ebayDrafterItemCard.hidden = true;
   els.ebayDrafterErrorMessage.textContent = message;
   els.ebayDrafterErrorState.hidden = false;
@@ -976,15 +986,32 @@ function showEbayDrafterError(message) {
 // (see sidepanel.css's own matching CSS-side fix for the actual root cause
 // of that specific report; this is the independent, general-purpose
 // safety net REQUIRED regardless of root cause).
-function renderEbayDrafterState(state = { pairing: null, batch: null }) {
+// CORRECTIVE PASS (claim state-machine review) — REQUIREMENT: "'Waiting
+// for connection' is ambiguous and must not represent multiple states."
+// This is now the ONE place that decides between five genuinely distinct
+// situations, each with its own real cause and its own real action:
+//   1. no code submitted yet             -> the pairing form
+//   2. claimed, listing not loaded yet   -> "Connected — loading…" (transient)
+//   3. claimed, loading the listing failed -> a real, named error + Retry loading
+//   4. claimed batch, item queued        -> the item card, "Send to eBay Seller Hub"
+//   5. claimed batch, item in some other status -> the item card, reflecting it
+// ebay-drafter-empty-state (the old, ambiguous "Waiting for connection")
+// is never shown by this function any more — kept in the DOM only so an
+// already-open panel from before this fix isn't left referencing a
+// removed element; see initEbayDrafterState's own comment.
+function renderEbayDrafterState(state = { pairing: null, batch: null, payloadError: null }) {
   try {
     els.ebayDrafterLoadingState.hidden = true;
     els.ebayDrafterErrorState.hidden = true;
+    els.ebayDrafterEmptyState.hidden = true;
 
     const paired = Boolean(state.pairing?.batchToken);
     els.ebayDrafterPairingPanel.hidden = paired;
     const item = state.batch?.items?.[0] ?? null;
-    els.ebayDrafterEmptyState.hidden = !paired || Boolean(item);
+    const payloadError = paired && !item ? (state.payloadError ?? null) : null;
+    els.ebayDrafterLoadingBatchState.hidden = !paired || Boolean(item) || Boolean(payloadError);
+    els.ebayDrafterPayloadErrorState.hidden = !payloadError;
+    if (payloadError) els.ebayDrafterPayloadErrorMessage.textContent = payloadError;
     els.ebayDrafterItemCard.hidden = !paired || !item;
     if (!item) return;
 
@@ -1027,10 +1054,22 @@ function renderEbayDrafterState(state = { pairing: null, batch: null }) {
 // right after the service worker restarts, such as immediately after an
 // extension reload) into a specific, visible, recoverable error rather
 // than silently never rendering anything at all.
+// CORRECTIVE PASS (claim state-machine review) — REQUIREMENT:
+// "Reloading/reopening the side panel must reconstruct the state from the
+// service worker/server." This is already what happens structurally:
+// EBAY_GET_STATE (service-worker.js) always reads chrome.storage.local
+// fresh — never an in-memory cache the service worker might have lost on
+// its own restart — so a reopened panel always reflects whatever was last
+// genuinely persisted (a claimed batch AND its loaded items, a claimed
+// batch with a persisted payloadError, or nothing). See
+// tests/ebay-extension-claim-state-machine.test.ts's own "panel reopen"
+// and "service worker restarted" coverage for the proof.
 function initEbayDrafterState() {
   els.ebayDrafterErrorState.hidden = true;
   els.ebayDrafterPairingPanel.hidden = true;
   els.ebayDrafterEmptyState.hidden = true;
+  els.ebayDrafterLoadingBatchState.hidden = true;
+  els.ebayDrafterPayloadErrorState.hidden = true;
   els.ebayDrafterItemCard.hidden = true;
   els.ebayDrafterLoadingState.hidden = false;
   send(EBAY_PANEL_TO_WORKER.EBAY_GET_STATE)
@@ -1044,6 +1083,34 @@ function initEbayDrafterState() {
 els.ebayDrafterTab.addEventListener("click", () => selectAssistantTab("ebay-drafter"));
 
 els.ebayDrafterErrorRetry.addEventListener("click", () => initEbayDrafterState());
+
+/**
+ * CORRECTIVE PASS (claim state-machine review) — "Add a manual Refresh
+ * status control." ONE handler shared by all three Refresh entry points
+ * (the loading-batch state, the payload-error state, and the item card
+ * itself) — sends EBAY_REFRESH_BATCH, which only ever reloads an
+ * ALREADY-claimed batch's payload and never resubmits the pairing code
+ * (see service-worker.js's own refreshEbayBatch comment), so it is always
+ * safe to click any number of times.
+ */
+async function refreshEbayBatchStatus(button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Refreshing…";
+  try {
+    const result = await send(EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH);
+    if (result.state) renderEbayDrafterState(result.state);
+  } catch (error) {
+    console.error("eBay Drafter: could not refresh batch status —", error);
+    showEbayDrafterError("Could not connect to the extension's background service. Try again, or reload the extension from chrome://extensions if this keeps happening.");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+els.ebayDrafterRefreshBatch.addEventListener("click", () => refreshEbayBatchStatus(els.ebayDrafterRefreshBatch));
+els.ebayDrafterPayloadErrorRetry.addEventListener("click", () => refreshEbayBatchStatus(els.ebayDrafterPayloadErrorRetry));
+els.ebayDrafterItemRefresh.addEventListener("click", () => refreshEbayBatchStatus(els.ebayDrafterItemRefresh));
 
 // CORRECTIVE PASS (pairing failure review) — REQUIREMENT: the pairing
 // control must always show one explicit state (entering a code /
@@ -1080,6 +1147,20 @@ els.ebayDrafterClaimButton.addEventListener("click", async () => {
       els.ebayDrafterClaimButton.textContent = isTransportOrServerFailure ? "Try again" : "Connect extension";
       return;
     }
+    // CORRECTIVE PASS (claim state-machine review) — REQUIREMENT: "Never
+    // clear the pairing form unless a valid claimed batch has been
+    // received and persisted." result.error is absent here in BOTH real
+    // outcomes: a full success (claimed + listing loaded) AND "claimed,
+    // but loading the listing itself failed" (result.payloadError set,
+    // result.state.payloadError persisted) — the claim itself is
+    // genuinely committed and single-use either way, so the code is
+    // correctly cleared in both; renderEbayDrafterState shows the exact
+    // right one of the two from result.state, never the old ambiguous
+    // "Waiting for connection". REQUIREMENT: "the freshest possible
+    // state" — result.state is now whatever claimEbayBatch's own payload
+    // fetch actually resolved to (see that function's own comment), never
+    // the stale pre-payload snapshot this pass's own regression traced
+    // to.
     els.ebayDrafterPairingCode.value = "";
     els.ebayDrafterClaimButton.textContent = "Connect extension";
     if (result.state) renderEbayDrafterState(result.state);

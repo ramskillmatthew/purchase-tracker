@@ -76,9 +76,32 @@
         <button id="ebay-drafter-claim-button" class="button-primary button-block" type="button">Connect extension</button>
       </section>
 
+      <!-- CORRECTIVE PASS (claim state-machine review) — the OLD "Waiting
+           for connection" empty state used to represent BOTH "no code
+           entered yet" and "claimed, but the listing hasn't loaded yet"
+           and "claimed, but loading it failed" — three genuinely
+           different situations, one ambiguous label. sidepanel.js no
+           longer shows this section for any of those — see the two new,
+           distinct sections just below — but it is kept in the DOM
+           (permanently hidden) rather than deleted, since sidepanel.js
+           still defensively hides it on every render, and an in-flight
+           message from a not-yet-reloaded older service worker could
+           theoretically still reference it. -->
       <section id="ebay-drafter-empty-state" class="empty-state" hidden>
         <p class="empty-title">Waiting for connection</p>
         <p class="empty-subtitle">Your eBay listing will appear here once paired.</p>
+      </section>
+
+      <section id="ebay-drafter-loading-batch-state" class="empty-state" hidden>
+        <p class="empty-title">Connected — loading your listing…</p>
+        <p class="empty-subtitle">This should only take a moment.</p>
+        <button id="ebay-drafter-refresh-batch" class="button-outline button-sm" type="button">Refresh status</button>
+      </section>
+
+      <section id="ebay-drafter-payload-error-state" class="alert-banner tone-danger" role="alert" hidden>
+        <p class="empty-title">Connected, but couldn&apos;t load your listing</p>
+        <p id="ebay-drafter-payload-error-message" class="alert-text"></p>
+        <button id="ebay-drafter-payload-error-retry" class="button-outline button-sm" type="button">Retry loading</button>
       </section>
 
       <section id="ebay-drafter-item-card" class="panel-card" hidden>
@@ -87,6 +110,11 @@
             <p class="panel-title-sm" id="ebay-drafter-item-title">—</p>
             <p id="ebay-drafter-item-status" class="panel-subtitle">Ready for eBay</p>
           </div>
+          <!-- CORRECTIVE PASS (claim state-machine review) — REQUIREMENT:
+               "Add a manual Refresh status control." Re-loads THIS
+               already-claimed batch's own status from the server — never
+               resubmits the pairing code. -->
+          <button id="ebay-drafter-item-refresh" class="button-outline button-sm" type="button" title="Reload this listing's status from the app">Refresh</button>
         </div>
         <p id="ebay-drafter-item-error" class="error-text" role="alert" hidden></p>
         <!-- CORRECTIVE PASS 6 (retry truthfulness review) — there is no

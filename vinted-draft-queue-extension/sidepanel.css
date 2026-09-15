@@ -406,6 +406,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .empty-icon-waiting { background: var(--safe-soft); color: var(--safe); box-shadow: 0 0 0 6px color-mix(in srgb, var(--safe-soft) 55%, transparent); }
 .empty-title { margin: 0 0 4px; font-size: 14.5px; font-weight: 700; }
 .empty-subtitle { margin: 0; max-width: 30ch; color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* CORRECTIVE PASS (claim state-machine review) — the "Connected —
+   loading your listing…" state's own manual Refresh button. */
+.empty-state > button { margin-top: var(--space-3); }
 
 /* ---------------------------------------------------------------------
  * Batch progress

@@ -881,9 +881,17 @@ function pairedEbayDrafterState(itemOverrides: Record<string, unknown> | null = 
 // content — loading, error, pairing form, empty state, or the item card.
 // REQUIREMENT: at least one of these must be visible at all times once the
 // view has ever rendered anything at all.
+// CORRECTIVE PASS (claim state-machine review) — "ebay-drafter-empty-state"
+// (the old, ambiguous "Waiting for connection") is kept in the DOM (see
+// sidepanel.html's own comment) but never shown by current code any
+// more — replaced by two genuinely distinct sections: the transient
+// "Connected — loading your listing…" and the honest, retryable
+// "couldn't load your listing" error.
 const EBAY_DRAFTER_CONTENT_SECTION_IDS = [
   "ebay-drafter-loading-state", "ebay-drafter-error-state",
-  "ebay-drafter-pairing-panel", "ebay-drafter-empty-state", "ebay-drafter-item-card",
+  "ebay-drafter-pairing-panel", "ebay-drafter-empty-state",
+  "ebay-drafter-loading-batch-state", "ebay-drafter-payload-error-state",
+  "ebay-drafter-item-card",
 ];
 
 function visibleEbayDrafterSections(document: Document): string[] {
@@ -902,9 +910,23 @@ describe("blank eBay Drafter panel review — the panel can never render with ze
     expect(pairingPanel.querySelector("#ebay-drafter-claim-button")).not.toBeNull();
   });
 
-  it("a paired batch with no items shows the empty state", async () => {
+  // CORRECTIVE PASS (claim state-machine review) — REQUIREMENT: "'Waiting
+  // for connection' is ambiguous and must not represent multiple
+  // states." A paired batch with no items yet (the genuinely transient
+  // gap between a successful claim and its payload arriving) now shows
+  // its OWN distinct "Connected — loading your listing…" section, never
+  // the old ambiguous empty state.
+  it("a paired batch with no items yet shows the distinct 'loading your listing' state, never the old ambiguous empty state", async () => {
     const { document } = await loadSidepanel(withVintedFallback(type => (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState(null) } : {})));
-    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-empty-state"]);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-loading-batch-state"]);
+  });
+
+  it("a paired batch with a persisted payloadError shows the distinct, retryable error state — never the ambiguous empty state, never silently discarded", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: { ...pairedEbayDrafterState(null), payloadError: "Could not load this batch." } } : {}),
+    ));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-payload-error-state"]);
+    expect((document.getElementById("ebay-drafter-payload-error-message") as HTMLElement).textContent).toBe("Could not load this batch.");
   });
 
   it("a paired batch with a real item shows the item card", async () => {
@@ -1437,5 +1459,85 @@ describe("controlled pairing test review — 'Test pairing endpoint' diagnostic"
     const parsed = JSON.parse(sentBody!);
     expect(parsed.pairingCode).not.toBe("NHM7Q9TW"); // never the real code from this review's own report
     expect(typeof parsed.pairingCode).toBe("string");
+  });
+});
+
+describe("claim state-machine review — panel reopen and malformed storage (panel-side)", () => {
+  it("REQUIREMENT (panel reopen): opening the panel fresh (initEbayDrafterState's own EBAY_GET_STATE call — no prior click in this session) against an ALREADY-claimed, already-loaded batch shows the item card immediately, reconstructed purely from what EBAY_GET_STATE returns", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: pairedEbayDrafterState() } : {}),
+    ));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+    expect((document.getElementById("ebay-drafter-item-title") as HTMLElement).textContent).toBe("On Running Cloud 5");
+  });
+
+  it("REQUIREMENT (malformed/missing stored state): a genuinely corrupted state value (null — e.g. a future GET_STATE regression that resolves the state field to null instead of a real object or undefined) is caught by renderEbayDrafterState's own error boundary and shown as a specific, visible, recoverable error — never an uncaught exception, never a blank panel", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: null } : {}),
+    ));
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-error-state"]);
+    expect((document.getElementById("ebay-drafter-error-message") as HTMLElement).textContent).not.toBe("");
+  });
+
+  it("REQUIREMENT (malformed stored state, non-crashing shape): batch.items being a non-array (e.g. a partially-written record) never crashes — but is ALSO never silently rendered as a fabricated item card; it degrades to the loading/no-item view instead", async () => {
+    const { document } = await loadSidepanel(withVintedFallback(type =>
+      (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE ? { state: { pairing: { batchToken: "t", batchId: "b1", expiresAt: "x" }, batch: { batchId: "b1", items: [] }, payloadError: null } } : {}),
+    ));
+    // An empty (not malformed, but degenerate) items array is the closest
+    // REAL shape the server can actually send — proves the "no item yet"
+    // path itself never throws and never shows stale/fabricated content.
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-loading-batch-state"]);
+  });
+
+  it("REQUIREMENT: the manual 'Refresh status' button on the loading-batch state sends EBAY_REFRESH_BATCH and renders whatever state it resolves to — never re-sends a pairing code", async () => {
+    let sentTypes: string[] = [];
+    const { document } = await loadSidepanel(type => {
+      sentTypes.push(type);
+      if (type === PANEL_TO_WORKER.GET_STATE) return { state: { pairing: null, batch: null } };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: pairedEbayDrafterState(null) };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH) return { state: pairedEbayDrafterState() };
+      return {};
+    });
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-loading-batch-state"]);
+    sentTypes = [];
+    (document.getElementById("ebay-drafter-refresh-batch") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sentTypes).toContain(EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH);
+    expect(sentTypes).not.toContain(EBAY_PANEL_TO_WORKER.EBAY_CLAIM_BATCH);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+
+  it("REQUIREMENT: the 'Retry loading' button on the payload-error state also sends EBAY_REFRESH_BATCH, never re-claims", async () => {
+    let sentTypes: string[] = [];
+    const { document } = await loadSidepanel(type => {
+      sentTypes.push(type);
+      if (type === PANEL_TO_WORKER.GET_STATE) return { state: { pairing: null, batch: null } };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_GET_STATE) return { state: { ...pairedEbayDrafterState(null), payloadError: "Could not load this batch." } };
+      if (type === EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH) return { state: pairedEbayDrafterState() };
+      return {};
+    });
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-payload-error-state"]);
+    sentTypes = [];
+    (document.getElementById("ebay-drafter-payload-error-retry") as HTMLButtonElement).click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sentTypes).toEqual([EBAY_PANEL_TO_WORKER.EBAY_REFRESH_BATCH]);
+    expect(visibleEbayDrafterSections(document)).toEqual(["ebay-drafter-item-card"]);
+  });
+});
+
+describe("claim state-machine review — app-side prompt refresh (delayed polling, ListingsReviewWorkspace.tsx)", () => {
+  const workspaceSource = readFileSync("components/listings-review/ListingsReviewWorkspace.tsx", "utf8");
+
+  it("REQUIREMENT: Listings Review polls promptly (self-rescheduling, never setInterval) ONLY while a batch is genuinely 'pending_claim', so a claim happening in the extension is reflected without waiting for a full manual reload", () => {
+    const idx = workspaceSource.indexOf('if (!ebayExtensionBatches.some(batch => batch.status === "pending_claim")) return;\n    let cancelled = false;\n    let timeoutId: number | undefined;\n    function poll()');
+    expect(idx).toBeGreaterThan(-1);
+    const fn = workspaceSource.slice(idx, idx + 500);
+    expect(fn).toContain("fetchEbayExtensionBatches(ebayExtensionShowDismissed)");
+    expect(fn).toContain("window.setTimeout(poll, 4000)");
+  });
+
+  it("REQUIREMENT: a manual 'Refresh status' control exists, independent of the automatic poll", () => {
+    expect(workspaceSource).toContain('"Refresh status"');
+    expect(workspaceSource).toContain("onClick={() => fetchEbayExtensionBatches(ebayExtensionShowDismissed)}");
   });
 });
