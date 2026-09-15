@@ -1027,6 +1027,20 @@ end $$;
 -- dismissed row is still returned here whenever p_include_dismissed is
 -- true, in full, with its own is_active/is_expired_unreconciled computed
 -- exactly the same way as any other row.
+--
+-- OVERLOAD HYGIENE (caught in review) — `create or replace function`
+-- matches on the FULL parameter type LIST, not just the function name: a
+-- function taking (uuid) and one taking (uuid, boolean) are two
+-- DIFFERENT signatures to Postgres, so the statement below creates a
+-- SECOND, separate overload rather than replacing the original
+-- single-argument version — the old (uuid)-only function would otherwise
+-- stay installed and independently callable (with its OLD body, lacking
+-- the dismissed-batch filter) forever. The DROP below removes it
+-- explicitly, so exactly one version of this function ever exists. Must
+-- run BEFORE the create or replace that follows it (drop first, so there
+-- is never a moment with two live overloads to disambiguate).
+drop function if exists public.listing_studio_list_ebay_extension_batches(uuid);
+
 create or replace function public.listing_studio_list_ebay_extension_batches(
   p_owner_id uuid,
   p_include_dismissed boolean default false

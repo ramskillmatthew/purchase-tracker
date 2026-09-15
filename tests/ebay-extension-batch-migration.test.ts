@@ -385,6 +385,22 @@ describe("controlled pairing test review — Phase 4 (dismiss terminal batches)"
     expect(listBody).toContain("and (p_include_dismissed or b.box_dismissed_at is null)");
   });
 
+  // CORRECTIVE PASS (controlled pairing test review, follow-up — overload
+  // hygiene caught in review) — `create or replace function` matches on
+  // the full parameter TYPE LIST, so a function taking (uuid) and one
+  // taking (uuid, boolean) are different signatures: the create-or-
+  // replace statement above would otherwise leave the OLD (uuid)-only
+  // overload installed and independently callable, with its OLD body
+  // (lacking the dismissed-batch filter), forever.
+  it("REQUIREMENT: the old single-argument overload is explicitly dropped BEFORE the new two-argument version is created — never two live overloads to disambiguate, never a stale callable version", () => {
+    const dropIdx = sql.indexOf("drop function if exists public.listing_studio_list_ebay_extension_batches(uuid);");
+    expect(dropIdx).toBeGreaterThan(-1);
+    expect(dropIdx).toBeLessThan(listStart);
+    // Anchored specifically on the single-argument signature — never
+    // accidentally drops the new two-argument one it precedes.
+    expect(sql.slice(dropIdx, dropIdx + 90)).not.toContain("boolean");
+  });
+
   it("REQUIREMENT: listing_studio_dismiss_ebay_extension_batch exists, is service-role only, and is a hard no-op for anything not already completed/cancelled/expired — dismissal can never substitute for Cancel on a genuinely active batch", () => {
     expect(dismissStart).toBeGreaterThan(-1);
     expect(dismissBody).toContain("v_status not in ('completed', 'cancelled', 'expired')");
