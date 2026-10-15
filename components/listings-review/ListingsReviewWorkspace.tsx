@@ -2675,6 +2675,16 @@ export default function ListingsReviewWorkspace() {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not publish the selected eBay listings.");
+      const failedResults = (body.results ?? []) as Array<{ ok?: boolean; error?: string }>;
+      const failureMessages = failedResults
+        .filter(result => result.ok === false)
+        .map(result => result.error?.trim())
+        .filter((message): message is string => Boolean(message));
+      if (body.failedCount) {
+        setEbayLiveError(failureMessages.length
+          ? `eBay rejected the listing: ${[...new Set(failureMessages)].join(" · ")}`
+          : "eBay rejected the listing but did not provide a reason.");
+      }
       setEbayLiveResult(`${body.publishedCount} listed live on eBay${body.failedCount ? `; ${body.failedCount} failed` : ""}.`);
       if (!body.failedCount) { setEbayLivePreview(null); setBulkSelectedIds(new Set()); }
       await loadListings();
