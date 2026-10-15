@@ -25,11 +25,16 @@ type EbayListingPolicies = {
 function resolveEbayListingPolicies(
   draft: NonNullable<Awaited<ReturnType<typeof getMarketplaceDraft>>>,
   connection: NonNullable<Awaited<ReturnType<typeof getEbayConnection>>>,
+  policies: Awaited<ReturnType<typeof listEbayPolicies>>,
 ): EbayListingPolicies {
+  const usablePolicy = (type: "FULFILLMENT" | "RETURN" | "PAYMENT", id: string | null) =>
+    Boolean(id && policies.some(policy => policy.policyType === type && policy.ebayPolicyId === id && policy.available));
+  const choosePolicy = (type: "FULFILLMENT" | "RETURN" | "PAYMENT", override: string | null, fallback: string | null) =>
+    usablePolicy(type, override) ? override : fallback;
   return {
-    fulfillmentPolicyId: draft.ebayFulfillmentPolicyId ?? connection.defaultFulfillmentPolicyId,
-    returnPolicyId: draft.ebayReturnPolicyId ?? connection.defaultReturnPolicyId,
-    paymentPolicyId: draft.ebayPaymentPolicyId ?? connection.defaultPaymentPolicyId,
+    fulfillmentPolicyId: choosePolicy("FULFILLMENT", draft.ebayFulfillmentPolicyId, connection.defaultFulfillmentPolicyId),
+    returnPolicyId: choosePolicy("RETURN", draft.ebayReturnPolicyId, connection.defaultReturnPolicyId),
+    paymentPolicyId: choosePolicy("PAYMENT", draft.ebayPaymentPolicyId, connection.defaultPaymentPolicyId),
     merchantLocationKey: draft.ebayMerchantLocationKey ?? connection.defaultInventoryLocationKey,
   };
 }
@@ -50,7 +55,7 @@ export async function previewEbayLiveListings(ownerId: string, productDraftIds: 
 
   return Promise.all(ids.map(async productDraftId => {
     const draft = await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
-    const listingPolicies = draft && connection ? resolveEbayListingPolicies(draft, connection) : null;
+    const listingPolicies = draft && connection ? resolveEbayListingPolicies(draft, connection, policies) : null;
     const sku = skuById.get(productDraftId) ?? null;
     const photoCount = photos.get(productDraftId) ?? 0;
     const reasons: string[] = [];
@@ -96,7 +101,8 @@ export async function publishOneEbayLiveListing(ownerId: string, productDraftId:
   const draft = await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
   if (!draft) throw new Error("The eBay preparation no longer exists.");
   const { accessToken, connection } = await getValidEbayAccessToken(ownerId);
-  const listingPolicies = resolveEbayListingPolicies(draft, connection);
+  const policies = await listEbayPolicies(connection.id);
+  const listingPolicies = resolveEbayListingPolicies(draft, connection, policies);
   const existing = await getOffersForSku(accessToken, preview.sku);
   const reads = (await Promise.all(existing.map(o => getOffer(accessToken, o.offerId)))).filter(Boolean);
   const live = reads.find(o => o!.status === "PUBLISHED" && o!.listingId);

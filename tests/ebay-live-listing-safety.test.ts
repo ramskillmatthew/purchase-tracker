@@ -27,10 +27,16 @@ describe("eBay live listing safety boundary", () => {
 
   it("uses saved account defaults when a listing has no per-item policy overrides", () => {
     const service = read("lib/listing-studio/ebay-live-listings.ts");
-    expect(service).toContain("draft.ebayFulfillmentPolicyId ?? connection.defaultFulfillmentPolicyId");
-    expect(service).toContain("draft.ebayReturnPolicyId ?? connection.defaultReturnPolicyId");
-    expect(service).toContain("draft.ebayPaymentPolicyId ?? connection.defaultPaymentPolicyId");
+    expect(service).toContain('choosePolicy("FULFILLMENT", draft.ebayFulfillmentPolicyId, connection.defaultFulfillmentPolicyId)');
+    expect(service).toContain('choosePolicy("RETURN", draft.ebayReturnPolicyId, connection.defaultReturnPolicyId)');
+    expect(service).toContain('choosePolicy("PAYMENT", draft.ebayPaymentPolicyId, connection.defaultPaymentPolicyId)');
     expect(service).toContain("draft.ebayMerchantLocationKey ?? connection.defaultInventoryLocationKey");
     expect(service).toContain("offerPayload(draft, preview.sku, listingPolicies)");
+  });
+
+  it("falls back to saved defaults when an older listing contains unavailable policy overrides", () => {
+    const service = read("lib/listing-studio/ebay-live-listings.ts");
+    expect(service).toContain("usablePolicy(type, override) ? override : fallback");
+    expect(service).toContain("resolveEbayListingPolicies(draft, connection, policies)");
   });
 });
