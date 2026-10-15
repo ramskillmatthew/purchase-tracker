@@ -52,4 +52,12 @@ describe("eBay live listing safety boundary", () => {
     expect(photoRoute).toContain("LISTING_STUDIO_BUCKET");
     expect(photoRoute).not.toContain('const BUCKET = "listing-studio"');
   });
+
+  it("uses eBay category metadata to choose a supported condition", () => {
+    const service = read("lib/listing-studio/ebay-live-listings.ts");
+    expect(service).toContain("getEbayCategoryConditions(accessToken, draft.categoryId!)");
+    expect(service).toContain("resolveCategoryCondition(draft.conditionValue, categoryConditions)");
+    expect(service).toContain('item.conditionId === "3000"');
+    expect(service).toContain('/^(used|pre[- ]?owned)$/i');
+  });
 });

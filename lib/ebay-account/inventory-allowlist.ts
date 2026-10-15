@@ -39,6 +39,7 @@ const ALLOWED_INVENTORY_OPERATIONS: ReadonlySet<string> = new Set([
   "getOffer",
   "getOffersForSku",
   "getInventoryLocations",
+  "getItemConditionPolicies",
   // Corrective pass (failed-draft diagnosis/retry) — read-only GET of one
   // inventory item by its exact SKU, the official Inventory API operation
   // for "does this inventory item exist on eBay's side". Never a fallback

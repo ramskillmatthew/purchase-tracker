@@ -3,8 +3,8 @@ import { supabaseRequestAll } from "@/lib/supabase";
 import { getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
 import { getEbayConnection, listEbayPolicies, getValidEbayAccessToken } from "@/lib/ebay-account/client";
 import { buildInventoryItemPayload, preparePhotos } from "@/lib/listing-studio/ebay-draft-batches";
-import { createOffer, createOrReplaceInventoryItem, getOffer, getOffersForSku, publishOffer, updateOffer, type EbayOfferPayload } from "@/lib/ebay-account/inventory-client";
-import { toEbayInventoryCondition } from "@/lib/listing-studio/ebay-condition";
+import { createOffer, createOrReplaceInventoryItem, getEbayCategoryConditions, getOffer, getOffersForSku, publishOffer, updateOffer, type EbayCategoryCondition, type EbayOfferPayload } from "@/lib/ebay-account/inventory-client";
+import { toEbayInventoryCondition, type EbayInventoryConditionEnum } from "@/lib/listing-studio/ebay-condition";
 
 export const EBAY_LIVE_CONFIRMATION = "LIST LIVE ON EBAY";
 export const MAX_EBAY_LIVE_LISTINGS = 30;
@@ -95,6 +95,29 @@ function offerPayload(
   };
 }
 
+const CONDITION_ID_TO_ENUM: Readonly<Record<string, EbayInventoryConditionEnum>> = {
+  "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS", "2000": "CERTIFIED_REFURBISHED",
+  "2010": "EXCELLENT_REFURBISHED", "2020": "VERY_GOOD_REFURBISHED", "2030": "GOOD_REFURBISHED",
+  "2500": "SELLER_REFURBISHED", "2750": "LIKE_NEW", "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
+  "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE", "7000": "FOR_PARTS_OR_NOT_WORKING",
+};
+
+export function resolveCategoryCondition(conditionValue: string | null, supported: EbayCategoryCondition[]): EbayInventoryConditionEnum | null {
+  const translated = toEbayInventoryCondition(conditionValue);
+  if (!translated.ok) return null;
+  const supportedEnums = new Set(supported.map(item => CONDITION_ID_TO_ENUM[item.conditionId]).filter(Boolean));
+  if (supportedEnums.has(translated.enumValue)) return translated.enumValue;
+  // Clothing/footwear categories commonly expose condition id 3000 as a
+  // generic "Pre-owned"/"Used" bucket rather than a quality grade. It is
+  // safe to use only when eBay itself describes it generically; never
+  // reinterpret an explicit "Excellent" grade as equivalent.
+  if (translated.enumValue === "USED_VERY_GOOD") {
+    const genericUsed = supported.find(item => item.conditionId === "3000" && /^(used|pre[- ]?owned)$/i.test(item.description.trim()));
+    if (genericUsed) return "USED_EXCELLENT";
+  }
+  return null;
+}
+
 export async function publishOneEbayLiveListing(ownerId: string, productDraftId: string): Promise<{ listingId: string; offerId: string; alreadyLive: boolean }> {
   const [preview] = await previewEbayLiveListings(ownerId, [productDraftId]);
   if (!preview?.eligible || !preview.marketplaceDraftId || !preview.sku) throw new Error(preview?.reasons.join("; ") || "This listing is not ready for eBay.");
@@ -109,9 +132,14 @@ export async function publishOneEbayLiveListing(ownerId: string, productDraftId:
   if (live?.listingId) return { listingId: live.listingId, offerId: live.offerId, alreadyLive: true };
   if (reads.length > 1) throw new Error("More than one unpublished eBay offer exists for this SKU. Resolve the duplicates before publishing.");
 
-  const { imageUrls } = await preparePhotos(ownerId, productDraftId);
+  const [{ imageUrls }, categoryConditions] = await Promise.all([
+    preparePhotos(ownerId, productDraftId),
+    getEbayCategoryConditions(accessToken, draft.categoryId!),
+  ]);
   if (!imageUrls.length) throw new Error("No photo could be verified as reachable by eBay.");
-  const inventoryPayload = buildInventoryItemPayload(draft, imageUrls);
+  const categoryCondition = resolveCategoryCondition(draft.conditionValue, categoryConditions);
+  if (!categoryCondition) throw new Error("This condition is not supported by the selected eBay category.");
+  const inventoryPayload = buildInventoryItemPayload(draft, imageUrls, categoryCondition);
   if (!inventoryPayload) throw new Error("The eBay condition is missing or unsupported.");
   await createOrReplaceInventoryItem(accessToken, preview.sku, inventoryPayload);
   const payload = offerPayload(draft, preview.sku, listingPolicies);

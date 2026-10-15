@@ -375,11 +375,12 @@ export function buildAspectsPayload(dynamicData: MarketplaceDynamicData): Record
 export function buildInventoryItemPayload(
   draft: Pick<MarketplaceDraft, "conditionValue" | "title" | "description" | "dynamicData" | "quantity">,
   imageUrls: string[],
+  conditionOverride?: EbayInventoryConditionEnum,
 ): { condition: EbayInventoryConditionEnum; product: EbayInventoryItemPayload["product"]; availability: EbayInventoryItemPayload["availability"] } | null {
   const condition = toEbayInventoryCondition(draft.conditionValue);
-  if (!condition.ok) return null;
+  if (!condition.ok && !conditionOverride) return null;
   return {
-    condition: condition.enumValue,
+    condition: conditionOverride ?? (condition.ok ? condition.enumValue : undefined)!,
     product: { title: draft.title ?? "", description: draft.description ?? "", aspects: buildAspectsPayload(draft.dynamicData), imageUrls },
     availability: { shipToLocationAvailability: { quantity: draft.quantity ?? 1 } },
   };

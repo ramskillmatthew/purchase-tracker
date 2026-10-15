@@ -78,6 +78,20 @@ export type EbayInventoryLocation = {
   addressSummary: string | null;
 };
 
+export type EbayCategoryCondition = { conditionId: string; description: string };
+
+export async function getEbayCategoryConditions(accessToken: string, categoryId: string): Promise<EbayCategoryCondition[]> {
+  assertAllowedInventoryOperation("getItemConditionPolicies");
+  if (!/^\d{1,12}$/.test(categoryId)) throw new Error("Invalid eBay category id.");
+  const filter = encodeURIComponent(`categoryIds:{${categoryId}}`);
+  const response = await inventoryRequest(accessToken, "GET", `/sell/metadata/v1/marketplace/EBAY_GB/get_item_condition_policies?filter=${filter}`);
+  if (!response.ok) throw await inventoryError(response, "eBay category conditions could not be read.");
+  const body = await response.json() as { itemConditionPolicies?: Array<{ itemConditions?: Array<{ conditionId?: string | number; conditionDescription?: string }> }> };
+  return (body.itemConditionPolicies?.[0]?.itemConditions ?? [])
+    .filter(item => item.conditionId != null)
+    .map(item => ({ conditionId: String(item.conditionId), description: item.conditionDescription || "" }));
+}
+
 export async function createEbayInventoryLocation(accessToken: string, merchantLocationKey: string, input: { name: string; postalCode: string }): Promise<void> {
   assertAllowedInventoryOperation("createInventoryLocation");
   if (!/^[A-Za-z0-9_-]{1,36}$/.test(merchantLocationKey)) throw new Error("Invalid eBay inventory location key.");

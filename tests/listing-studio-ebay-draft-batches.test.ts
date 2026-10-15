@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}));
 const {
   getMarketplaceDraft, patchMarketplaceDraft,
   getEbayConnection, listEbayPolicies, getValidEbayAccessToken,
-  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, createSignedDownloadUrl,
+  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, createSignedDownloadUrl, createEbayPhotoProxyUrl,
 } = vi.hoisted(() => ({
   getMarketplaceDraft: vi.fn(async (_ownerId: string, _productDraftId: string, _marketplace: "EBAY_UK") => null as unknown),
   patchMarketplaceDraft: vi.fn(async (_ownerId: string, _id: string, _patch: Record<string, unknown>) => {}),
@@ -18,6 +18,7 @@ const {
   getOffer: vi.fn(async (_accessToken: string, _offerId: string) => ({ offerId: "offer-1", status: "UNPUBLISHED", sku: "SKU-1" }) as unknown),
   getInventoryItem: vi.fn(async (_accessToken: string, _sku: string) => null as unknown),
   createSignedDownloadUrl: vi.fn(async (_bucket: string, _path: string, _expiresInSeconds: number) => "https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc"),
+  createEbayPhotoProxyUrl: vi.fn((_imageId: string, _expiresAt: number) => "https://project.supabase.co/api/ebay/photo/img-1?exp=1&sig=abc"),
 }));
 vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForProducts: vi.fn(async () => new Map()) }));
 vi.mock("@/lib/ebay-account/client", () => ({ getEbayConnection, listEbayPolicies, getValidEbayAccessToken }));
@@ -26,6 +27,7 @@ vi.mock("@/lib/listing-studio/storage-rest", () => ({
   createSignedDownloadUrl,
   StorageBucketMissingError: class StorageBucketMissingError extends Error {},
 }));
+vi.mock("@/lib/listing-studio/ebay-photo-urls", () => ({ createEbayPhotoProxyUrl }));
 
 // ---------------------------------------------------------------------
 // A small, realistic IN-MEMORY simulation of the two tables this file's
@@ -170,7 +172,7 @@ beforeEach(() => {
   vi.resetModules();
   getMarketplaceDraft.mockReset(); patchMarketplaceDraft.mockReset();
   getEbayConnection.mockReset(); listEbayPolicies.mockReset(); getValidEbayAccessToken.mockReset();
-  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); getInventoryItem.mockReset(); createSignedDownloadUrl.mockReset();
+  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); getInventoryItem.mockReset(); createSignedDownloadUrl.mockReset(); createEbayPhotoProxyUrl.mockReset();
 
   // Stateful — a "creating_draft" step's own patchMarketplaceDraft(ebay_offer_id: ...)
   // call must be visible to the VERY NEXT tick's getMarketplaceDraft read
@@ -197,6 +199,7 @@ beforeEach(() => {
   getOffer.mockResolvedValue({ offerId: "offer-1", status: "UNPUBLISHED", sku: "SKU-1" });
   getInventoryItem.mockResolvedValue(null);
   createSignedDownloadUrl.mockResolvedValue("https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc");
+  createEbayPhotoProxyUrl.mockReturnValue("https://project.supabase.co/api/ebay/photo/img-1?exp=1&sig=abc");
   global.fetch = vi.fn(async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
 });
 
@@ -440,7 +443,8 @@ describe("Photo URL durability and safety (corrective pass)", () => {
     const { runEbayDraftBatchProcessTick } = await loadModule(db);
     await runEbayDraftBatchProcessTick("owner-1", "batch-1");
     const [, , payload] = createOrReplaceInventoryItem.mock.calls[0];
-    expect((payload as { product: { imageUrls: string[] } }).product.imageUrls[0]).toContain("img-1.jpg");
+    expect((payload as { product: { imageUrls: string[] } }).product.imageUrls[0]).toContain("/img-1?");
+    expect(createEbayPhotoProxyUrl.mock.calls[0]?.[0]).toBe("img-1");
   });
 
   it("never sends a local filesystem path or blob: URL to eBay — every imageUrls entry is a real https:// Supabase Storage URL", async () => {
