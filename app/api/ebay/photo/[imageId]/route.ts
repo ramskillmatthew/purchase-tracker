@@ -2,11 +2,10 @@ import { NextResponse } from "next/server";
 import { supabaseRequestAll } from "@/lib/supabase";
 import { createSignedDownloadUrl } from "@/lib/listing-studio/storage-rest";
 import { verifyEbayPhotoProxySignature } from "@/lib/listing-studio/ebay-photo-urls";
+import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const BUCKET = "listing-studio";
 
 export async function GET(request: Request, context: { params: Promise<{ imageId: string }> }) {
   const { imageId } = await context.params;
@@ -22,7 +21,7 @@ export async function GET(request: Request, context: { params: Promise<{ imageId
   );
   if (!rows[0]) return NextResponse.json({ error: "Photo not found." }, { status: 404 });
 
-  const signedUrl = await createSignedDownloadUrl(BUCKET, rows[0].storage_path, 60);
+  const signedUrl = await createSignedDownloadUrl(LISTING_STUDIO_BUCKET, rows[0].storage_path, 60);
   const upstream = await fetch(signedUrl, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
   if (!upstream.ok || !upstream.body) return NextResponse.json({ error: "Photo could not be loaded." }, { status: 502 });
   const headers: Record<string, string> = {

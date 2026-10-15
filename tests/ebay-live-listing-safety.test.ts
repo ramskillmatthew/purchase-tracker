@@ -49,5 +49,7 @@ describe("eBay live listing safety boundary", () => {
     expect(photoUrls).toContain("timingSafeEqual");
     expect(photoRoute).toContain("verifyEbayPhotoProxySignature");
     expect(photoRoute).toContain("createSignedDownloadUrl");
+    expect(photoRoute).toContain("LISTING_STUDIO_BUCKET");
+    expect(photoRoute).not.toContain('const BUCKET = "listing-studio"');
   });
 });
