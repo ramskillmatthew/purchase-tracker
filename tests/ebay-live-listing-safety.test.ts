@@ -25,6 +25,27 @@ describe("eBay live listing safety boundary", () => {
     expect(service).toContain("reads.length > 1");
   });
 
+  it("blocks an already-confirmed live listing from being submitted twice", () => {
+    const service = read("lib/listing-studio/ebay-live-listings.ts");
+    expect(service).toContain("liveListingIdFromDraft");
+    expect(service).toContain("Already live on eBay as listing");
+    expect(service).toContain("eligible: reasons.length === 0");
+  });
+
+  it("keeps the success confirmation open and links to the live eBay item", () => {
+    const workspace = read("components/listings-review/ListingsReviewWorkspace.tsx");
+    expect(workspace).toContain("setEbayLivePublishResults(publishResults)");
+    expect(workspace).toContain("Open eBay listing {result.listingId}");
+    expect(workspace).toContain("finishedSuccessfully");
+    expect(workspace).not.toContain("if (!body.failedCount) { setEbayLivePreview(null)");
+  });
+
+  it("retires eBay extension and Seller Hub fallback controls from the visible workflow", () => {
+    const workspace = read("components/listings-review/ListingsReviewWorkspace.tsx");
+    expect(workspace).toContain("const showLegacyEbayTools = false");
+    expect(workspace).not.toContain("useEffect(() => { fetchEbayExtensionBatches(ebayExtensionShowDismissed);");
+  });
+
   it("uses saved account defaults when a listing has no per-item policy overrides", () => {
     const service = read("lib/listing-studio/ebay-live-listings.ts");
     expect(service).toContain('choosePolicy("FULFILLMENT", draft.ebayFulfillmentPolicyId, connection.defaultFulfillmentPolicyId)');

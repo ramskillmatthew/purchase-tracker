@@ -218,12 +218,16 @@ export async function GET() {
       : [];
     const feedBatchDisplayNumberById = new Map(feedBatchDisplayNumberRows.map(b => [b.id, b.display_number]));
 
-    const ebayDraftsWithStatus = ebayDrafts.map(d => ({
-      ...d,
-      ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null,
-      ebayFeedStatus: ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null,
-      feedBatchBlockingState: computeEbayFeedBatchBlockingState(ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null, feedBatchDisplayNumberById),
-    }));
+    const ebayDraftsWithStatus = ebayDrafts.map(d => {
+      const liveValue = d.dynamicData.__ebayLiveListing?.value;
+      return {
+        ...d,
+        ebayLiveListingId: typeof liveValue === "string" && /^\d+$/.test(liveValue) ? liveValue : null,
+        ebayStatus: ebayStatusByMarketplaceDraftId.get(d.id) ?? null,
+        ebayFeedStatus: ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null,
+        feedBatchBlockingState: computeEbayFeedBatchBlockingState(ebayFeedStatusByMarketplaceDraftId.get(d.id) ?? null, feedBatchDisplayNumberById),
+      };
+    });
 
     const draftsWithCategoryValidity = drafts.map(draft => {
       const itemFamily = deriveDraftItemFamily(draft.product_type);

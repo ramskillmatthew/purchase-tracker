@@ -44,7 +44,8 @@ import { evaluateEbayFeedDraftEligibility, type EbayFeedDraftEligibilityResult }
 import { ebayExtensionBatchStatusLabel, ebayExtensionBatchStatusTone } from "@/lib/listing-studio/ebay-extension-batch-schema";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
-type EbayLivePreviewItem = { productDraftId: string; marketplaceDraftId: string | null; sku: string | null; title: string | null; pricePence: number | null; categoryId: string | null; condition: string | null; photoCount: number; eligible: boolean; reasons: string[] };
+type EbayLivePreviewItem = { productDraftId: string; marketplaceDraftId: string | null; sku: string | null; title: string | null; pricePence: number | null; categoryId: string | null; condition: string | null; photoCount: number; eligible: boolean; reasons: string[]; liveListingId: string | null };
+type EbayLivePublishResult = { productDraftId: string; ok: boolean; listingId?: string; offerId?: string; alreadyLive?: boolean; error?: string };
 
 // PHASE 4 — mirrors app/api/listing-studio/listings-review/route.ts's own
 // response shape for each product's eBay marketplace draft. `ebayStatus`
@@ -58,6 +59,7 @@ type EbayMarketplaceDraftRow = {
   readiness: { ready: boolean };
   ebayFulfillmentPolicyId: string | null; ebayReturnPolicyId: string | null; ebayPaymentPolicyId: string | null;
   ebayMerchantLocationKey: string | null; ebayOfferId: string | null;
+  ebayLiveListingId: string | null;
   ebayFeedDraftCreatedAt: string | null;
   ebayStatus: {
     marketplace_draft_id: string; batch_id: string; batch_status: string; item_status: string; queue_position: number;
@@ -265,6 +267,7 @@ type ListingRow = ListingDetails & ReviewableListing & {
   ebayErrorMessage: string | null;
   ebaySellingPricePence: number | null;
   ebayProfitPence: number | null;
+  ebayLiveListingId: string | null;
   // CORRECTIVE PASS (third real-submission audit) — mirrors row.ebay's own
   // feedBatchState, flattened to the same top level as the other ebay*
   // fields above so ListingsTable's own workflow column (which reads only
@@ -459,6 +462,7 @@ export default function ListingsReviewWorkspace() {
   const [ebayLivePublishing, setEbayLivePublishing] = useState(false);
   const [ebayLiveError, setEbayLiveError] = useState("");
   const [ebayLiveResult, setEbayLiveResult] = useState("");
+  const [ebayLivePublishResults, setEbayLivePublishResults] = useState<EbayLivePublishResult[]>([]);
   const [assigningCategoryId, setAssigningCategoryId] = useState<string | null>(null);
   const [reassessingAudienceId, setReassessingAudienceId] = useState<string | null>(null);
 
@@ -740,7 +744,9 @@ export default function ListingsReviewWorkspace() {
     } catch { /* best-effort — the page still works, just without the active-batch panel */ }
     finally { setEbayExtensionBatchesLoading(false); }
   }, []);
-  useEffect(() => { fetchEbayExtensionBatches(ebayExtensionShowDismissed); }, [fetchEbayExtensionBatches, ebayExtensionShowDismissed]);
+  // The eBay extension workflow is retired. Historical handlers remain
+  // temporarily for old audit records, but Listings Review no longer
+  // fetches, polls, or presents extension batches.
 
   /**
    * CORRECTIVE PASS (controlled pairing test review, Phase 4) — clears a
@@ -959,6 +965,7 @@ export default function ListingsReviewWorkspace() {
       ebayContentReady: ebayDraft?.readiness.ready ?? false,
       ebaySellingPricePence: ebayDraft?.pricePence ?? null,
       ebayProfitPence,
+      ebayLiveListingId: ebayDraft?.ebayLiveListingId ?? null,
       ebay: ebayDraft ? {
         marketplaceDraftId: ebayDraft.id,
         categoryId: ebayDraft.categoryId,
@@ -975,6 +982,7 @@ export default function ListingsReviewWorkspace() {
         // PHASE 3 — the RETIRED Inventory API pipeline's own offer id, kept
         // only as a historical fact (see EbayTabData's own comment).
         legacyOfferId: ebayDraft.ebayOfferId,
+        liveListingId: ebayDraft.ebayLiveListingId,
         feedDraftCreatedAt: ebayDraft.ebayFeedDraftCreatedAt,
         // PHASE 4 — workflowStatus/queuePosition/errorMessage now come from
         // ebayFeedStatus (the ACTIVE Sell Feed API pipeline), not the
@@ -1097,12 +1105,7 @@ export default function ListingsReviewWorkspace() {
     // processing." Computed here (not in ListingsTable) so it can reuse
     // the SAME shared label/tone functions the status panel above the
     // table already uses — never a second, independently-drifting answer.
-    const ebayExtensionActiveBatch = row.ebay ? ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId) ?? null : null;
-    const ebayExtensionActiveState = ebayExtensionActiveBatch ? {
-      label: ebayExtensionBatchStatusLabel(ebayExtensionActiveBatch.status, ebayExtensionActiveBatch.item.status),
-      tone: ebayExtensionBatchStatusTone(ebayExtensionActiveBatch.status, ebayExtensionActiveBatch.item.status),
-      pulse: !["waiting_for_review", "failed", "cancelled"].includes(ebayExtensionActiveBatch.item.status),
-    } : null;
+    const ebayExtensionActiveState = null;
 
     return {
       ...row, workflowStatus, queuePosition, currentStep, detail, vintedDraftId, errorMessage,
@@ -1110,7 +1113,7 @@ export default function ListingsReviewWorkspace() {
       ebayFeedBatchState: row.ebay?.feedBatchState ?? { kind: "none" as const },
       ebayExtensionActiveState,
     };
-  }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId, ebayExtensionActiveByMarketplaceDraftId]);
+  }), [baseListingRows, liveItemByDraftId, ebayLiveItemByMarketplaceDraftId]);
 
   const listingsById = useMemo(() => new Map(listingRows.map(row => [row.id, row])), [listingRows]);
 
@@ -2650,7 +2653,7 @@ export default function ListingsReviewWorkspace() {
   }
 
   async function handleOpenEbayLivePreview() {
-    setEbayLiveLoading(true); setEbayLiveError(""); setEbayLiveResult("");
+    setEbayLiveLoading(true); setEbayLiveError(""); setEbayLiveResult(""); setEbayLivePublishResults([]);
     try {
       const response = await fetch("/api/listing-studio/ebay-live-listings", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -2675,7 +2678,9 @@ export default function ListingsReviewWorkspace() {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not publish the selected eBay listings.");
-      const failedResults = (body.results ?? []) as Array<{ ok?: boolean; error?: string }>;
+      const publishResults = (body.results ?? []) as EbayLivePublishResult[];
+      setEbayLivePublishResults(publishResults);
+      const failedResults = publishResults;
       const failureMessages = failedResults
         .filter(result => result.ok === false)
         .map(result => result.error?.trim())
@@ -2686,7 +2691,7 @@ export default function ListingsReviewWorkspace() {
           : "eBay rejected the listing but did not provide a reason.");
       }
       setEbayLiveResult(`${body.publishedCount} listed live on eBay${body.failedCount ? `; ${body.failedCount} failed` : ""}.`);
-      if (!body.failedCount) { setEbayLivePreview(null); setBulkSelectedIds(new Set()); }
+      if (!body.failedCount) setBulkSelectedIds(new Set());
       await loadListings();
     } catch (error) { setEbayLiveError(error instanceof Error ? error.message : "Could not publish the selected eBay listings."); }
     finally { setEbayLivePublishing(false); }
@@ -2694,6 +2699,7 @@ export default function ListingsReviewWorkspace() {
 
   const hasAnyData = drafts.length > 0;
   const bulkCount = bulkSelectedIds.size;
+  const showLegacyEbayTools = false;
 
   // Multi-batch support — the batch box grid's view models, sorted by
   // display number so the two-column grid always reads Batch 1/Batch 2,
@@ -3126,7 +3132,7 @@ export default function ListingsReviewWorkspace() {
         blocking a send. Deliberately separate from, and positioned above,
         the "Legacy Seller Hub Feed fallback" section further down — the
         two extension systems are never the same workflow. */}
-    {(ebayExtensionBatches.length > 0 || ebayExtensionShowDismissed) && (
+    {showLegacyEbayTools && (ebayExtensionBatches.length > 0 || ebayExtensionShowDismissed) && (
       <div className="lr-ebay-extension-active-panel">
         <div className="lr-ebay-extension-active-panel-header">
           <p className="lr-ebay-extension-active-panel-title">eBay Extension batches</p>
@@ -3348,7 +3354,7 @@ export default function ListingsReviewWorkspace() {
                 by default with zero extra state, never competing for
                 visual priority with the eBay Extension panel/actions
                 above it. */}
-            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && (
+            {showLegacyEbayTools && marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && ebayBatchingAvailable && (
               <details className="lr-feed-fallback-details">
                 {/* REQUIREMENT (Phase 7): the Feed workflow is clearly
                     labelled as a secondary/legacy area, never the primary
@@ -3394,7 +3400,7 @@ export default function ListingsReviewWorkspace() {
             after this point (opening Seller Hub, filling the form,
             uploading photos) happens in the extension's own side panel —
             this app never drives that itself. */}
-        {ebayExtensionPairingCode && (
+        {showLegacyEbayTools && ebayExtensionPairingCode && (
           <div className="lr-ebay-status-panel" role="status">
             <p className="lr-ebay-status-panel-title">{ebayExtensionIsRetry ? "Retrying with the eBay extension" : "Ready for the eBay extension"}</p>
             {/* CORRECTIVE PASS 6 (retry truthfulness review) — honest,
@@ -3446,7 +3452,7 @@ export default function ListingsReviewWorkspace() {
             )}
           </div>
         )}
-        {sendToEbayExtensionError && (
+        {showLegacyEbayTools && sendToEbayExtensionError && (
           <div className="lr-ebay-status-panel" role="status">
             <p className="lr-ebay-status-panel-title">Could not send to the eBay extension</p>
             <p className="lr-ebay-status-panel-body">{sendToEbayExtensionError}</p>
@@ -3466,7 +3472,7 @@ export default function ListingsReviewWorkspace() {
             )}
           </div>
         )}
-        {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && !ebayBatchingAvailable && (
+        {showLegacyEbayTools && marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount > 0 && !ebayBatchingAvailable && (
           <div className="lr-ebay-status-panel" role="status">
             <p className="lr-ebay-status-panel-title">Seller Hub draft database upgrade required</p>
             <p className="lr-ebay-status-panel-body">This database hasn&apos;t been upgraded to support Seller Hub drafts yet. Per-item eBay editing above is unaffected.</p>
@@ -3713,6 +3719,8 @@ export default function ListingsReviewWorkspace() {
 
     {ebayLivePreview && (() => {
       const eligible = ebayLivePreview.filter(item => item.eligible);
+      const successful = ebayLivePublishResults.filter(item => item.ok && item.listingId);
+      const finishedSuccessfully = successful.length > 0 && ebayLivePublishResults.every(item => item.ok);
       return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !ebayLivePublishing) setEbayLivePreview(null); }}>
         <div className="confirm-dialog lr-ebay-live-dialog" role="dialog" aria-modal="true" aria-labelledby="ebay-live-title">
           <button className="dialog-close" type="button" onClick={() => setEbayLivePreview(null)} disabled={ebayLivePublishing} aria-label="Close">×</button>
@@ -3726,15 +3734,23 @@ export default function ListingsReviewWorkspace() {
               <strong>{item.title || "Untitled listing"}</strong>
               <span>SKU {item.sku || "missing"} · {item.pricePence ? `£${(item.pricePence / 100).toFixed(2)}` : "no price"} · {item.photoCount} photo{item.photoCount === 1 ? "" : "s"}</span>
               <span>{item.eligible ? `Ready · category ${item.categoryId} · ${item.condition}` : item.reasons.join(" · ")}</span>
+              {item.liveListingId && <a href={`https://www.ebay.co.uk/itm/${item.liveListingId}`} target="_blank" rel="noreferrer">Open live listing ↗</a>}
             </div>)}
           </div>
           {ebayLiveError && <p className="import-select-error" role="alert">{ebayLiveError}</p>}
           {ebayLiveResult && <p className="import-select-success" role="status">{ebayLiveResult}</p>}
+          {successful.length > 0 && <div className="lr-ebay-live-success-links" aria-label="Published eBay listings">
+            {successful.map(result => <a key={result.productDraftId} className="button-secondary" href={`https://www.ebay.co.uk/itm/${result.listingId}`} target="_blank" rel="noreferrer">
+              Open eBay listing {result.listingId} ↗
+            </a>)}
+          </div>}
           <div className="dialog-actions">
-            <button type="button" className="dialog-cancel" onClick={() => setEbayLivePreview(null)} disabled={ebayLivePublishing}>Go back</button>
-            <button type="button" className="dialog-confirm" onClick={handlePublishEbayLive} disabled={ebayLivePublishing || eligible.length === 0}>
-              {ebayLivePublishing ? "Listing on eBay…" : `List ${eligible.length} live on eBay`}
-            </button>
+            {finishedSuccessfully ? <button type="button" className="dialog-confirm" onClick={() => setEbayLivePreview(null)}>Done</button> : <>
+              <button type="button" className="dialog-cancel" onClick={() => setEbayLivePreview(null)} disabled={ebayLivePublishing}>Go back</button>
+              <button type="button" className="dialog-confirm" onClick={handlePublishEbayLive} disabled={ebayLivePublishing || eligible.length === 0}>
+                {ebayLivePublishing ? "Listing on eBay…" : `List ${eligible.length} live on eBay`}
+              </button>
+            </>}
           </div>
         </div>
       </div>;

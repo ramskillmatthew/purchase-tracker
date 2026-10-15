@@ -38,6 +38,12 @@ const READINESS_TONE: Record<ListingReviewStatus, string> = { ready: READINESS_T
  * details for. "Content ready"/"Needs review" (content readiness, before
  * any draft attempt) reuses the same green/amber readiness tones. */
 function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
+  if (ebay.liveListingId) {
+    return <>
+      <WorkflowStatus label="Live on eBay" tone="#28D17C" pulse={false} secondaryLine={`Listing ${ebay.liveListingId}`} />
+      <a className="lr-ebay-seller-hub-link" href={`https://www.ebay.co.uk/itm/${ebay.liveListingId}`} target="_blank" rel="noreferrer">Open live listing ↗</a>
+    </>;
+  }
   // CORRECTIVE PASS (third real-submission audit) — a stale, inconsistent
   // item (parent already terminal-failed, this row never updated to
   // match) must never display as ordinary "Queued"/"Uploaded"/etc, and
@@ -175,6 +181,8 @@ export type EbayTabData = {
   // own corrective-pass comment. Wholly independent of workflowStatus
   // below, which describes the ACTIVE Sell Feed API pipeline.
   legacyOfferId: string | null;
+  // Confirmed only after eBay's publish response returns a listing id.
+  liveListingId: string | null;
   // Set once the Sell Feed API pipeline has genuinely confirmed a Seller
   // Hub draft exists for this listing — see
   // supabase-ebay-feed-drafts.sql's own column comment.

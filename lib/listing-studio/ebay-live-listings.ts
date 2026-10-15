@@ -13,7 +13,13 @@ export type EbayLivePreviewItem = {
   productDraftId: string; marketplaceDraftId: string | null; sku: string | null;
   title: string | null; pricePence: number | null; categoryId: string | null;
   condition: string | null; photoCount: number; eligible: boolean; reasons: string[];
+  liveListingId: string | null;
 };
+
+function liveListingIdFromDraft(draft: Awaited<ReturnType<typeof getMarketplaceDraft>>): string | null {
+  const value = draft?.dynamicData?.__ebayLiveListing?.value;
+  return typeof value === "string" && /^\d+$/.test(value) ? value : null;
+}
 
 type EbayListingPolicies = {
   fulfillmentPolicyId: string | null;
@@ -58,6 +64,7 @@ export async function previewEbayLiveListings(ownerId: string, productDraftIds: 
     const listingPolicies = draft && connection ? resolveEbayListingPolicies(draft, connection, policies) : null;
     const sku = skuById.get(productDraftId) ?? null;
     const photoCount = photos.get(productDraftId) ?? 0;
+    const liveListingId = liveListingIdFromDraft(draft);
     const reasons: string[] = [];
     if (!draft) reasons.push("No eBay preparation");
     if (!connection || connection.connectionStatus !== "connected") reasons.push("eBay account is not connected");
@@ -72,7 +79,8 @@ export async function previewEbayLiveListings(ownerId: string, productDraftIds: 
     if (!available("FULFILLMENT", listingPolicies?.fulfillmentPolicyId ?? null)) reasons.push("Missing or unavailable shipping policy");
     if (!available("RETURN", listingPolicies?.returnPolicyId ?? null)) reasons.push("Missing or unavailable return policy");
     if (!available("PAYMENT", listingPolicies?.paymentPolicyId ?? null)) reasons.push("Missing or unavailable payment policy");
-    return { productDraftId, marketplaceDraftId: draft?.id ?? null, sku, title: draft?.title ?? null, pricePence: draft?.pricePence ?? null, categoryId: draft?.categoryId ?? null, condition: draft?.conditionValue ?? null, photoCount, eligible: reasons.length === 0, reasons };
+    if (liveListingId) reasons.push(`Already live on eBay as listing ${liveListingId}`);
+    return { productDraftId, marketplaceDraftId: draft?.id ?? null, sku, title: draft?.title ?? null, pricePence: draft?.pricePence ?? null, categoryId: draft?.categoryId ?? null, condition: draft?.conditionValue ?? null, photoCount, eligible: reasons.length === 0, reasons, liveListingId };
   }));
 }
 

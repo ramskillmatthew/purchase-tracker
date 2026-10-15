@@ -57,6 +57,7 @@ export type ListingTableRow = {
   ebayErrorMessage: string | null;
   ebaySellingPricePence: number | null;
   ebayProfitPence: number | null;
+  ebayLiveListingId: string | null;
   // CORRECTIVE PASS (third real-submission audit) — see
   // ListingsReviewWorkspace.tsx's own comment on this field.
   ebayFeedBatchState: EbayFeedBatchBlockingState;
@@ -99,6 +100,12 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
   }
   if (!row.hasEbayPreparation) {
     return { label: "Not prepared", tone: NOT_PREPARED_TONE, pulse: false, secondaryLine: null, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence };
+  }
+  if (row.ebayLiveListingId) {
+    return {
+      label: "Live on eBay", tone: "#28D17C", pulse: false,
+      secondaryLine: `Listing ${row.ebayLiveListingId}`, pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
+    };
   }
   // CORRECTIVE PASS (blocking-batch visibility review) — "The main row
   // status should prioritise the active eBay extension state when one
