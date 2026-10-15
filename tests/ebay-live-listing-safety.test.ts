@@ -57,7 +57,10 @@ describe("eBay live listing safety boundary", () => {
     const service = read("lib/listing-studio/ebay-live-listings.ts");
     expect(service).toContain("getEbayCategoryConditions(accessToken, draft.categoryId!)");
     expect(service).toContain("resolveCategoryCondition(draft.conditionValue, categoryConditions)");
-    expect(service).toContain('item.conditionId === "3000"');
-    expect(service).toContain('/^(used|pre[- ]?owned)$/i');
+    expect(service).toContain('item.conditionId === "2990"');
+    expect(service).toContain('"2990": "PRE_OWNED_EXCELLENT"');
+    expect(service).toContain('"3010": "PRE_OWNED_FAIR"');
+    expect(service).toContain('\\s*[-–—]\\s*excellent');
+    expect(service).toContain('return "PRE_OWNED_EXCELLENT"');
   });
 });

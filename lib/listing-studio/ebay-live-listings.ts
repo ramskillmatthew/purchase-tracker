@@ -98,7 +98,8 @@ function offerPayload(
 const CONDITION_ID_TO_ENUM: Readonly<Record<string, EbayInventoryConditionEnum>> = {
   "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS", "2000": "CERTIFIED_REFURBISHED",
   "2010": "EXCELLENT_REFURBISHED", "2020": "VERY_GOOD_REFURBISHED", "2030": "GOOD_REFURBISHED",
-  "2500": "SELLER_REFURBISHED", "2750": "LIKE_NEW", "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
+  "2500": "SELLER_REFURBISHED", "2750": "LIKE_NEW", "2990": "PRE_OWNED_EXCELLENT",
+  "3000": "USED_EXCELLENT", "3010": "PRE_OWNED_FAIR", "4000": "USED_VERY_GOOD",
   "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE", "7000": "FOR_PARTS_OR_NOT_WORKING",
 };
 
@@ -107,13 +108,15 @@ export function resolveCategoryCondition(conditionValue: string | null, supporte
   if (!translated.ok) return null;
   const supportedEnums = new Set(supported.map(item => CONDITION_ID_TO_ENUM[item.conditionId]).filter(Boolean));
   if (supportedEnums.has(translated.enumValue)) return translated.enumValue;
-  // Clothing/footwear categories commonly expose condition id 3000 as a
-  // generic "Pre-owned"/"Used" bucket rather than a quality grade. It is
-  // safe to use only when eBay itself describes it generically; never
-  // reinterpret an explicit "Excellent" grade as equivalent.
+  // Some clothing/footwear categories do not offer a "Very Good" grade.
+  // They expose 2990/3000/3010 as Pre-owned Excellent/Good/Fair instead.
+  // This application's seller-defined grading treats "Used - Very Good"
+  // as the category's Pre-owned - Excellent grade. Select it only when
+  // eBay's live category metadata explicitly offers condition id 2990;
+  // never invent support for that grade when the category omits it.
   if (translated.enumValue === "USED_VERY_GOOD") {
-    const genericUsed = supported.find(item => item.conditionId === "3000" && /^(used|pre[- ]?owned)$/i.test(item.description.trim()));
-    if (genericUsed) return "USED_EXCELLENT";
+    const preOwnedExcellent = supported.find(item => item.conditionId === "2990" && /^pre[- ]?owned\s*[-–—]\s*excellent$/i.test(item.description.trim()));
+    if (preOwnedExcellent) return "PRE_OWNED_EXCELLENT";
   }
   return null;
 }
