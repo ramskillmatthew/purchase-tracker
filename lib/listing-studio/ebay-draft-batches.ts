@@ -6,8 +6,8 @@ import { getEbayConnection, listEbayPolicies, getValidEbayAccessToken } from "@/
 import { createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, type EbayInventoryItemPayload } from "@/lib/ebay-account/inventory-client";
 import { evaluateEbayDraftEligibility } from "@/lib/listing-studio/ebay-draft-eligibility";
 import { toEbayInventoryCondition, type EbayInventoryConditionEnum } from "@/lib/listing-studio/ebay-condition";
-import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
-import { createSignedDownloadUrl, StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
+import { StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
+import { createEbayPhotoProxyUrl } from "@/lib/listing-studio/ebay-photo-urls";
 import type { MarketplaceDynamicData, MarketplaceDraft } from "@/lib/listing-studio/marketplace-types";
 import type { EbayDraftItemStatus, EbayDraftBatchStatus } from "@/lib/listing-studio/ebay-workflow-status";
 
@@ -327,9 +327,10 @@ export async function preparePhotos(ownerId: string, productDraftId: string): Pr
   );
   const imageUrls: string[] = [];
   const photoState: Record<string, EbayPhotoState> = {};
+  const proxyExpiresAt = Math.floor(Date.now() / 1000) + EBAY_IMAGE_URL_LIFETIME_SECONDS;
   for (const image of images) {
     try {
-      const url = await createSignedDownloadUrl(LISTING_STUDIO_BUCKET, image.storage_path, EBAY_IMAGE_URL_LIFETIME_SECONDS);
+      const url = createEbayPhotoProxyUrl(image.id, proxyExpiresAt);
       const check = await fetch(url, { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10_000) }).catch(() => null);
       if (check && check.ok) {
         imageUrls.push(url);

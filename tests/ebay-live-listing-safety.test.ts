@@ -39,4 +39,15 @@ describe("eBay live listing safety boundary", () => {
     expect(service).toContain("usablePolicy(type, override) ? override : fallback");
     expect(service).toContain("resolveEbayListingPolicies(draft, connection, policies)");
   });
+
+  it("uses short signed app photo URLs instead of long storage signed URLs", () => {
+    const batches = read("lib/listing-studio/ebay-draft-batches.ts");
+    const photoUrls = read("lib/listing-studio/ebay-photo-urls.ts");
+    const photoRoute = read("app/api/ebay/photo/[imageId]/route.ts");
+    expect(batches).toContain("createEbayPhotoProxyUrl(image.id, proxyExpiresAt)");
+    expect(photoUrls).toContain('createHmac("sha256"');
+    expect(photoUrls).toContain("timingSafeEqual");
+    expect(photoRoute).toContain("verifyEbayPhotoProxySignature");
+    expect(photoRoute).toContain("createSignedDownloadUrl");
+  });
 });
