@@ -15,6 +15,25 @@ export type EbayLivePreviewItem = {
   condition: string | null; photoCount: number; eligible: boolean; reasons: string[];
 };
 
+type EbayListingPolicies = {
+  fulfillmentPolicyId: string | null;
+  returnPolicyId: string | null;
+  paymentPolicyId: string | null;
+  merchantLocationKey: string | null;
+};
+
+function resolveEbayListingPolicies(
+  draft: NonNullable<Awaited<ReturnType<typeof getMarketplaceDraft>>>,
+  connection: NonNullable<Awaited<ReturnType<typeof getEbayConnection>>>,
+): EbayListingPolicies {
+  return {
+    fulfillmentPolicyId: draft.ebayFulfillmentPolicyId ?? connection.defaultFulfillmentPolicyId,
+    returnPolicyId: draft.ebayReturnPolicyId ?? connection.defaultReturnPolicyId,
+    paymentPolicyId: draft.ebayPaymentPolicyId ?? connection.defaultPaymentPolicyId,
+    merchantLocationKey: draft.ebayMerchantLocationKey ?? connection.defaultInventoryLocationKey,
+  };
+}
+
 export async function previewEbayLiveListings(ownerId: string, productDraftIds: string[]): Promise<EbayLivePreviewItem[]> {
   const ids = [...new Set(productDraftIds)].slice(0, MAX_EBAY_LIVE_LISTINGS);
   const [connection, skuRows, imageRows] = await Promise.all([
@@ -31,6 +50,7 @@ export async function previewEbayLiveListings(ownerId: string, productDraftIds: 
 
   return Promise.all(ids.map(async productDraftId => {
     const draft = await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
+    const listingPolicies = draft && connection ? resolveEbayListingPolicies(draft, connection) : null;
     const sku = skuById.get(productDraftId) ?? null;
     const photoCount = photos.get(productDraftId) ?? 0;
     const reasons: string[] = [];
@@ -43,22 +63,30 @@ export async function previewEbayLiveListings(ownerId: string, productDraftIds: 
     if (!draft?.quantity || draft.quantity <= 0) reasons.push("Missing quantity");
     if (!toEbayInventoryCondition(draft?.conditionValue ?? null).ok) reasons.push("Missing or unsupported condition");
     if (photoCount === 0) reasons.push("No uploaded photos");
-    if (!draft?.ebayMerchantLocationKey) reasons.push("Missing eBay inventory location");
-    if (!available("FULFILLMENT", draft?.ebayFulfillmentPolicyId ?? null)) reasons.push("Missing or unavailable shipping policy");
-    if (!available("RETURN", draft?.ebayReturnPolicyId ?? null)) reasons.push("Missing or unavailable return policy");
-    if (!available("PAYMENT", draft?.ebayPaymentPolicyId ?? null)) reasons.push("Missing or unavailable payment policy");
+    if (!listingPolicies?.merchantLocationKey) reasons.push("Missing eBay inventory location");
+    if (!available("FULFILLMENT", listingPolicies?.fulfillmentPolicyId ?? null)) reasons.push("Missing or unavailable shipping policy");
+    if (!available("RETURN", listingPolicies?.returnPolicyId ?? null)) reasons.push("Missing or unavailable return policy");
+    if (!available("PAYMENT", listingPolicies?.paymentPolicyId ?? null)) reasons.push("Missing or unavailable payment policy");
     return { productDraftId, marketplaceDraftId: draft?.id ?? null, sku, title: draft?.title ?? null, pricePence: draft?.pricePence ?? null, categoryId: draft?.categoryId ?? null, condition: draft?.conditionValue ?? null, photoCount, eligible: reasons.length === 0, reasons };
   }));
 }
 
-function offerPayload(draft: NonNullable<Awaited<ReturnType<typeof getMarketplaceDraft>>>, sku: string): EbayOfferPayload {
+function offerPayload(
+  draft: NonNullable<Awaited<ReturnType<typeof getMarketplaceDraft>>>,
+  sku: string,
+  listingPolicies: EbayListingPolicies,
+): EbayOfferPayload {
   return {
     sku, marketplaceId: "EBAY_GB", format: "FIXED_PRICE", categoryId: draft.categoryId!,
     listingDescription: draft.description ?? "",
     pricingSummary: { price: { value: (draft.pricePence! / 100).toFixed(2), currency: "GBP" } },
     quantityLimitPerBuyer: 1,
-    listingPolicies: { fulfillmentPolicyId: draft.ebayFulfillmentPolicyId!, returnPolicyId: draft.ebayReturnPolicyId!, paymentPolicyId: draft.ebayPaymentPolicyId! },
-    merchantLocationKey: draft.ebayMerchantLocationKey!,
+    listingPolicies: {
+      fulfillmentPolicyId: listingPolicies.fulfillmentPolicyId!,
+      returnPolicyId: listingPolicies.returnPolicyId!,
+      paymentPolicyId: listingPolicies.paymentPolicyId!,
+    },
+    merchantLocationKey: listingPolicies.merchantLocationKey!,
   };
 }
 
@@ -67,7 +95,8 @@ export async function publishOneEbayLiveListing(ownerId: string, productDraftId:
   if (!preview?.eligible || !preview.marketplaceDraftId || !preview.sku) throw new Error(preview?.reasons.join("; ") || "This listing is not ready for eBay.");
   const draft = await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
   if (!draft) throw new Error("The eBay preparation no longer exists.");
-  const { accessToken } = await getValidEbayAccessToken(ownerId);
+  const { accessToken, connection } = await getValidEbayAccessToken(ownerId);
+  const listingPolicies = resolveEbayListingPolicies(draft, connection);
   const existing = await getOffersForSku(accessToken, preview.sku);
   const reads = (await Promise.all(existing.map(o => getOffer(accessToken, o.offerId)))).filter(Boolean);
   const live = reads.find(o => o!.status === "PUBLISHED" && o!.listingId);
@@ -79,7 +108,7 @@ export async function publishOneEbayLiveListing(ownerId: string, productDraftId:
   const inventoryPayload = buildInventoryItemPayload(draft, imageUrls);
   if (!inventoryPayload) throw new Error("The eBay condition is missing or unsupported.");
   await createOrReplaceInventoryItem(accessToken, preview.sku, inventoryPayload);
-  const payload = offerPayload(draft, preview.sku);
+  const payload = offerPayload(draft, preview.sku, listingPolicies);
   // Only reuse an offer eBay itself returned for this SKU. A locally stored
   // historical id may have been deleted remotely and must never be trusted
   // as the target of an update or publish.

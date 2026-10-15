@@ -24,4 +24,13 @@ describe("eBay live listing safety boundary", () => {
     expect(service).toContain('reconciled?.status === "PUBLISHED"');
     expect(service).toContain("reads.length > 1");
   });
+
+  it("uses saved account defaults when a listing has no per-item policy overrides", () => {
+    const service = read("lib/listing-studio/ebay-live-listings.ts");
+    expect(service).toContain("draft.ebayFulfillmentPolicyId ?? connection.defaultFulfillmentPolicyId");
+    expect(service).toContain("draft.ebayReturnPolicyId ?? connection.defaultReturnPolicyId");
+    expect(service).toContain("draft.ebayPaymentPolicyId ?? connection.defaultPaymentPolicyId");
+    expect(service).toContain("draft.ebayMerchantLocationKey ?? connection.defaultInventoryLocationKey");
+    expect(service).toContain("offerPayload(draft, preview.sku, listingPolicies)");
+  });
 });
