@@ -321,7 +321,7 @@ const EBAY_IMAGE_URL_LIFETIME_SECONDS = 300;
  * included in `photoState` (which the caller persists) or any other
  * write. Never call this function and then hold its result across a
  * later, separate invocation/tick. */
-async function preparePhotos(ownerId: string, productDraftId: string): Promise<{ imageUrls: string[]; photoState: Record<string, EbayPhotoState> }> {
+export async function preparePhotos(ownerId: string, productDraftId: string): Promise<{ imageUrls: string[]; photoState: Record<string, EbayPhotoState> }> {
   const images = await supabaseRequestAll<ImageRow>(
     `listing_draft_images?draft_id=eq.${productDraftId}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=id,storage_path,sort_order&order=sort_order.asc`,
   );

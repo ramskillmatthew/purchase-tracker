@@ -73,6 +73,9 @@ export default function SettingsPage() {
   const [ebayDefaultsDraft, setEbayDefaultsDraft] = useState<{ fulfillment: string; returns: string; payment: string; location: string }>({ fulfillment: "", returns: "", payment: "", location: "" });
   const [ebaySyncMessage, setEbaySyncMessage] = useState("");
   const [ebayDefaultsMessage, setEbayDefaultsMessage] = useState("");
+  const [ebayLocationDraft, setEbayLocationDraft] = useState({ name: "Main stock", postalCode: "" });
+  const [ebayCreatingLocation, setEbayCreatingLocation] = useState(false);
+  const [ebayLocationMessage, setEbayLocationMessage] = useState("");
   const [ebayNotice, setEbayNotice] = useState<{ ok: boolean; reason: string | null } | null>(null);
   async function loadIndex() { const response = await fetch("/api/yahoo/index"); if (response.ok) setIndex(await response.json()); }
   async function loadVintedStatus() { const response = await fetch("/api/listing-studio/vinted-categories/status"); if (response.ok) setVintedStatus(await response.json()); }
@@ -138,6 +141,19 @@ export default function SettingsPage() {
       await loadEbay();
     } catch { setEbayDefaultsMessage("Network error — defaults could not be saved."); }
     finally { setEbaySavingDefaults(false); }
+  }
+  async function createEbayLocation() {
+    if (ebayCreatingLocation || !ebayLocationDraft.postalCode.trim()) return;
+    setEbayCreatingLocation(true); setEbayLocationMessage("");
+    try {
+      const response = await fetch("/api/ebay/inventory-location", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ebayLocationDraft) });
+      const body = await response.json();
+      if (!response.ok) { setEbayLocationMessage(body.error || "Could not create this location."); return; }
+      await loadEbay();
+      setEbayDefaultsDraft(current => ({ ...current, location: body.merchantLocationKey }));
+      setEbayLocationMessage("Location created. Save defaults to use it for new listings.");
+    } catch { setEbayLocationMessage("Network error — could not create this location."); }
+    finally { setEbayCreatingLocation(false); }
   }
   async function refreshVintedCategories() {
     if (vintedRefreshing) return;
@@ -220,9 +236,9 @@ export default function SettingsPage() {
     <div className="settings-section yahoo-settings">
       <div className="settings-copy">
         <h2>eBay UK</h2>
-        <p>Connect your eBay selling account to create and manage drafts from Listing Studio.</p>
+        <p>Connect your eBay selling account to review and publish listings from Listing Studio.</p>
         <p>Secure OAuth connection through eBay.</p>
-        <p>Drafts only during testing — nothing will be published automatically.</p>
+        <p>Nothing is published automatically — every live listing requires a final review and confirmation.</p>
         {ebayNotice && !ebayNotice.ok && (
           <p className="purchase-form-error">
             {{
@@ -295,7 +311,7 @@ export default function SettingsPage() {
               <span>Seller account — {needsReconnect ? "Not authorised" : "Ready"}</span>
               <span>Business policies — {needsReconnect ? "Not authorised" : connection.lastPolicySyncAt ? "Ready" : connection.lastSyncErrorMessage ? "Needs attention" : "Not yet synced"}</span>
               <span>Photo upload — {photoUploadReady ? "Ready" : "Needs attention"}</span>
-              <span>Draft creation — {draftCreationReady ? "Ready" : "Needs attention"}</span>
+              <span>Live listing — {draftCreationReady ? "Ready" : "Needs attention"}</span>
             </div>
           </div>
 
@@ -335,13 +351,20 @@ export default function SettingsPage() {
                 {availableLocations.length === 0 && <small>No inventory locations found on this account yet — sync again after adding one on eBay, or choose one per-listing later.</small>}
               </label>
             </div>
+            {availableLocations.length === 0 && <div className="ebay-location-create">
+              <strong>Create your first eBay stock location</strong>
+              <label className="field"><span>Location name</span><input className="input" value={ebayLocationDraft.name} onChange={event => setEbayLocationDraft(current => ({ ...current, name: event.target.value }))} /></label>
+              <label className="field"><span>UK postcode</span><input className="input" value={ebayLocationDraft.postalCode} onChange={event => setEbayLocationDraft(current => ({ ...current, postalCode: event.target.value.toUpperCase() }))} placeholder="e.g. SW1A 1AA" /></label>
+              {ebayLocationMessage && <small>{ebayLocationMessage}</small>}
+              <button type="button" className="button-secondary" disabled={ebayCreatingLocation || !ebayLocationDraft.postalCode.trim()} onClick={createEbayLocation}>{ebayCreatingLocation ? "Creating…" : "Create eBay location"}</button>
+            </div>}
             <p className="ebay-account-policy-summary">{fulfillmentCount} postage polic{fulfillmentCount === 1 ? "y" : "ies"} · {returnCount} return polic{returnCount === 1 ? "y" : "ies"} · {paymentCount} payment polic{paymentCount === 1 ? "y" : "ies"} · {availableLocations.length} inventory location{availableLocations.length === 1 ? "" : "s"} · Synced from eBay</p>
             <div className="ebay-account-draft-only">
               <label className="ebay-account-draft-only-toggle">
                 <input type="checkbox" checked disabled aria-describedby="ebay-account-draft-only-note" />
-                <span>Create drafts only — never publish automatically</span>
+                <span>Never publish automatically</span>
               </label>
-              <small id="ebay-account-draft-only-note">Listings are saved as drafts until you choose to publish. This safety setting is enabled and cannot be turned off yet.</small>
+              <small id="ebay-account-draft-only-note">A listing can only go live after you select it, review its eBay details, and press the final live-listing confirmation.</small>
             </div>
             {ebayDefaultsMessage && <small className={ebayDefaultsMessage === "Defaults saved." ? undefined : "purchase-form-error"}>{ebayDefaultsMessage}</small>}
             <button type="button" className="button" disabled={ebaySavingDefaults} onClick={saveEbayDefaults}>{ebaySavingDefaults ? "Saving…" : "Save defaults"}</button>

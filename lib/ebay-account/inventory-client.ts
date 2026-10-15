@@ -78,6 +78,16 @@ export type EbayInventoryLocation = {
   addressSummary: string | null;
 };
 
+export async function createEbayInventoryLocation(accessToken: string, merchantLocationKey: string, input: { name: string; postalCode: string }): Promise<void> {
+  assertAllowedInventoryOperation("createInventoryLocation");
+  if (!/^[A-Za-z0-9_-]{1,36}$/.test(merchantLocationKey)) throw new Error("Invalid eBay inventory location key.");
+  const response = await inventoryRequest(accessToken, "POST", `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}`, {
+    location: { address: { postalCode: input.postalCode, country: "GB" } },
+    locationTypes: ["WAREHOUSE"], merchantLocationStatus: "ENABLED", name: input.name,
+  });
+  if (!response.ok) throw await inventoryError(response, "eBay inventory location could not be created.");
+}
+
 /** Read-only — lists every merchant inventory location the connected
  * account already has configured on eBay's side. This app never creates,
  * edits, enables, disables, or deletes a location (see
@@ -173,6 +183,34 @@ export async function createOffer(accessToken: string, payload: EbayOfferPayload
   return { offerId: body.offerId };
 }
 
+/** Replaces the mutable fields of one known offer. The offer id is always
+ * discovered server-side from eBay or this owner's marketplace draft. */
+export async function updateOffer(accessToken: string, offerId: string, payload: EbayOfferPayload): Promise<void> {
+  assertAllowedInventoryOperation("updateOffer");
+  if (!offerId) throw new Error("Missing eBay offer id.");
+  // eBay's UpdateOffer request does not accept `sku`; the offer id already
+  // identifies the inventory item. Strip it server-side so create/update
+  // can share one builder without sending an undocumented field.
+  const { sku: _sku, ...updatePayload } = payload;
+  const response = await inventoryRequest(accessToken, "PUT", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, updatePayload);
+  if (!response.ok) throw await inventoryError(response, "eBay offer could not be updated.");
+}
+
+export type EbayPublishOfferResult = { offerId: string; listingId: string };
+
+/** The only operation in this application that can make an eBay listing
+ * live. Callers must enforce their own explicit user confirmation before
+ * reaching this function. */
+export async function publishOffer(accessToken: string, offerId: string): Promise<EbayPublishOfferResult> {
+  assertAllowedInventoryOperation("publishOffer");
+  if (!offerId) throw new Error("Missing eBay offer id.");
+  const response = await inventoryRequest(accessToken, "POST", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`);
+  if (!response.ok) throw await inventoryError(response, "eBay could not publish this listing.");
+  const body = await response.json() as { listingId?: string };
+  if (!body.listingId) throw new Error("eBay published the offer but did not return a listing id. Check Seller Hub before retrying.");
+  return { offerId, listingId: body.listingId };
+}
+
 /** Corrective pass — the real eBay-documented way to make offer creation
  * idempotent: eBay's own `GET /sell/inventory/v1/offer?sku=...` lists every
  * offer already registered for a SKU. Called BEFORE createOffer on every
@@ -190,7 +228,7 @@ export async function getOffersForSku(accessToken: string, sku: string, marketpl
   return (body.offers ?? []).map(o => ({ offerId: o.offerId }));
 }
 
-export type EbayOfferReadResult = { offerId: string; status: string; sku: string } | null;
+export type EbayOfferReadResult = { offerId: string; status: string; sku: string; listingId: string | null } | null;
 
 /** Read-only verification that a previously created offer still exists as
  * expected — used to confirm a draft after creation, never to publish or
@@ -201,8 +239,8 @@ export async function getOffer(accessToken: string, offerId: string): Promise<Eb
   const response = await inventoryRequest(accessToken, "GET", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);
   if (response.status === 404) return null;
   if (!response.ok) throw await inventoryError(response, "eBay offer could not be read.");
-  const body = await response.json() as { offerId: string; status: string; sku: string };
-  return { offerId: body.offerId, status: body.status, sku: body.sku };
+  const body = await response.json() as { offerId: string; status: string; sku: string; listing?: { listingId?: string }; listingId?: string };
+  return { offerId: body.offerId, status: body.status, sku: body.sku, listingId: body.listingId ?? body.listing?.listingId ?? null };
 }
 
 export type EbayInventoryItemReadResult = {

@@ -711,9 +711,8 @@ describe("Milestone 7 (revised) — Vinted Draft Export UI wiring", () => {
     expect(workspaceSource).toMatch(/Select at most \$\{MAX_EXPORT_LISTINGS_PER_BATCH\} listings/);
   });
 
-  it("success wording says 'Exported', never 'Published' or 'Listed'", () => {
+  it("the Vinted export success wording still says Exported", () => {
     expect(workspaceSource).toMatch(/Exported \$\{ids\.length\}/);
-    expect(workspaceSource).not.toMatch(/\bpublished\b|listed live\b|now live\b/i);
   });
 
   it("REGRESSION: never sends one request per listing — exactly one POST to the export route with every selected draftId in one body", () => {
@@ -2331,13 +2330,10 @@ describe("controlled pairing test review — Phase 5 (page hierarchy)", () => {
     expect(detailsTag).not.toContain(" open"); // no `open` attribute — closed by default
   });
 
-  it("REQUIREMENT: 'Send to eBay extension' is proactively disabled (replaced by a direct 'View active batch' action) while an active batch already exists for that exact listing — never waits for a 409 to discover this", () => {
-    const idx = workspaceSource.indexOf("const activeBatch = ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId);");
-    expect(idx).toBeGreaterThan(-1);
-    const block = workspaceSource.slice(idx, idx + 700);
-    expect(block).toContain("if (activeBatch) {");
-    expect(block).toContain("scrollIntoView");
-    expect(block).toContain("View active batch #");
+  it("the primary eBay action is the API live-listing preview, not the extension", () => {
+    expect(workspaceSource).toContain("Review and list ${bulkCount} live on eBay");
+    expect(workspaceSource).toContain('fetch("/api/listing-studio/ebay-live-listings"');
+    expect(workspaceSource).toContain('confirmation: "LIST LIVE ON EBAY"');
   });
 
   it("REGRESSION: 'Retry Seller Hub draft' is never offered as a remedy for an eBay extension pairing/conflict failure — it only ever appears inside the Legacy Feed fallback's own failed-batch branch", () => {

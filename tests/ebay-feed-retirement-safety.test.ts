@@ -127,13 +127,16 @@ describe("PHASE 3 PROOF — no reachable active UI/API/cron route can initiate a
     expect(source).toContain("export async function getOffersForSku(");
   });
 
-  it("SKU 1644's existing offer is never modified or deleted by any retired route — no updateOffer/deleteOffer/withdrawOffer exists anywhere in this codebase", () => {
+  it("no retired route can modify or delete an offer; update is only exposed to the new confirmed live-listing workflow", () => {
     for (const route of [...ALL_ROUTE_FILES]) {
       const source = read(route);
       expect(source, route).not.toMatch(/updateOffer\(|deleteOffer\(|withdrawOffer\(/);
     }
     const clientSource = read("lib/ebay-account/inventory-client.ts");
-    expect(clientSource).not.toMatch(/export async function (updateOffer|deleteOffer|withdrawOffer)/);
+    expect(clientSource).toContain("export async function updateOffer(");
+    expect(clientSource).not.toMatch(/export async function (deleteOffer|withdrawOffer)/);
+    const liveRoute = read("app/api/listing-studio/ebay-live-listings/route.ts");
+    expect(liveRoute).toContain("z.literal(EBAY_LIVE_CONFIRMATION)");
   });
 });
 

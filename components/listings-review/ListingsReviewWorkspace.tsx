@@ -44,6 +44,7 @@ import { evaluateEbayFeedDraftEligibility, type EbayFeedDraftEligibilityResult }
 import { ebayExtensionBatchStatusLabel, ebayExtensionBatchStatusTone } from "@/lib/listing-studio/ebay-extension-batch-schema";
 
 type RejectedExportListing = { draftId: string; sku: string | null; reasons: string[] };
+type EbayLivePreviewItem = { productDraftId: string; marketplaceDraftId: string | null; sku: string | null; title: string | null; pricePence: number | null; categoryId: string | null; condition: string | null; photoCount: number; eligible: boolean; reasons: string[] };
 
 // PHASE 4 — mirrors app/api/listing-studio/listings-review/route.ts's own
 // response shape for each product's eBay marketplace draft. `ebayStatus`
@@ -453,6 +454,11 @@ export default function ListingsReviewWorkspace() {
   const [bulkActionError, setBulkActionError] = useState("");
   const [bulkActionMessage, setBulkActionMessage] = useState("");
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+  const [ebayLivePreview, setEbayLivePreview] = useState<EbayLivePreviewItem[] | null>(null);
+  const [ebayLiveLoading, setEbayLiveLoading] = useState(false);
+  const [ebayLivePublishing, setEbayLivePublishing] = useState(false);
+  const [ebayLiveError, setEbayLiveError] = useState("");
+  const [ebayLiveResult, setEbayLiveResult] = useState("");
   const [assigningCategoryId, setAssigningCategoryId] = useState<string | null>(null);
   const [reassessingAudienceId, setReassessingAudienceId] = useState<string | null>(null);
 
@@ -2643,6 +2649,39 @@ export default function ListingsReviewWorkspace() {
     }
   }
 
+  async function handleOpenEbayLivePreview() {
+    setEbayLiveLoading(true); setEbayLiveError(""); setEbayLiveResult("");
+    try {
+      const response = await fetch("/api/listing-studio/ebay-live-listings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productDraftIds: [...bulkSelectedIds] }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Could not prepare the eBay listing preview.");
+      setEbayLivePreview(body.items);
+    } catch (error) { setEbayLiveError(error instanceof Error ? error.message : "Could not prepare the eBay listing preview."); }
+    finally { setEbayLiveLoading(false); }
+  }
+
+  async function handlePublishEbayLive() {
+    if (!ebayLivePreview) return;
+    const eligibleIds = ebayLivePreview.filter(item => item.eligible).map(item => item.productDraftId);
+    if (!eligibleIds.length) return;
+    setEbayLivePublishing(true); setEbayLiveError("");
+    try {
+      const response = await fetch("/api/listing-studio/ebay-live-listings", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productDraftIds: eligibleIds, confirmation: "LIST LIVE ON EBAY" }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Could not publish the selected eBay listings.");
+      setEbayLiveResult(`${body.publishedCount} listed live on eBay${body.failedCount ? `; ${body.failedCount} failed` : ""}.`);
+      if (!body.failedCount) { setEbayLivePreview(null); setBulkSelectedIds(new Set()); }
+      await loadListings();
+    } catch (error) { setEbayLiveError(error instanceof Error ? error.message : "Could not publish the selected eBay listings."); }
+    finally { setEbayLivePublishing(false); }
+  }
+
   const hasAnyData = drafts.length > 0;
   const bulkCount = bulkSelectedIds.size;
 
@@ -3278,39 +3317,15 @@ export default function ListingsReviewWorkspace() {
                 Seller Hub Feed group is relabelled "Seller Hub Feed
                 fallback" below it — kept, never deleted, never the primary
                 workflow any more. */}
-            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && bulkCount === 1 && (() => {
-              const onlyId = [...bulkSelectedIds][0];
-              const row = listingsById.get(onlyId);
-              if (!row?.ebay) return null;
-              // CORRECTIVE PASS (controlled pairing test review, Phase 5)
-              // — REQUIREMENT: "'Send to eBay extension' must be disabled
-              // while [an active batch] is active, with a direct
-              // link/scroll action to [it]." Proactive — checked BEFORE
-              // ever attempting a send, using the SAME active-batch map
-              // the row's own status badge already derives from, so this
-              // can never disagree with what the button would actually
-              // encounter as a 409 conflict.
-              const activeBatch = ebayExtensionActiveByMarketplaceDraftId.get(row.ebay.marketplaceDraftId);
-              if (activeBatch) {
-                return <button
-                  type="button"
-                  className="button-secondary"
-                  title="An eBay extension batch is already active for this listing — view it above"
-                  onClick={() => document.getElementById(`ebay-ext-batch-${activeBatch.batchId}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
-                >
-                  {`View active batch #${activeBatch.displayNumber}`}
-                </button>;
-              }
-              return <button
-                type="button"
-                className="button"
-                disabled={sendToEbayExtensionRunning}
-                title="Opens eBay Seller Hub in the Chrome extension, fills in the listing form and uploads photos — stops before Save draft, never publishes anything"
-                onClick={() => handleSendToEbayExtension(row.ebay!.marketplaceDraftId)}
-              >
-                {sendToEbayExtensionRunning ? "Preparing…" : "Send to eBay extension"}
-              </button>;
-            })()}
+            {marketplaceToggleOptions.includes("EBAY_UK") && workflowMarketplaceView === "EBAY_UK" && <button
+              type="button"
+              className="button"
+              disabled={ebayLiveLoading || ebayLivePublishing || bulkCount > 30}
+              title={bulkCount > 30 ? "Select at most 30 listings." : "Review every detail, then list the selected items live through eBay's API"}
+              onClick={handleOpenEbayLivePreview}
+            >
+              {ebayLiveLoading ? "Checking eBay details…" : `Review and list ${bulkCount} live on eBay`}
+            </button>}
             {/* Stage 6 (eBay draft batches) — sibling eBay actions, same
                 design language, entirely independent of the Vinted button
                 above (creating eBay drafts never touches Vinted state, and
@@ -3685,6 +3700,35 @@ export default function ListingsReviewWorkspace() {
       onClose={() => { setEditFieldsListingId(null); setEditFieldsError(""); }}
       onSave={handleSaveListingFields}
     />}
+
+    {ebayLivePreview && (() => {
+      const eligible = ebayLivePreview.filter(item => item.eligible);
+      return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !ebayLivePublishing) setEbayLivePreview(null); }}>
+        <div className="confirm-dialog lr-ebay-live-dialog" role="dialog" aria-modal="true" aria-labelledby="ebay-live-title">
+          <button className="dialog-close" type="button" onClick={() => setEbayLivePreview(null)} disabled={ebayLivePublishing} aria-label="Close">×</button>
+          <div className="dialog-copy">
+            <p className="dialog-eyebrow">Live eBay listing</p>
+            <h2 id="ebay-live-title">Check before listing</h2>
+            <p>This publishes {eligible.length} item{eligible.length === 1 ? "" : "s"} live on eBay. It does not create a draft.</p>
+          </div>
+          <div className="lr-ebay-live-list">
+            {ebayLivePreview.map(item => <div key={item.productDraftId} className={`lr-ebay-live-item${item.eligible ? "" : " is-blocked"}`}>
+              <strong>{item.title || "Untitled listing"}</strong>
+              <span>SKU {item.sku || "missing"} · {item.pricePence ? `£${(item.pricePence / 100).toFixed(2)}` : "no price"} · {item.photoCount} photo{item.photoCount === 1 ? "" : "s"}</span>
+              <span>{item.eligible ? `Ready · category ${item.categoryId} · ${item.condition}` : item.reasons.join(" · ")}</span>
+            </div>)}
+          </div>
+          {ebayLiveError && <p className="import-select-error" role="alert">{ebayLiveError}</p>}
+          {ebayLiveResult && <p className="import-select-success" role="status">{ebayLiveResult}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="dialog-cancel" onClick={() => setEbayLivePreview(null)} disabled={ebayLivePublishing}>Go back</button>
+            <button type="button" className="dialog-confirm" onClick={handlePublishEbayLive} disabled={ebayLivePublishing || eligible.length === 0}>
+              {ebayLivePublishing ? "Listing on eBay…" : `List ${eligible.length} live on eBay`}
+            </button>
+          </div>
+        </div>
+      </div>;
+    })()}
 
     {bulkDeleteConfirmOpen && <ConfirmDialog
       title={`Delete ${bulkCount} listing${bulkCount === 1 ? "" : "s"}?`}

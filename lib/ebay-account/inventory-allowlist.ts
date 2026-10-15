@@ -46,6 +46,11 @@ const ALLOWED_INVENTORY_OPERATIONS: ReadonlySet<string> = new Set([
   // getInventoryItem, which hardcodes method "GET" and cannot be called
   // any other way.
   "getInventoryItem",
+  // Live-listing workflow. These remain hardcoded server-side operations;
+  // no caller can supply an operation name or Inventory API path.
+  "updateOffer",
+  "publishOffer",
+  "createInventoryLocation",
 ]);
 
 /**
@@ -56,7 +61,7 @@ const ALLOWED_INVENTORY_OPERATIONS: ReadonlySet<string> = new Set([
  * still caught — this check runs first and always wins.
  */
 const FORBIDDEN_PUBLISH_OPERATIONS: ReadonlySet<string> = new Set([
-  "publishOffer", "bulkPublishOffer", "publishOfferByInventoryItemGroup",
+  "bulkPublishOffer", "publishOfferByInventoryItemGroup",
   "withdrawOffer", "bulkWithdrawOffer",
 ]);
 

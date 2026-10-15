@@ -12,8 +12,8 @@ const read = (path: string) => readFileSync(path, "utf8");
  * Granting it does not itself let this application publish anything;
  * these tests prove the actual code contains no path that could.
  */
-describe("Draft-only safety — no publish-capable call exists anywhere in this codebase", () => {
-  it("REQUIREMENT: no publish/offer/inventory route exists under app/api/ebay/", () => {
+describe("eBay Inventory API safety — live publishing has one explicit, gated path", () => {
+  it("account routes contain no generic or client-selected publish endpoint", () => {
     const routes = globSync("app/api/ebay/**/route.ts").map(r => r.replace(/\\/g, "/"));
     expect(routes.sort()).toEqual([
       "app/api/ebay/callback/route.ts",
@@ -21,11 +21,11 @@ describe("Draft-only safety — no publish-capable call exists anywhere in this 
       "app/api/ebay/connection/route.ts",
       "app/api/ebay/defaults/route.ts",
       "app/api/ebay/disconnect/route.ts",
+      "app/api/ebay/inventory-location/route.ts",
       "app/api/ebay/sync/route.ts",
     ]);
-    for (const route of routes) {
-      expect(route, route).not.toMatch(/publish|inventory|offer|listing/i);
-    }
+    expect(routes.filter(route => /publish|offer|listing/i.test(route))).toEqual([]);
+    expect(routes.filter(route => /inventory/i.test(route))).toEqual(["app/api/ebay/inventory-location/route.ts"]);
   });
 
   it("REQUIREMENT: no eBay-account library file calls a publish-capable eBay operation", () => {
@@ -42,16 +42,11 @@ describe("Draft-only safety — no publish-capable call exists anywhere in this 
     }
   });
 
-  it("REQUIREMENT (Stage 6): lib/ebay-account/inventory-client.ts — the one file that DOES call the Inventory API — never CALLS a publish-capable operation or constructs a /publish path (its own comments may still mention those names in prose, explaining that no such call exists)", () => {
+  it("the Inventory client contains exactly the single-offer publish endpoint, never bulk publish or withdraw", () => {
     const source = read("lib/ebay-account/inventory-client.ts");
-    // A real call/reference shape — `publishOffer(...)`, `.publishOffer`,
-    // or the bare identifier used as a value (assigned/exported/imported) —
-    // never merely the word appearing inside a comment sentence.
-    expect(source).not.toMatch(/[.\s]\bpublishOffer\s*\(|[.\s]\bbulkPublishOffer\s*\(|[.\s]\bpublishOfferByInventoryItemGroup\s*\(|[.\s]\bwithdrawOffer\s*\(|[.\s]\bbulkWithdrawOffer\s*\(/);
-    // No URL path segment ending in "/publish" is ever constructed (prose
-    // explaining that this file never publishes anything is fine and
-    // expected — only an actual path-shaped occurrence would matter here).
-    expect(source).not.toMatch(/\/publish["'`]/);
+    expect(source).toMatch(/export async function publishOffer/);
+    expect(source).toMatch(/offer\/\$\{encodeURIComponent\(offerId\)\}\/publish/);
+    expect(source).not.toMatch(/[.\s]\bbulkPublishOffer\s*\(|[.\s]\bpublishOfferByInventoryItemGroup\s*\(|[.\s]\bwithdrawOffer\s*\(|[.\s]\bbulkWithdrawOffer\s*\(/);
     // Every real fetch() in this file goes through the shared
     // inventoryRequest() helper against a hardcoded relative path built
     // from a fixed, small set of endpoints — never a caller-supplied path.
@@ -63,7 +58,7 @@ describe("Draft-only safety — no publish-capable call exists anywhere in this 
   it("REQUIREMENT (Stage 6): every write/read call in inventory-client.ts is gated by assertAllowedInventoryOperation with a hardcoded literal — never a variable, never client input", () => {
     const source = read("lib/ebay-account/inventory-client.ts");
     const gates = [...source.matchAll(/assertAllowedInventoryOperation\((["'])([a-zA-Z]+)\1\)/g)].map(m => m[2]);
-    expect(gates.sort()).toEqual(["createOffer", "createOrReplaceInventoryItem", "getInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku"].sort());
+    expect(gates.sort()).toEqual(["createInventoryLocation", "createOffer", "createOrReplaceInventoryItem", "getInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku", "publishOffer", "updateOffer"].sort());
   });
 
   it("REQUIREMENT (Stage 6): lib/listing-studio/ebay-draft-batches.ts (the batch-processing orchestrator) references no publish-capable operation and calls no eBay endpoint directly — it only ever goes through inventory-client.ts's own gated functions", () => {
@@ -109,19 +104,20 @@ describe("Draft-only safety — no publish-capable call exists anywhere in this 
 });
 
 describe("lib/ebay-account/inventory-allowlist.ts — assertAllowedInventoryOperation", () => {
-  it("REQUIREMENT: every known publish-capable operation is rejected outright, even hypothetically", async () => {
+  it("only single-offer publish is permitted; bulk publish and withdrawals remain forbidden", async () => {
     const { assertAllowedInventoryOperation } = await import("@/lib/ebay-account/inventory-allowlist");
-    for (const op of ["publishOffer", "bulkPublishOffer", "publishOfferByInventoryItemGroup", "withdrawOffer", "bulkWithdrawOffer"]) {
+    expect(() => assertAllowedInventoryOperation("publishOffer")).not.toThrow();
+    for (const op of ["bulkPublishOffer", "publishOfferByInventoryItemGroup", "withdrawOffer", "bulkWithdrawOffer"]) {
       expect(() => assertAllowedInventoryOperation(op)).toThrow(/permanently forbidden/);
     }
   });
 
-  it("REQUIREMENT (Stage 6, corrective pass): exactly the six draft-only operations are allowed — every other operation, including plausible-sounding ones, is still rejected", async () => {
+  it("allows only the eight hardcoded operations used by the workflow", async () => {
     const { assertAllowedInventoryOperation } = await import("@/lib/ebay-account/inventory-allowlist");
-    for (const op of ["createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations", "getInventoryItem"]) {
+    for (const op of ["createInventoryLocation", "createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations", "getInventoryItem", "updateOffer", "publishOffer"]) {
       expect(() => assertAllowedInventoryOperation(op)).not.toThrow();
     }
-    for (const op of ["updateOffer", "deleteOffer", "createInventoryLocation", "updateInventoryLocation", "deleteInventoryLocation", "anythingAtAll"]) {
+    for (const op of ["deleteOffer", "updateInventoryLocation", "deleteInventoryLocation", "anythingAtAll"]) {
       expect(() => assertAllowedInventoryOperation(op)).toThrow(/not on the explicit allowlist/);
     }
   });

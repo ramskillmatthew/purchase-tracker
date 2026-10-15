@@ -2923,3 +2923,8 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 }
 .lr-copy-code-button:hover { background: var(--primary-soft); border-color: var(--primary); }
 .lr-copy-code-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.lr-ebay-live-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 32px)); overflow: auto; }
+.lr-ebay-live-list { display: grid; gap: 8px; margin: 16px 0; }
+.lr-ebay-live-item { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
+.lr-ebay-live-item span { color: var(--text-muted); font-size: 0.86rem; }
+.lr-ebay-live-item.is-blocked { border-color: var(--danger); }

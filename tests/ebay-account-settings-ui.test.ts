@@ -42,7 +42,7 @@ describe("app/settings/page.tsx — Stage 6 (eBay draft batches): evidence-based
     expect(ebaySection).not.toContain("<span>Photo upload — Needs attention</span>");
     expect(ebaySection).not.toContain("<span>Draft creation — Needs attention</span>");
     expect(ebaySection).toMatch(/Photo upload — \{photoUploadReady/);
-    expect(ebaySection).toMatch(/Draft creation — \{draftCreationReady/);
+    expect(ebaySection).toMatch(/Live listing — \{draftCreationReady/);
   });
 
   it("REQUIREMENT: draft-creation readiness requires policies synced AND a usable inventory location, not connection status alone", () => {
@@ -64,9 +64,9 @@ describe("app/settings/page.tsx — disconnected state (exact required copy)", (
   const ebaySection = source.slice(source.indexOf("<h2>eBay UK</h2>"), source.indexOf("<h2>Private email index</h2>"));
 
   it("shows the exact required heading/description/supporting copy", () => {
-    expect(ebaySection).toContain("Connect your eBay selling account to create and manage drafts from Listing Studio.");
+    expect(ebaySection).toContain("Connect your eBay selling account to review and publish listings from Listing Studio.");
     expect(ebaySection).toContain("Secure OAuth connection through eBay.");
-    expect(ebaySection).toContain("Drafts only during testing — nothing will be published automatically.");
+    expect(ebaySection).toContain("Nothing is published automatically — every live listing requires a final review and confirmation.");
   });
 
   it('shows "Not connected" status and a "Connect eBay account" primary action linking straight to the OAuth start route', () => {
@@ -166,20 +166,19 @@ describe("app/settings/page.tsx — eBay listing defaults (postage/return/paymen
   });
 });
 
-describe("app/settings/page.tsx — drafts-only safety", () => {
+describe("app/settings/page.tsx — explicit live-listing safety", () => {
   const ebaySection = source.slice(source.indexOf("<h2>eBay UK</h2>"), source.indexOf("<h2>Private email index</h2>"));
 
-  it("REQUIREMENT: visibly shown, enabled, and locked (not a control that can silently lie)", () => {
-    expect(ebaySection).toContain("Create drafts only — never publish automatically");
-    expect(ebaySection).toContain("Listings are saved as drafts until you choose to publish.");
+  it("visibly states that publication is never automatic and requires final confirmation", () => {
+    expect(ebaySection).toContain("Never publish automatically");
+    expect(ebaySection).toContain("press the final live-listing confirmation");
     expect(ebaySection).toMatch(/type="checkbox" checked disabled/);
   });
 
-  it("REQUIREMENT: no publish route exists anywhere in this codebase yet", () => {
-    // A genuine publish endpoint would live under app/api/ebay/ alongside
-    // the routes this stage introduces — confirmed none does.
-    expect(() => readFileSync("app/api/ebay/publish/route.ts", "utf8")).toThrow();
-    expect(() => readFileSync("app/api/ebay/listings/route.ts", "utf8")).toThrow();
+  it("the live-listing route is separate from account settings and requires an explicit confirmation", () => {
+    const route = readFileSync("app/api/listing-studio/ebay-live-listings/route.ts", "utf8");
+    expect(route).toContain("z.literal(EBAY_LIVE_CONFIRMATION)");
+    expect(route).toContain("requireOwner()");
   });
 });
 
