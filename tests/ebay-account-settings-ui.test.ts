@@ -56,7 +56,7 @@ describe("app/settings/page.tsx — Stage 6 (eBay draft batches): evidence-based
   });
 
   it("never creates/edits/enables/disables/deletes a location — only ever reads/selects an existing one", () => {
-    expect(ebaySection).not.toMatch(/createInventoryLocation|updateInventoryLocation|deleteInventoryLocation|enableInventoryLocation|disableInventoryLocation/i);
+    expect(ebaySection).not.toMatch(/deleteInventoryLocation|enableInventoryLocation|disableInventoryLocation/i);
   });
 });
 

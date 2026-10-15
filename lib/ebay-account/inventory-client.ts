@@ -88,6 +88,16 @@ export async function createEbayInventoryLocation(accessToken: string, merchantL
   if (!response.ok) throw await inventoryError(response, "eBay inventory location could not be created.");
 }
 
+export async function updateEbayInventoryLocation(accessToken: string, merchantLocationKey: string, input: { name: string; postalCode: string }): Promise<void> {
+  assertAllowedInventoryOperation("updateInventoryLocation");
+  if (!/^[A-Za-z0-9_-]{1,50}$/.test(merchantLocationKey)) throw new Error("Invalid eBay inventory location key.");
+  const response = await inventoryRequest(accessToken, "POST", `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}/update_location_details`, {
+    location: { address: { postalCode: input.postalCode, country: "GB" } },
+    name: input.name,
+  });
+  if (!response.ok) throw await inventoryError(response, "eBay inventory location could not be updated.");
+}
+
 /** Read-only — lists every merchant inventory location the connected
  * account already has configured on eBay's side. This app never creates,
  * edits, enables, disables, or deletes a location (see

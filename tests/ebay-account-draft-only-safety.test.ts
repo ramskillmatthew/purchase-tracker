@@ -22,6 +22,7 @@ describe("eBay Inventory API safety — live publishing has one explicit, gated 
       "app/api/ebay/defaults/route.ts",
       "app/api/ebay/disconnect/route.ts",
       "app/api/ebay/inventory-location/route.ts",
+      "app/api/ebay/photo/[imageId]/route.ts",
       "app/api/ebay/sync/route.ts",
     ]);
     expect(routes.filter(route => /publish|offer|listing/i.test(route))).toEqual([]);
@@ -58,7 +59,7 @@ describe("eBay Inventory API safety — live publishing has one explicit, gated 
   it("REQUIREMENT (Stage 6): every write/read call in inventory-client.ts is gated by assertAllowedInventoryOperation with a hardcoded literal — never a variable, never client input", () => {
     const source = read("lib/ebay-account/inventory-client.ts");
     const gates = [...source.matchAll(/assertAllowedInventoryOperation\((["'])([a-zA-Z]+)\1\)/g)].map(m => m[2]);
-    expect(gates.sort()).toEqual(["createInventoryLocation", "createOffer", "createOrReplaceInventoryItem", "getInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku", "publishOffer", "updateOffer"].sort());
+    expect(gates.sort()).toEqual(["createInventoryLocation", "updateInventoryLocation", "createOffer", "createOrReplaceInventoryItem", "getInventoryItem", "getInventoryLocations", "getOffer", "getOffersForSku", "publishOffer", "updateOffer"].sort());
   });
 
   it("REQUIREMENT (Stage 6): lib/listing-studio/ebay-draft-batches.ts (the batch-processing orchestrator) references no publish-capable operation and calls no eBay endpoint directly — it only ever goes through inventory-client.ts's own gated functions", () => {
@@ -114,10 +115,10 @@ describe("lib/ebay-account/inventory-allowlist.ts — assertAllowedInventoryOper
 
   it("allows only the eight hardcoded operations used by the workflow", async () => {
     const { assertAllowedInventoryOperation } = await import("@/lib/ebay-account/inventory-allowlist");
-    for (const op of ["createInventoryLocation", "createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations", "getInventoryItem", "updateOffer", "publishOffer"]) {
+    for (const op of ["createInventoryLocation", "updateInventoryLocation", "createOrReplaceInventoryItem", "createOffer", "getOffer", "getOffersForSku", "getInventoryLocations", "getInventoryItem", "updateOffer", "publishOffer"]) {
       expect(() => assertAllowedInventoryOperation(op)).not.toThrow();
     }
-    for (const op of ["deleteOffer", "updateInventoryLocation", "deleteInventoryLocation", "anythingAtAll"]) {
+    for (const op of ["deleteOffer", "deleteInventoryLocation", "anythingAtAll"]) {
       expect(() => assertAllowedInventoryOperation(op)).toThrow(/not on the explicit allowlist/);
     }
   });

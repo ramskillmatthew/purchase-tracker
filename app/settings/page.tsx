@@ -75,6 +75,7 @@ export default function SettingsPage() {
   const [ebayDefaultsMessage, setEbayDefaultsMessage] = useState("");
   const [ebayLocationDraft, setEbayLocationDraft] = useState({ name: "Main stock", postalCode: "" });
   const [ebayCreatingLocation, setEbayCreatingLocation] = useState(false);
+  const [ebayUpdatingLocation, setEbayUpdatingLocation] = useState(false);
   const [ebayLocationMessage, setEbayLocationMessage] = useState("");
   const [ebayNotice, setEbayNotice] = useState<{ ok: boolean; reason: string | null } | null>(null);
   async function loadIndex() { const response = await fetch("/api/yahoo/index"); if (response.ok) setIndex(await response.json()); }
@@ -154,6 +155,23 @@ export default function SettingsPage() {
       setEbayLocationMessage("Location created. Save defaults to use it for new listings.");
     } catch { setEbayLocationMessage("Network error — could not create this location."); }
     finally { setEbayCreatingLocation(false); }
+  }
+  async function updateEbayLocation() {
+    const selected = ebay?.locations.find(location => location.merchantLocationKey === ebayDefaultsDraft.location);
+    if (ebayUpdatingLocation || !selected || !ebayLocationDraft.postalCode.trim()) return;
+    setEbayUpdatingLocation(true); setEbayLocationMessage("");
+    try {
+      const response = await fetch("/api/ebay/inventory-location", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ merchantLocationKey: selected.merchantLocationKey, name: selected.name || ebayLocationDraft.name, postalCode: ebayLocationDraft.postalCode }),
+      });
+      const body = await response.json();
+      if (!response.ok) { setEbayLocationMessage(body.error || "Could not update this location."); return; }
+      await loadEbay();
+      setEbayLocationDraft(current => ({ ...current, postalCode: "" }));
+      setEbayLocationMessage("Location postcode updated and synced from eBay.");
+    } catch { setEbayLocationMessage("Network error — could not update this location."); }
+    finally { setEbayUpdatingLocation(false); }
   }
   async function refreshVintedCategories() {
     if (vintedRefreshing) return;
@@ -357,6 +375,13 @@ export default function SettingsPage() {
               <label className="field"><span>UK postcode</span><input className="input" value={ebayLocationDraft.postalCode} onChange={event => setEbayLocationDraft(current => ({ ...current, postalCode: event.target.value.toUpperCase() }))} placeholder="e.g. SW1A 1AA" /></label>
               {ebayLocationMessage && <small>{ebayLocationMessage}</small>}
               <button type="button" className="button-secondary" disabled={ebayCreatingLocation || !ebayLocationDraft.postalCode.trim()} onClick={createEbayLocation}>{ebayCreatingLocation ? "Creating…" : "Create eBay location"}</button>
+            </div>}
+            {availableLocations.length > 0 && ebayDefaultsDraft.location && <div className="ebay-location-create">
+              <strong>Update selected location postcode</strong>
+              <small>Enter the complete postcode for {availableLocations.find(location => location.merchantLocationKey === ebayDefaultsDraft.location)?.name || "this location"}. eBay will reject a district-only value such as HG5.</small>
+              <label className="field"><span>Full UK postcode</span><input className="input" value={ebayLocationDraft.postalCode} onChange={event => setEbayLocationDraft(current => ({ ...current, postalCode: event.target.value.toUpperCase() }))} placeholder="e.g. HG5 8XX" /></label>
+              {ebayLocationMessage && <small>{ebayLocationMessage}</small>}
+              <button type="button" className="button-secondary" disabled={ebayUpdatingLocation || !ebayLocationDraft.postalCode.trim()} onClick={updateEbayLocation}>{ebayUpdatingLocation ? "Updating…" : "Update eBay location"}</button>
             </div>}
             <p className="ebay-account-policy-summary">{fulfillmentCount} postage polic{fulfillmentCount === 1 ? "y" : "ies"} · {returnCount} return polic{returnCount === 1 ? "y" : "ies"} · {paymentCount} payment polic{paymentCount === 1 ? "y" : "ies"} · {availableLocations.length} inventory location{availableLocations.length === 1 ? "" : "s"} · Synced from eBay</p>
             <div className="ebay-account-draft-only">

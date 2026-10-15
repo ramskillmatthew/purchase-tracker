@@ -51,6 +51,7 @@ const ALLOWED_INVENTORY_OPERATIONS: ReadonlySet<string> = new Set([
   "updateOffer",
   "publishOffer",
   "createInventoryLocation",
+  "updateInventoryLocation",
 ]);
 
 /**
