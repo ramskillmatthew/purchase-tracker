@@ -72,6 +72,23 @@ export default function AppHeader() {
   const pathname = usePathname();
   const [dark, setDark] = useState(false);
   const [taskBadgeCount, setTaskBadgeCount] = useState(0);
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => { setMobileOpen(false); }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileOpen]);
 
   useEffect(() => {
     const syncTheme = () => setDark(document.documentElement.classList.contains("dark"));
@@ -131,18 +148,34 @@ export default function AppHeader() {
     </aside>
 
     <header className="mobile-topbar">
+      <button type="button" className="mobile-menu-toggle" onClick={() => setMobileOpen(true)} aria-label="Open navigation" aria-expanded={mobileOpen} aria-controls="mobile-navigation">
+        <span /><span /><span />
+      </button>
       <BrandWordmark />
       <button type="button" className="mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? "light" : "dark"} mode`}><Icon name={dark ? "sun" : "moon"} /></button>
     </header>
 
-    <nav className="mobile-nav">
-      {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "mobile-nav-link mobile-nav-active" : "mobile-nav-link"}>
-        <span className="mobile-nav-icon-wrap">
-          <Icon name={link.icon} />
-          {link.href === "/tasks" && taskBadgeCount > 0 && <span className="record-count mobile-nav-badge">{badgeLabel}</span>}
-        </span>
-        <span>{link.label}</span>
-      </Link>)}
-    </nav>
+    <div className={`mobile-nav-shell ${mobileOpen ? "mobile-nav-shell-open" : ""}`} aria-hidden={!mobileOpen}>
+      <button type="button" className="mobile-nav-backdrop" onClick={() => setMobileOpen(false)} aria-label="Close navigation" />
+      <aside id="mobile-navigation" className="mobile-nav-drawer" aria-label="Mobile navigation">
+        <div className="mobile-nav-heading">
+          <BrandWordmark />
+          <button type="button" className="mobile-nav-close" onClick={() => setMobileOpen(false)} aria-label="Close navigation">×</button>
+        </div>
+        <div className="sidebar-label">Workspace</div>
+        <nav className="mobile-nav">
+          {links.map((link) => <Link key={link.href} href={link.href} className={isActive(link.href) ? "mobile-nav-link mobile-nav-active" : "mobile-nav-link"}>
+            <span className="mobile-nav-icon-wrap">
+              <Icon name={link.icon} />
+              {link.href === "/tasks" && taskBadgeCount > 0 && <span className="record-count mobile-nav-badge">{badgeLabel}</span>}
+            </span>
+            <span>{link.label}</span>
+          </Link>)}
+        </nav>
+        <div className="mobile-nav-footer">
+          <div className="workspace-card"><span className="workspace-dot" /><div><strong>Personal workspace</strong><small>Private database</small></div></div>
+        </div>
+      </aside>
+    </div>
   </>;
 }

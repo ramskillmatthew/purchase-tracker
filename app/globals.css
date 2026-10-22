@@ -2928,3 +2928,214 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
 .lr-ebay-live-item { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
 .lr-ebay-live-item span { color: var(--text-muted); font-size: 0.86rem; }
 .lr-ebay-live-item.is-blocked { border-color: var(--danger); }
+
+/* Mobile app shell — appended overrides preserve the existing desktop UI. */
+.mobile-nav-shell { display: none; }
+
+@media (max-width: 900px) {
+  .mobile-topbar {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 90;
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+    height: calc(58px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-topbar .brand-wordmark { justify-self: center; transform: scale(.82); }
+  .mobile-menu-toggle,
+  .mobile-theme,
+  .mobile-nav-close {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--text);
+  }
+  .mobile-menu-toggle { gap: 4px; }
+  .mobile-menu-toggle span { width: 17px; height: 2px; border-radius: 99px; background: currentColor; }
+  .mobile-theme svg { width: 18px; height: 18px; }
+
+  .global-search-shell {
+    position: fixed;
+    inset: calc(58px + env(safe-area-inset-top)) 0 auto;
+    z-index: 80;
+    height: 58px;
+    padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+    background: var(--bg);
+  }
+  .app-main { padding-top: calc(132px + env(safe-area-inset-top)); padding-bottom: max(32px, env(safe-area-inset-bottom)); }
+
+  .mobile-nav-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: block;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .mobile-nav-shell-open { visibility: visible; pointer-events: auto; }
+  .mobile-nav-backdrop {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgba(3, 5, 10, .72);
+    opacity: 0;
+    transition: opacity .2s ease;
+  }
+  .mobile-nav-shell-open .mobile-nav-backdrop { opacity: 1; }
+  .mobile-nav-drawer {
+    position: absolute;
+    inset: 0 auto 0 0;
+    display: flex;
+    flex-direction: column;
+    width: min(330px, 88vw);
+    padding: calc(14px + env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    border-right: 1px solid var(--line);
+    background: var(--sidebar);
+    box-shadow: 24px 0 70px rgba(0, 0, 0, .42);
+    transform: translateX(-104%);
+    transition: transform .24s cubic-bezier(.2, .8, .2, 1);
+  }
+  .mobile-nav-shell-open .mobile-nav-drawer { transform: translateX(0); }
+  .mobile-nav-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; margin-bottom: 18px; }
+  .mobile-nav-heading .brand-wordmark { transform: scale(.85); transform-origin: left center; }
+  .mobile-nav-close { flex: 0 0 auto; font-size: 25px; line-height: 1; }
+  .mobile-nav-drawer .sidebar-label { display: block; margin: 0 10px 8px; }
+  .mobile-nav {
+    position: static;
+    inset: auto;
+    z-index: auto;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    grid-template-columns: none;
+    height: auto;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+  }
+  .mobile-nav-link {
+    display: flex;
+    flex: none;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 13px;
+    min-height: 46px;
+    padding: 0 13px;
+    border-radius: 11px;
+    color: var(--muted);
+    font-size: .9rem;
+    font-weight: 650;
+  }
+  .mobile-nav-link svg { width: 19px; height: 19px; }
+  .mobile-nav-active { background: rgba(99, 91, 255, .22); color: var(--sidebar-text); }
+  .mobile-nav-icon-wrap { display: inline-grid; place-items: center; width: 23px; }
+  .mobile-nav-badge { position: absolute; translate: 14px -11px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 9px; }
+  .mobile-nav-footer { margin-top: 16px; }
+  .mobile-nav-footer .workspace-card { width: 100%; }
+
+  .task-toast-stack { bottom: max(16px, env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 620px) {
+  .app-main { padding-right: max(12px, env(safe-area-inset-right)); padding-left: max(12px, env(safe-area-inset-left)); }
+  .page-title { font-size: clamp(1.55rem, 8vw, 2rem); }
+
+  .purchase-topbar-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .purchase-topbar-actions > * { width: 100%; min-height: 44px; }
+  .purchase-topbar-actions > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+
+  .purchase-grid-wrap,
+  .expense-grid + .table-scroll,
+  .data-panel .table-scroll { max-height: none; overflow: visible; }
+  .purchase-grid,
+  .expense-grid { display: block; width: 100%; min-width: 0 !important; }
+  .purchase-grid thead,
+  .expense-grid thead { display: none; }
+  .purchase-grid tbody,
+  .expense-grid tbody { display: grid; gap: 10px; padding: 10px; }
+  .purchase-grid tbody tr,
+  .expense-grid tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+  }
+  .purchase-grid tbody td,
+  .expense-grid tbody td {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 5px;
+    padding: 0 !important;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  .purchase-grid tbody td::before,
+  .expense-grid tbody td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: .66rem;
+    font-weight: 750;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .purchase-grid .purchase-checkbox-cell { position: absolute; top: 14px; right: 14px; width: auto; }
+  .purchase-grid .purchase-checkbox-cell::before { content: none; }
+  .purchase-grid .description-cell,
+  .purchase-grid td:last-child,
+  .expense-grid td:nth-child(4),
+  .expense-grid td:last-child { grid-column: 1 / -1; padding-right: 34px !important; }
+  .purchase-grid .platform-cell { align-items: flex-start; gap: 12px; }
+  .purchase-grid .cell-actions,
+  .expense-grid .row-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .purchase-grid .cell-actions button,
+  .expense-grid .row-actions button { min-height: 42px; }
+  .purchase-grid .grid-empty-row,
+  .expense-grid .grid-empty-row { display: block; }
+  .purchase-grid .grid-empty-row td,
+  .expense-grid .grid-empty-row td { display: block; padding: 22px !important; }
+  .purchase-grid .grid-empty-row td::before,
+  .expense-grid .grid-empty-row td::before { content: none; }
+
+  .pagination-bar { align-items: stretch; }
+  .pagination-bar-controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .pagination-bar button { min-height: 42px; }
+
+  .listing-studio-sticky-bar { position: sticky; bottom: max(8px, env(safe-area-inset-bottom)); flex-wrap: wrap; }
+  .listing-studio-workflow { overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
+  .listing-studio-toolbar { display: grid; grid-template-columns: 1fr 1fr; }
+  .listing-studio-toolbar > * { min-width: 0; width: 100%; }
+  .listing-product-card { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .listing-product-card-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .listing-product-card-actions > * { width: 100%; min-height: 42px; }
+
+  .lr-toolbar,
+  .lr-filter-tabs,
+  .lr-summary-grid { overflow-x: auto; scrollbar-width: none; }
+  .lr-toolbar { align-items: stretch; }
+  .lr-toolbar > * { min-width: min(260px, 75vw); }
+  .lr-dialog,
+  .lr-ebay-live-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-nav-backdrop,
+  .mobile-nav-drawer { transition: none; }
+}

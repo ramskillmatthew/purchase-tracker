@@ -1,0 +1,19 @@
+{
+  "name": "Trotter's Attire Trading HQ",
+  "short_name": "Trotter's Attire",
+  "description": "Purchase, inventory, sales and marketplace listing workspace.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0c0e14",
+  "theme_color": "#0c0e14",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/branding/trotters-checked-cap.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

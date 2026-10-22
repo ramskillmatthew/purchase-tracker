@@ -496,15 +496,15 @@ function PurchasesPageInner() {
       </tr></thead>
         <tbody>{pageRows.length ? pageRows.map(row => <tr key={row.id} tabIndex={0} className={selectedIds.has(row.id) ? "purchase-row-selected" : undefined} onClick={event => handleRowClick(event, row)} onKeyDown={event => { if (event.key === "Enter") router.push(`/purchases/${row.id}`); }}>
           <td className="purchase-checkbox-cell" onClick={event => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${row.item_description || "this purchase"} (SKU ${row.sku || "none"}, ${row.order_date})`} checked={selectedIds.has(row.id)} onChange={() => toggleRowSelected(row.id)} /></td>
-          <td>{row.order_date}</td>
-          <td>{row.seller_name || "—"}</td>
-          <td className="description-cell">{row.item_description}</td>
-          <td>{row.item_size}</td>
-          <td className="numeric-cell">{Number(row.price_purchased).toFixed(2)}</td>
-          <td>{row.sku ? <span className="sku-pill">{row.sku}</span> : <span aria-label="No SKU">—</span>}</td>
-          <td><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
-          <td><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
-          <td><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); if (row.protectedSaleId) setProtectedNoticeSaleId(row.protectedSaleId); else setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
+          <td data-label="Order date">{row.order_date}</td>
+          <td data-label="Seller">{row.seller_name || "—"}</td>
+          <td data-label="Description" className="description-cell">{row.item_description}</td>
+          <td data-label="Size">{row.item_size}</td>
+          <td data-label="Price" className="numeric-cell">{Number(row.price_purchased).toFixed(2)}</td>
+          <td data-label="SKU">{row.sku ? <span className="sku-pill">{row.sku}</span> : <span aria-label="No SKU">—</span>}</td>
+          <td data-label="Arrived"><ArrivalToggle id={row.id} arrived={row.arrived} description={row.item_description} onToggle={toggleArrived} /></td>
+          <td data-label="Stock"><StockStatusToggle id={row.id} stockStatus={row.stock_status} description={row.item_description} onToggle={toggleStockStatus} /></td>
+          <td data-label="Platform"><div className="platform-cell"><span>{row.purchased_from}</span><div className="cell-actions"><button onClick={event => { event.stopPropagation(); setEditing(row); setOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={event => { event.stopPropagation(); if (row.protectedSaleId) setProtectedNoticeSaleId(row.protectedSaleId); else setConfirmation({ type: "one", id: row.id }); }}>Delete</button></div></div></td>
         </tr>) : hasActiveSearch ? <tr className="grid-empty-row"><td colSpan={10}><div><strong>No matching purchases</strong><span>No purchases match your search. Try different search terms, or clear the search to see all purchases in this view.</span><button onClick={() => changeQuery("")}>Clear search</button></div></td></tr> : <tr className="grid-empty-row"><td colSpan={10}><div><strong>{rows.length === 0 ? "No purchases yet." : "No purchases match this filter."}</strong><span>{error || (rows.length === 0 ? "Click Add purchase to add your first item." : "Try a different stock filter.")}</span>{rows.length === 0 && <button onClick={() => setOpen(true)}>Add purchase</button>}</div></td></tr>}</tbody>
       </table></div>
       <div className="pagination-bar">
