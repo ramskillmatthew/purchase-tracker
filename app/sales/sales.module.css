@@ -1751,3 +1751,41 @@
 .bulkDialogActions { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px 18px; }.bulkConfirm { width: min(500px, calc(100vw - 32px)); padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }.bulkConfirm h2 { margin-top: 0; }.bulkConfirm p { color: var(--muted); line-height: 1.6; }.bulkConfirm > div { display: flex; justify-content: flex-end; gap: 10px; }
 
 @media (max-width: 760px) { .bulkSteps { grid-template-columns: 1fr; }.bulkSteps span { justify-content: flex-start; }.bulkPastePanel, .bulkPreviewHeading, .bulkSaveBar { align-items: stretch; flex-direction: column; }.bulkPreviewHeading > div:last-child, .bulkSaveBar > div { flex-wrap: wrap; justify-content: flex-start; }.bulkSaveBar span { min-width: 105px; }.bulkMapping label { align-items: stretch; flex-direction: column; }.bulkMapping select { width: 100%; } }
+
+@media (max-width: 620px) {
+  .topbar { gap: 9px; margin-bottom: 11px; }
+  .topbarActions { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .topbarActions > * { min-height: 38px; padding-inline: 8px; font-size: 10.5px; }
+  .kpiStrip {
+    display: flex;
+    min-height: 0;
+    margin: 0 -12px 12px;
+    padding: 0 12px 4px;
+    gap: 8px;
+    overflow-x: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+  .kpiMetric {
+    min-width: 142px;
+    min-height: 78px;
+    padding: 12px;
+    justify-content: flex-start;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    scroll-snap-align: start;
+  }
+  .kpiMetric + .kpiMetric { border-left: 1px solid var(--line); }
+  .kpiMetric strong { margin-top: 6px; font-size: 18px; }
+  .filterToolbar { min-height: 0; padding: 8px; gap: 7px; }
+  .filterToolbar > * { min-width: 0; }
+  .filterToolbar .statusFilterSwitch { order: -2; }
+  .filterToolbar .searchBox { order: -1; }
+  .selectControl select, .searchBox, .statusFilterSwitch { height: 38px; }
+  .dashboardGrid { gap: 10px; }
+}

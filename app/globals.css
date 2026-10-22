@@ -3139,3 +3139,89 @@ html:not(.dark) .px-app{background:#0b1018;color:#f3f5fb}
   .mobile-nav-backdrop,
   .mobile-nav-drawer { transition: none; }
 }
+
+/* Phone refinement — compact working layout, not a compressed desktop page. */
+@media (max-width: 620px) {
+  .mobile-topbar {
+    position: sticky;
+    top: 0;
+    height: calc(54px + env(safe-area-inset-top));
+    min-height: 54px;
+    padding-top: env(safe-area-inset-top);
+    grid-template-columns: 40px 1fr 40px;
+  }
+  .mobile-topbar .brand-wordmark { transform: scale(.72); }
+  .mobile-topbar .brand-subtitle { display: none; }
+  .mobile-menu-toggle, .mobile-theme { width: 36px; height: 36px; border-radius: 10px; }
+  .global-search-shell { display: none; }
+  .app-main { padding: 18px max(12px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+
+  .purchase-topbar { margin-bottom: 10px; gap: 8px; }
+  .purchase-topbar h1 { font-size: 1.55rem; line-height: 1.1; }
+  .purchase-topbar-actions {
+    display: flex;
+    width: calc(100vw - 24px);
+    padding-bottom: 2px;
+    gap: 7px;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+  .purchase-topbar-actions > *,
+  .purchase-topbar-actions > :last-child:nth-child(odd) {
+    width: auto;
+    min-width: max-content;
+    min-height: 38px;
+    grid-column: auto;
+    padding-inline: 13px;
+    font-size: 10.5px;
+  }
+
+  .data-panel { overflow: hidden; }
+  .table-toolbar { min-height: 48px; padding: 9px 10px; }
+  .table-toolbar .button-danger { min-height: 34px; padding: 0 11px; }
+  .grid-toolbar { display: flex; padding: 8px 10px; gap: 7px; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .arrival-filter-switch, .stock-filter-switch { order: initial; width: max-content; min-width: max-content; }
+  .arrival-filter-switch button, .stock-filter-switch button { min-width: max-content; padding-inline: 10px; }
+  .purchase-search-box { min-width: 210px; flex: 0 0 210px; }
+  .purchase-search-count { display: none; }
+
+  .purchase-grid tbody,
+  .expense-grid tbody { gap: 8px; padding: 8px; }
+  .purchase-grid tbody tr,
+  .expense-grid tbody tr {
+    height: auto;
+    min-height: 0;
+    gap: 9px 14px;
+    padding: 12px;
+    border-radius: 11px;
+  }
+  .purchase-grid tbody td,
+  .expense-grid tbody td {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.35;
+    text-overflow: clip;
+    white-space: normal;
+  }
+  .purchase-grid tbody td::before,
+  .expense-grid tbody td::before { font-size: 8px; letter-spacing: .07em; }
+  .purchase-grid .purchase-checkbox-cell { top: 11px; right: 11px; }
+  .purchase-grid .description-cell,
+  .purchase-grid td:last-child,
+  .expense-grid td:nth-child(4),
+  .expense-grid td:last-child { padding-right: 28px !important; }
+  .purchase-grid .platform-cell { gap: 8px; }
+  .purchase-grid .cell-actions,
+  .expense-grid .row-actions { gap: 7px; }
+  .purchase-grid .cell-actions button,
+  .expense-grid .row-actions button { min-height: 34px; }
+  .expense-grid td:last-child { padding-right: 0 !important; }
+
+  .pagination-bar { gap: 8px; padding: 9px 10px; }
+  .pagination-bar-controls { gap: 6px; }
+  .pagination-bar button { min-height: 36px; }
+}
