@@ -52,7 +52,10 @@ export function homeSalesChart(rows: SalesOrderListItem[], maxPoints = 6): HomeS
     const bucket = chronological.slice(index, index + bucketSize);
     const last = bucket[bucket.length - 1];
     points.push({
-      key: `${bucket[0].sale_date}:${last.sale_date}`,
+      // Dates are not unique: several sales (and therefore several chart
+      // buckets) can share the same day. Stable row IDs keep React keys
+      // unique without making them depend on the rendered array index.
+      key: `${bucket[0].id}:${last.id}`,
       label: new Date(`${last.sale_date}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
       revenuePence: bucket.reduce((sum, row) => sum + Math.round(Number(row.total_revenue) * 100), 0),
       profitPence: bucket.reduce((sum, row) => sum + row.profitPence, 0),

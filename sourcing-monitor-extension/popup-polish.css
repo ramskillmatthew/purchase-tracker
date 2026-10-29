@@ -1,0 +1,68 @@
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  min-height: 31px;
+  padding: 0;
+  border-color: #34475e;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #132437, #0c1927);
+  color: #b9c8d9;
+  box-shadow: inset 0 1px #ffffff08;
+}
+.icon-button svg, #expand-worker svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.brand-logo { position: relative; overflow: hidden; }
+.brand-logo img { display: block; width: 23px; height: 23px; object-fit: contain; }
+.brand-logo .logo-fallback { display: none; }
+.brand-logo img.logo-error { display: none; }
+.brand-logo img.logo-error + .logo-fallback { display: block; }
+.compact body { width: 206px; min-height: 0; }
+.compact main { display: none; }
+.compact #compact-worker {
+  display: grid;
+  grid-template-columns: 10px 1fr 32px;
+  gap: 10px;
+  align-items: center;
+  width: 206px;
+  height: 58px;
+  min-height: 0;
+  padding: 9px 10px;
+  border: 1px solid #38506a;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #0d1d2c, #091521);
+  box-shadow: 0 12px 30px #0008, inset 0 1px #ffffff08;
+  text-align: left;
+}
+.compact #compact-light {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #49e6ae;
+  box-shadow: 0 0 5px #49e6ae, 0 0 15px #39dda0;
+}
+.compact-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.compact-copy strong { margin: 0; color: #65efbe; font-size: 11px; letter-spacing: .11em; }
+.compact-copy span { overflow: hidden; color: #8fa3b8; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.compact #expand-worker {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-color: #344a62;
+  border-radius: 8px;
+  background: #102235;
+  color: #c5d3e1;
+}
+.compact.paused #compact-light { background: #f0b83e; box-shadow: 0 0 5px #f0b83e, 0 0 13px #e7a82d; }
+.compact.paused .compact-copy strong { color: #f2c45c; }

@@ -1,0 +1,53 @@
+/* Cross-workspace containment and alignment corrections discovered in live QA. */
+[class*="finance-hub_page"],[class*="finance-hub_page"] *{box-sizing:border-box}
+[class*="finance-hub_titleRow"]>*,[class*="finance-hub_actions"],[class*="finance-hub_metric"]>div,[class*="finance-hub_marketplaceRow"] article>*,[class*="finance-hub_events"] article>*,[class*="finance-hub_commitments"] article>*{min-width:0}
+[class*="finance-hub_actions"] button{display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
+[class*="finance-hub_marketplaceRow"]{gap:10px!important}
+[class*="finance-hub_marketplaceRow"] article{grid-template-columns:minmax(70px,1fr) auto auto!important;gap:14px!important}
+[class*="finance-hub_metric"] strong,[class*="finance-hub_marketplaceRow"] b,[class*="finance-hub_events"] b,[class*="finance-hub_commitments"] b{overflow-wrap:anywhere}
+[class*="finance-notifications_bell"]{display:grid!important;width:34px!important;min-width:34px!important;height:34px!important;padding:0!important;place-items:center!important;line-height:0!important}
+[class*="finance-notifications_bell"] svg{display:block;width:17px;height:17px}
+
+[class*="accounts_summary"]>div{align-items:flex-start}
+[class*="accounts_summary"]>div button{height:40px;padding:0 16px}
+[class*="accounts_accountList"] article{grid-template-columns:38px minmax(160px,1fr) repeat(3,minmax(92px,120px)) auto auto!important}
+[class*="accounts_accountList"] article>*{min-width:0}
+[class*="accounts_accountList"] article>button{height:38px;white-space:nowrap}
+[class*="accounts_accountList"] article>button:last-child{border-color:#70404a;background:#3b2028;color:#ffaaa9}
+[class*="accounts_accountList"] b,[class*="accounts_accountList"] small,[class*="accounts_accountList"] em{overflow-wrap:anywhere}
+[class*="accounts_accountList"] article>i{border:1px solid color-mix(in srgb,var(--account-colour) 65%,#ffffff 15%);background:color-mix(in srgb,var(--account-colour) 28%,#07131e);color:var(--account-colour)}
+[class*="accounts_accountList"] article>div>b{color:var(--account-colour)}
+[class*="accounts_accountList"] article{grid-template-columns:48px minmax(160px,1fr) repeat(3,minmax(92px,120px)) auto auto!important}
+[class*="accounts_accountList"] article>i{width:48px!important;height:48px!important;padding:0!important;background-color:#101c27!important;background-position:center!important;background-repeat:no-repeat!important;background-size:cover!important;color:transparent!important}
+[class*="accounts_accountList"] article[data-account-brand="starling"]>i{border-color:#7459a4!important}
+[class*="accounts_accountList"] article[data-account-brand="monzo"]>i{border-color:#ff5b61!important}
+[class*="accounts_accountList"] article[data-account-brand="revolut-business"]>i{border-color:#50565d!important}
+[class*="accounts_accountList"] article[data-account-brand="revolut"]>i{border-color:#cfd6dc!important}
+[class*="accounts_ledger"] table{min-width:900px;table-layout:fixed}
+[class*="accounts_ledger"] td{overflow-wrap:anywhere;white-space:normal!important}
+
+[class*="cards_cards"]>article,[class*="cards_cards"]>article>*{min-width:0}
+[class*="cards_cards"] header{align-items:center;gap:12px}
+[class*="cards_cards"] h2{margin:10px 0;font-variant-numeric:tabular-nums}
+[class*="cards_cards"] p{display:grid!important;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;margin:7px 0}
+[class*="cards_cards"] p>*{min-width:0;overflow-wrap:anywhere}
+[class*="cards_cards"] p em{grid-column:1/-1;font-size:10px}
+[class*="cards_cards"] footer{flex-wrap:wrap}
+[class*="cards_cards"] footer button{flex:1;white-space:nowrap}
+[class*="cards_remove"]{border-color:#82454c!important;background:#421e27!important;color:#ffaaa9!important}
+[class*="cards_activity"] p>*{min-width:0;overflow-wrap:anywhere}
+[class*="cards_warning"]{margin:14px 0;padding:11px;border:1px solid #8a4a52;border-radius:6px;background:#351b23;color:#ffb4b4}
+
+/* Provider artwork determines card styling, independent of database order. */
+[class*="cards_cards"]>article:has(img[alt*="amex" i]),[class*="cards_cards"]>article:has(img[alt*="american express" i]){border-color:#c8ad62!important;background:linear-gradient(#171209c7,#171209c7),url('/branding/finance/amex-gold.png') center/cover!important}
+[class*="cards_cards"]>article:has(img[alt*="barclays" i]){border-color:#1995de!important;background:linear-gradient(145deg,#0759a0,#06396e)!important}
+[class*="cards_cards"]>article:has(img[alt*="capital" i]){border-color:#665f55!important;background:#171512!important}
+
+/* The history ledger must remain inside its panel at every workspace width. */
+[class*="history_ledger"]{overflow:hidden!important}
+[class*="history_ledger"] p{grid-template-columns:72px 92px minmax(70px,1fr) minmax(80px,110px) 84px!important;gap:6px!important}
+[class*="history_ledger"] p>*{min-width:0!important;max-width:100%;overflow:hidden!important;text-overflow:ellipsis;overflow-wrap:anywhere}
+[class*="history_ledger"] p strong{text-align:right;white-space:nowrap}
+
+@media(max-width:1050px){[class*="accounts_accountList"] article{grid-template-columns:48px minmax(150px,1fr) repeat(2,minmax(90px,1fr))!important}[class*="accounts_accountList"] article>span:nth-of-type(3){display:none}}
+@media(max-width:760px){[class*="accounts_accountList"] article{grid-template-columns:48px minmax(0,1fr)!important}[class*="accounts_accountList"] article>span,[class*="accounts_accountList"] article>button{grid-column:2}}

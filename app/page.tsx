@@ -17,6 +17,33 @@ import styles from "./home.module.css";
 const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const shortMoney = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
 
+type NetProfitBreakdown = {
+  profitReversedPence: number;
+  returnPostagePence: number;
+  unrecoveredReturnCostsPence: number;
+  inventoryWriteOffPence: number;
+  lostInventoryPence: number;
+  unsellableStockPence: number;
+  otherWriteOffPence: number;
+  refundWithoutReturnPence: number;
+};
+
+const EMPTY_NET_PROFIT_BREAKDOWN: NetProfitBreakdown = {
+  profitReversedPence: 0,
+  returnPostagePence: 0,
+  unrecoveredReturnCostsPence: 0,
+  inventoryWriteOffPence: 0,
+  lostInventoryPence: 0,
+  unsellableStockPence: 0,
+  otherWriteOffPence: 0,
+  refundWithoutReturnPence: 0,
+};
+
+function signedMoney(pence: number): string {
+  if (pence === 0) return money.format(0);
+  return `${pence > 0 ? "+" : "−"}${money.format(Math.abs(pence) / 100)}`;
+}
+
 function Icon({ name }: { name: "purchases" | "spend" | "revenue" | "profit" | "margin" | "stock" }) {
   const paths = {
     purchases: <><path d="M3 4h2l1.4 9h9.8l2-6H6"/><circle cx="9" cy="18" r="1"/><circle cx="16" cy="18" r="1"/></>,
@@ -66,6 +93,8 @@ export default function HomePage() {
   // one), plus return postage/fees and inventory losses (always negative).
   // Never affects any other card. 0 while not loaded / feature not migrated.
   const [returnLossAdjustmentPence, setReturnLossAdjustmentPence] = useState(0);
+  const [returnLossBreakdown, setReturnLossBreakdown] = useState<NetProfitBreakdown>(EMPTY_NET_PROFIT_BREAKDOWN);
+  const [showProfitBreakdown, setShowProfitBreakdown] = useState(false);
   const [error, setError] = useState("");
   const [salesError, setSalesError] = useState("");
   const [opsError, setOpsError] = useState("");
@@ -102,8 +131,16 @@ export default function HomePage() {
     // adjustment at 0 rather than breaking the Net profit card.
     fetch(`/api/returns-losses/net-profit-adjustment?preset=${HOME_PERIOD_TO_SALES_PRESET[period]}`, { signal: controller.signal })
       .then(response => response.ok ? response.json() : { adjustmentPence: 0 })
-      .then(body => setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0))
-      .catch(() => { if (!controller.signal.aborted) setReturnLossAdjustmentPence(0); });
+      .then(body => {
+        setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0);
+        setReturnLossBreakdown({ ...EMPTY_NET_PROFIT_BREAKDOWN, ...(body?.breakdown ?? {}) });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setReturnLossAdjustmentPence(0);
+          setReturnLossBreakdown(EMPTY_NET_PROFIT_BREAKDOWN);
+        }
+      });
     return () => controller.abort();
   }, [period, returnsRefreshKey]);
 
@@ -130,6 +167,23 @@ export default function HomePage() {
   const chartMax = Math.max(1, ...chart.flatMap(point => [point.revenuePence, Math.max(0, point.profitPence)]));
   const selectedPeriod = periods.find(option => option.value === period)?.label ?? "This Month";
   const kpis = completed?.kpis;
+  const completedSalesProfitPence = kpis?.profitPence ?? 0;
+  const allValidSalesProfitPence = allSalesKpis?.profitPence ?? 0;
+  const pendingSalesProfitPence = allValidSalesProfitPence - completedSalesProfitPence;
+  const returnsAndReturnCostsPence = -(
+    returnLossBreakdown.profitReversedPence
+    + returnLossBreakdown.returnPostagePence
+    + returnLossBreakdown.unrecoveredReturnCostsPence
+    + returnLossBreakdown.inventoryWriteOffPence
+  );
+  const inventoryLossesPence = -(
+    returnLossBreakdown.lostInventoryPence
+    + returnLossBreakdown.unsellableStockPence
+    + returnLossBreakdown.otherWriteOffPence
+  );
+  const refundWithoutReturnPence = -returnLossBreakdown.refundWithoutReturnPence;
+  const profitBeforeExpensesPence = allValidSalesProfitPence + returnLossAdjustmentPence;
+  const netProfitPence = netProfitWithReturnsLossesPence(allValidSalesProfitPence, operatingExpensePence, returnLossAdjustmentPence);
   const metricCards = [
     { name: "purchases" as const, label: "Purchases", value: loading ? "—" : report.periodPurchases.length.toLocaleString("en-GB"), caption: selectedPeriod },
     { name: "spend" as const, label: "Stock spend", value: loading ? "—" : money.format(report.stockSpend), caption: "Purchases in period" },
@@ -143,6 +197,37 @@ export default function HomePage() {
     <header className={styles.header}><h1>Home</h1><div className={styles.periodControl}><span className={styles.periodLabel}>Compare period</span><div className={styles.periodSwitch} aria-label="Compare period">{periods.map(option => <button key={option.value} type="button" className={period === option.value ? styles.active : ""} aria-pressed={period === option.value} onClick={() => setPeriod(option.value)}>{option.label}</button>)}</div></div></header>
     {error && <div className={styles.error}>{error}</div>}{salesError && <div className={styles.error}>{salesError}</div>}
     <div className={styles.kpis} aria-busy={loading || salesLoading}>{metricCards.map(card => <article className={styles.kpi} key={card.label}><span className={`${styles.kpiIcon} ${card.profit ? styles.profitIcon : ""}`}><Icon name={card.name}/></span><span className={styles.kpiLabel}>{card.label}</span><strong className={`${styles.kpiValue} ${card.profit ? styles.profit : ""}`}>{card.value}</strong><small className={styles.kpiCaption}>{card.caption}</small></article>)}</div>
+
+    <section className={styles.profitCalculation} aria-busy={loading || salesLoading}>
+      <button className={styles.profitCalculationSummary} type="button" onClick={() => setShowProfitBreakdown(open => !open)} aria-expanded={showProfitBreakdown}>
+        <span><strong>Net profit calculation</strong><small>{selectedPeriod} · includes pending sales</small></span>
+        <span className={styles.profitFormula}>
+          <b>{salesLoading ? "—" : money.format(allValidSalesProfitPence / 100)}</b>
+          <i>sales profit</i><em>{returnLossAdjustmentPence < 0 ? "−" : "+"}</em>
+          <b className={returnLossAdjustmentPence < 0 ? styles.formulaCost : styles.formulaPositive}>{salesLoading ? "—" : money.format(Math.abs(returnLossAdjustmentPence) / 100)}</b>
+          <i>returns &amp; losses</i><em>−</em>
+          <b className={styles.formulaCost}>{loading ? "—" : money.format(operatingExpensePence / 100)}</b>
+          <i>expenses</i><em>=</em>
+          <b className={styles.formulaNet}>{loading || salesLoading ? "—" : money.format(netProfitPence / 100)}</b>
+          <i>net profit</i>
+        </span>
+        <span className={styles.profitCalculationAction}>{showProfitBreakdown ? "Hide breakdown" : "View breakdown"} <b aria-hidden="true">{showProfitBreakdown ? "⌃" : "⌄"}</b></span>
+      </button>
+      {showProfitBreakdown && <div className={styles.profitBreakdown}>
+        <div className={styles.profitBreakdownIntro}>Every figure below is recalculated from the records dated inside <strong>{selectedPeriod.toLowerCase()}</strong>. Nothing is typed in as a dashboard total.</div>
+        <div className={styles.profitBreakdownRows}>
+          <Link href="/sales" className={styles.profitBreakdownRow}><span><strong>Completed-sale profit</strong><small>Profit from delivered/completed sales</small></span><b>{signedMoney(completedSalesProfitPence)}</b></Link>
+          <Link href="/sales" className={styles.profitBreakdownRow}><span><strong>Pending-sale profit</strong><small>Awaiting dispatch, sent or awaiting delivery/payout</small></span><b>{signedMoney(pendingSalesProfitPence)}</b></Link>
+          <div className={`${styles.profitBreakdownRow} ${styles.profitSubtotal}`}><span><strong>Total profit from valid sales</strong><small>Completed plus pending sales</small></span><b>{money.format(allValidSalesProfitPence / 100)}</b></div>
+          <Link href="/returns-losses" className={styles.profitBreakdownRow}><span><strong>Returns and return costs</strong><small>Reversed sale profit, postage and unrecovered costs</small></span><b className={returnsAndReturnCostsPence < 0 ? styles.breakdownNegative : styles.breakdownPositive}>{signedMoney(returnsAndReturnCostsPence)}</b></Link>
+          <Link href="/returns-losses" className={styles.profitBreakdownRow}><span><strong>Faulty, lost and written-off stock</strong><small>Includes the dated faulty-stock losses recorded in the app</small></span><b className={inventoryLossesPence < 0 ? styles.breakdownNegative : styles.breakdownPositive}>{signedMoney(inventoryLossesPence)}</b></Link>
+          <Link href="/returns-losses" className={styles.profitBreakdownRow}><span><strong>Refunds without a return</strong><small>Customer refunds and associated stock/cost write-offs</small></span><b className={refundWithoutReturnPence < 0 ? styles.breakdownNegative : styles.breakdownPositive}>{signedMoney(refundWithoutReturnPence)}</b></Link>
+          <div className={`${styles.profitBreakdownRow} ${styles.profitSubtotal}`}><span><strong>Profit before operating expenses</strong><small>For all time, this is the figure comparable with the spreadsheet&apos;s total profit</small></span><b>{money.format(profitBeforeExpensesPence / 100)}</b></div>
+          <Link href="/expenses" className={styles.profitBreakdownRow}><span><strong>Operating expenses</strong><small>Every expense dated inside the selected period</small></span><b className={styles.breakdownNegative}>{signedMoney(-operatingExpensePence)}</b></Link>
+          <div className={`${styles.profitBreakdownRow} ${styles.profitBreakdownTotal}`}><span><strong>Net profit</strong><small>Sales profit + returns/losses − operating expenses</small></span><b>{money.format(netProfitPence / 100)}</b></div>
+        </div>
+      </div>}
+    </section>
 
     <div className={styles.grid}><TodaysTasksCard maxTasks={4}/><section className={styles.panel}><div className={styles.heading}><h2>Sales Overview</h2><span>{selectedPeriod}</span></div><div className={styles.overviewBody}><div className={styles.overviewStats}>
       <div className={styles.stat}><span className={styles.statIcon}>▢</span><strong>{salesLoading ? "—" : kpis?.completedSales ?? 0}</strong><small>Completed sales</small></div>

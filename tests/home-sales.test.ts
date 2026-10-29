@@ -32,4 +32,15 @@ describe("Home sales dashboard helpers", () => {
     const points = homeSalesChart([order("b", "2026-08-02", "completed", 20, -50), order("a", "2026-08-01", "completed", 10, 300)], 2);
     expect(points.map(point => [point.label, point.revenuePence, point.profitPence])).toEqual([["1 Aug", 1000, 300], ["2 Aug", 2000, -50]]);
   });
+
+  it("uses unique chart keys when multiple buckets fall on the same date", () => {
+    const rows = [
+      order("a", "2026-10-03", "completed", 10, 100),
+      order("b", "2026-10-03", "completed", 20, 200),
+      order("c", "2026-10-03", "completed", 30, 300),
+    ];
+    const points = homeSalesChart(rows, 3);
+    expect(new Set(points.map(point => point.key)).size).toBe(points.length);
+    expect(points.map(point => point.key)).toEqual(["a:a", "b:b", "c:c"]);
+  });
 });

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sourcing Monitor</title><link rel="stylesheet" href="popup.css"><link rel="stylesheet" href="popup-polish.css"></head>
+<body><main>
+<header><div class="brand"><div class="brand-mark">TA</div><div><p class="eyebrow">TROTTER'S ATTIRE</p><h1>Sourcing Monitor</h1><p class="subtitle">Reservation worker</p></div></div><div class="header-actions"><span class="badge"><i></i>TEST MODE</span><button id="collapse-worker" class="icon-button" title="Collapse worker" aria-label="Collapse worker"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 7h4V3M16 13h-4v4M8 7 3.5 2.5M12 13l4.5 4.5"/></svg></button></div></header>
+<nav class="tabs"><button class="tab active" data-tab="connections">⌁ Connections</button><button class="tab" data-tab="history">▥ History</button><button class="tab" data-tab="imports">◇ Import Feed</button></nav>
+<div class="tab-panel active" data-panel="connections">
+<section class="notice"><div class="notice-icon">✓</div><div><strong>Protected test mode</strong><span>Only newly arriving Buy Now buttons are clicked. Existing listings are ignored.</span></div></section>
+<section><h2>Assign this Discord tab</h2><p id="tab-title" class="muted">Finding the active tab…</p><div class="roles"><button data-role="monitor1">Monitor 1</button><button data-role="monitor2">Monitor 2</button><button data-role="inbox">Inbox</button></div></section>
+<section><h2>Connections</h2><div id="assignments" class="connections"></div></section>
+<div class="controls main-controls"><button id="toggle" class="primary">Start test monitoring</button><button id="clear">Clear results</button></div>
+<details><summary>Advanced test controls</summary><div class="advanced"><button id="test-visible">Test visible buttons</button><h2>Click test</h2><div class="click-tests"><button data-click-test="monitor1">Test Monitor 1</button><button data-click-test="monitor2">Test Monitor 2</button><button data-click-test="both">Test both</button><button id="stop-click-test" class="stop">Stop clicking</button></div><h2>Inbox outcome test</h2><div class="controls"><button id="start-inbox-test" class="primary">Start inbox test</button><button id="stop-inbox-test">Stop inbox</button></div><div id="inbox-outcomes" class="list"><p class="muted">No new inbox outcomes recorded.</p></div></div></details>
+</div>
+<div class="tab-panel" data-panel="history">
+<section class="metrics"><div><span>Total clicks</span><strong id="metric-total">0</strong></div><div><span>Average click time</span><strong id="metric-average">—</strong></div><div><span>Fastest click</span><strong id="metric-fastest">—</strong></div><div><span>Slowest click</span><strong id="metric-slowest">—</strong></div></section>
+<section><div class="row"><h2>Recent events</h2><select id="history-filter"><option value="all">All monitors</option><option value="monitor1">Monitor 1</option><option value="monitor2">Monitor 2</option></select></div><div class="history-table"><div class="history-head"><span>Time</span><span>Monitor</span><span>Click time</span><span>Status</span></div><div id="detections"><p class="empty">No clicks recorded yet.</p></div></div></section>
+</div>
+<div class="tab-panel" data-panel="imports">
+<section><div class="row"><div><h2>Reserved Vinted items</h2><p class="muted">Oldest first · Vinted UK size is authoritative</p></div><span id="import-count" class="count-pill">0 items</span></div><div class="import-actions"><button id="import-old">Import visible</button><button id="enrich-next" class="primary">Read next listing</button><button id="clear-imports">Clear</button></div><div id="import-queue" class="import-list"><p class="empty">No reservations imported.</p></div></section>
+</div>
+<footer><span class="ready-dot"></span><strong>READY</strong><span id="status">Worker standing by</span></footer>
+</main><aside id="compact-worker"><span id="compact-light"></span><div class="compact-copy"><strong id="compact-title">READY</strong><span id="compact-detail">Worker standing by</span></div><button id="expand-worker" title="Expand Sourcing Monitor" aria-label="Expand Sourcing Monitor"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 3H3v5M12 17h5v-5M3 3l5 5M17 17l-5-5"/></svg></button></aside>
+<script src="popup.js"></script></body></html>

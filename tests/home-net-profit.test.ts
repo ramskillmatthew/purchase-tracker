@@ -232,6 +232,13 @@ describe("app/page.tsx wiring — Net profit card no longer gated on process_sta
     // Stage 1: the signed adjustment comes from the dedicated endpoint, folded (added) into the card
     expect(source).toContain("/api/returns-losses/net-profit-adjustment?preset=");
     expect(source).toContain("setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0)");
+    // The visible audit trail is built from the exact same live inputs as the
+    // card, rather than from a hard-coded reconciliation number.
+    expect(source).toContain("Net profit calculation");
+    expect(source).toContain("Total profit from valid sales");
+    expect(source).toContain("Faulty, lost and written-off stock");
+    expect(source).toContain("Profit before operating expenses");
+    expect(source).toContain("Every figure below is recalculated from the records");
     // and is NOT the old process-status-gated completed-only figure
     expect(source).not.toContain('money.format((kpis?.profitPence ?? 0) / 100), caption: "Profit in period"');
   });

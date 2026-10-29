@@ -1,0 +1,2 @@
+import{describe,expect,it}from"vitest";import{reconciliationDifference,transferBalances}from"@/lib/finance/accounts";
+describe("finance accounts",()=>{it("moves cash without creating or destroying it",()=>expect(transferBalances(500000,0,300000)).toEqual({fromPence:200000,toPence:300000,totalPence:500000}));it("records only the reconciliation difference",()=>expect(reconciliationDifference(1000000,975000)).toBe(-25000));});

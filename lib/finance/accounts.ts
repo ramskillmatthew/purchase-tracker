@@ -1,0 +1,2 @@
+export function transferBalances(fromPence:number,toPence:number,amountPence:number){if(!Number.isSafeInteger(amountPence)||amountPence<=0)throw new Error("Transfer amount must be positive pence.");return{fromPence:fromPence-amountPence,toPence:toPence+amountPence,totalPence:fromPence+toPence}}
+export function reconciliationDifference(currentPence:number,newPence:number){if(!Number.isSafeInteger(currentPence)||!Number.isSafeInteger(newPence))throw new Error("Balances must be integer pence.");return newPence-currentPence}

@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Trotter's Attire — Sourcing Monitor",
+  "short_name": "Sourcing Monitor",
+  "version": "0.7.2",
+  "description": "Tests new Buy Now detection and click latency across two assigned Discord sourcing monitors.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://discord.com/*", "https://*.vinted.co.uk/*"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Sourcing Monitor setup",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://discord.com/*"],
+      "js": ["shared/inbox-rules.js", "discord-content-script.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://*.vinted.co.uk/*"],
+      "js": ["vinted-listing-content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

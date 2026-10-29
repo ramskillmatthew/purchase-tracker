@@ -1,0 +1,8 @@
+import {NextResponse} from "next/server";
+import {safeApiError} from "@/lib/auth/api";
+import {requireOwner} from "@/lib/auth/server";
+import {supabaseRequest} from "@/lib/supabase";
+import {completeOutgoingSchema} from "@/lib/validation/finance";
+
+const messages:Record<string,string>={outgoing_not_found:"This planned outgoing could not be found.",outgoing_not_payable:"This outgoing is already paid or cancelled.",payment_parts_mismatch:"The payment split must equal the amount being paid.",payment_exceeds_outstanding:"The payment is larger than the outstanding balance.",payment_method_not_found:"Choose a valid account or card.",actual_details_required:"Review the final purchase or expense details before completing payment."};
+export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){try{const user=await requireOwner(),{id}=await params,input=completeOutgoingSchema.parse(await request.json());try{const response=await supabaseRequest("rpc/fh_pay_planned_outgoing",{method:"POST",body:JSON.stringify({p_owner_id:user.id,p_outgoing_id:id,p_amount_pence:input.amountPence,p_paid_on:input.paidOn,p_finalise:input.finalise,p_parts:input.paymentParts,p_actual_purchase:input.actualPurchase??null,p_actual_expense:input.actualExpense??null,p_idempotency_key:input.idempotencyKey,p_actor:user.email??null})});return NextResponse.json(await response.json())}catch(error){if(error instanceof Error){const reason=Object.keys(messages).find(key=>error.message.includes(key));if(reason)return NextResponse.json({error:messages[reason],reason},{status:409})}throw error}}catch(error){return safeApiError(error,"Could not record this outgoing payment.")}}

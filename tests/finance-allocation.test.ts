@@ -1,0 +1,3 @@
+import{describe,expect,it}from"vitest";import{accountReservedPence,allocationProgress,allocationWouldExceedAccount}from"@/lib/finance/allocation";
+const rows=[{id:"tax",accountId:"bank",balancePence:250000},{id:"stock",accountId:"bank",balancePence:180000},{id:"other",accountId:"second",balancePence:50000}];
+describe("allocations",()=>{it("reserves money without changing the account balance",()=>expect(accountReservedPence(rows,"bank")).toBe(430000));it("warns but does not reject over-allocation",()=>expect(allocationWouldExceedAccount(rows,"bank",500000,100000)).toBe(true));it("can exceed a target visibly",()=>expect(allocationProgress(12000,10000)).toBe(120));});
