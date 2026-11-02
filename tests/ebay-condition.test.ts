@@ -24,10 +24,8 @@ describe("toEbayInventoryCondition — fail-closed for ambiguous/ungraded labels
     }
   });
 
-  it("REQUIREMENT: 'Pre-owned - Good' fails closed — eBay's own display synonym for USED_EXCELLENT is confusingly named and never trusted blindly", () => {
-    const result = toEbayInventoryCondition("Pre-owned - Good");
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toBe("Choose a specific eBay condition.");
+  it("maps eBay UK's exact category label 'Pre-owned - Good' to condition id 3000's inventory enum", () => {
+    expect(toEbayInventoryCondition("Pre-owned - Good")).toEqual({ ok: true, enumValue: "USED_EXCELLENT" });
   });
 
   it("REQUIREMENT: bare 'Good' fails closed — ambiguous against eBay's own 'Good - Refurbished', never assumed to mean USED_GOOD", () => {
@@ -65,7 +63,7 @@ describe("toEbayInventoryCondition — fail-closed for ambiguous/ungraded labels
   });
 
   it("REQUIREMENT: no generic/ambiguous condition ever resolves to USED_EXCELLENT — the exact old failure mode", () => {
-    for (const label of ["Used", "Pre-owned", "Pre-owned - Good", "some made up condition", null]) {
+    for (const label of ["Used", "Pre-owned", "some made up condition", null]) {
       const result = toEbayInventoryCondition(label);
       if (result.ok) expect(result.enumValue).not.toBe("USED_EXCELLENT");
       else expect(result.ok).toBe(false);
@@ -134,6 +132,7 @@ describe("REQUIREMENT 3: every retained internal/legacy condition form the app c
     ["Used – Very Good", "USED_VERY_GOOD"], ["Very Good", "USED_VERY_GOOD"],
     ["Used - Good", "USED_GOOD"],
     ["Used - Excellent", "USED_EXCELLENT"],
+    ["Pre-owned - Good", "USED_EXCELLENT"],
     ["Used - Acceptable", "USED_ACCEPTABLE"], ["Acceptable", "USED_ACCEPTABLE"],
     ["For parts or not working", "FOR_PARTS_OR_NOT_WORKING"],
     // Already-correct enum tokens must pass straight through unchanged.
@@ -146,7 +145,7 @@ describe("REQUIREMENT 3: every retained internal/legacy condition form the app c
   }
 
   it("every ambiguous bare term named in the corrective-pass audit is now rejected, never mapped", () => {
-    for (const label of ["Used", "Pre-owned", "Pre-owned - Good", "Good", "Fair", "Open box used"]) {
+    for (const label of ["Used", "Pre-owned", "Good", "Fair", "Open box used"]) {
       const result = toEbayInventoryCondition(label);
       expect(result.ok, label).toBe(false);
     }

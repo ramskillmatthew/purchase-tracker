@@ -141,6 +141,7 @@ describe("eBay drafter form steps — REQUIREMENT (Phase 6): 'the click succeede
     const result = stepVerifyPopulatedFields(ITEM, fixture);
     expect(result.ok).toBe(true);
   });
+
 });
 
 describe("eBay drafter form steps — page-state detection", () => {

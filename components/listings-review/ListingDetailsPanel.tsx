@@ -61,7 +61,7 @@ function EbayWorkflowStatusBlock({ ebay }: { ebay: EbayTabData }) {
   const tone = ebay.workflowStatus ? EBAY_FEED_ITEM_STATUS_TONE[ebay.workflowStatus] : (ebay.contentReady ? READINESS_TONE_READY : READINESS_TONE_NEEDS_REVIEW);
   const secondaryLine = ebay.workflowStatus
     ? computeEbayFeedWorkflowSecondaryLine({ itemStatus: ebay.workflowStatus, queuePosition: ebay.queuePosition, errorMessage: ebay.errorMessage })
-    : (ebay.contentReady ? "All required information is complete." : null);
+    : (ebay.contentReady ? "All required information is complete." : ebay.reviewReasons[0] ?? "Required eBay information is incomplete.");
   return <>
     <WorkflowStatus label={label} tone={tone} pulse={isEbayFeedItemInProgress(ebay.workflowStatus)} secondaryLine={secondaryLine} />
     {ebay.workflowStatus === "succeeded" && (
@@ -174,6 +174,7 @@ export type EbayTabData = {
   profitPence: number | null;
   quantity: number | null;
   conditionValue: string | null;
+  reviewReasons: string[];
   selection: EbayPolicySelection;
   // PHASE 3/4 — the RETIRED Inventory API pipeline's own offer id, kept
   // ONLY as a historical, read-only fact (never displayed as if it were a
@@ -217,6 +218,7 @@ export type EbayTabData = {
 function ListingDetailsPanel({
   listing, position, markingReady, assigningCategory, reassessingAudience,
   onOpenCarousel, onPreview, onEditFields, onAssignCategory, onReassessAudience, onMarkReady, onSellingPriceSaved,
+  onEditEbayDetails,
   onClose, onPrevious, onNext, onSendToExtension,
   ebayPolicies, ebayLocations, onEbaySettingsSaved, activeWorkflowChannel,
 }: {
@@ -231,6 +233,7 @@ function ListingDetailsPanel({
   onOpenCarousel: (listingId: string, photoId?: string) => void;
   onPreview: (listingId: string) => void;
   onEditFields: (listingId: string) => void;
+  onEditEbayDetails: (listingId: string) => void;
   onAssignCategory: (listingId: string) => void;
   onReassessAudience: (listingId: string) => void;
   onMarkReady: (listingId: string) => void;
@@ -397,6 +400,12 @@ function ListingDetailsPanel({
       ? <WorkflowStatus label={displayLabel} tone={displayTone} pulse={listing.workflowStatus === "in_progress"} secondaryLine={secondaryLine} />
       : listing.ebay && <EbayWorkflowStatusBlock ebay={listing.ebay} />}
     {resolvedTab === "EBAY_UK" && listing.ebay && <EbayFailedDraftActions ebay={listing.ebay} />}
+    {resolvedTab === "EBAY_UK" && listing.ebay && !listing.ebay.contentReady && <div className="lr-ebay-review-reasons" role="alert">
+      <strong>What needs review</strong>
+      <ul>{listing.ebay.reviewReasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
+      <p>Open the eBay listing details and complete the items above.</p>
+      <button type="button" className="button-secondary" onClick={() => onEditEbayDetails(listing.id)}>Review eBay details</button>
+    </div>}
 
     <div className="lr-inspector-money">
       <span><span className="lr-inspector-money-label">Cost</span>{(resolvedTab === "VINTED" ? listing.costPence : listing.ebay?.costPence ?? null) !== null ? formatPenceAsGBP((resolvedTab === "VINTED" ? listing.costPence : listing.ebay!.costPence)!) : "—"}</span>
@@ -474,7 +483,7 @@ function ListingDetailsPanel({
     </div>}
 
     <div className="lr-inspector-actions">
-      <button type="button" className="button-secondary" onClick={() => onEditFields(listing.id)}>Edit</button>
+      <button type="button" className="button-secondary" onClick={() => resolvedTab === "EBAY_UK" ? onEditEbayDetails(listing.id) : onEditFields(listing.id)}>Edit</button>
       <button type="button" className="button-secondary" onClick={() => onPreview(listing.id)}>Preview</button>
       {/* Assign category/Reassess audience/Mark ready/Send-Resend all
           remain fully working — relocated here (rather than the primary

@@ -5,7 +5,7 @@ import { matchAspectValue, type AspectCandidate } from "@/lib/listing-studio/eba
 import { applyAutomationMode } from "@/lib/listing-studio/ebay-aspect-automation";
 import { runEbayAspectSuggestion } from "@/lib/listing-studio/ebay-aspect-suggestion-ai";
 import type { EbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
-import { requiresWomensDepartment } from "@/lib/listing-studio/footwear-department-rule";
+import { requiredFootwearDepartment } from "@/lib/listing-studio/footwear-department-rule";
 import { runningActivityValueCandidates } from "@/lib/listing-studio/ebay-performance-activity-rule";
 import type { EbayGender } from "@/lib/listing-studio/ebay-title-builder";
 import type { MarketplaceDynamicData, AutomationMode } from "@/lib/listing-studio/marketplace-types";
@@ -131,8 +131,9 @@ function candidatesForAspect(aspect: GroupedAspect, input: EbayAspectResolutionI
     // so it wins regardless of what vintedAudience/gender happened to
     // resolve to. Never an AI guess — this only ever fires on an already-
     // confirmed UK shoe size fact.
-    if (pf && requiresWomensDepartment(pf.itemFamily, pf.ukShoeSize)) {
-      candidates.push({ value: "Women", source: "footwear_size_rule", confidence: "high" });
+    const requiredDepartment = pf ? requiredFootwearDepartment(pf.itemFamily, pf.ukShoeSize) : null;
+    if (requiredDepartment) {
+      candidates.push({ value: requiredDepartment, source: "footwear_size_rule", confidence: "high" });
     }
     if (pf?.gender) candidates.push({ value: DEPARTMENT_VALUE_FOR_GENDER[pf.gender], source: "product_facts", confidence: "high" });
   }

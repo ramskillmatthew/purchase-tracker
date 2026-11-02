@@ -2,16 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const { requireOwner, supabaseRequestAll, supabaseRequest } = vi.hoisted(() => ({
+const { requireOwner, supabaseRequestAll, supabaseRequest, getEbayItemConditionPolicies } = vi.hoisted(() => ({
   requireOwner: vi.fn(async () => ({ id: "owner-1", email: "owner@example.com" })),
   supabaseRequestAll: vi.fn(async (_path: string) => [] as unknown[]),
   supabaseRequest: vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 204 })),
+  getEbayItemConditionPolicies: vi.fn(),
 }));
 vi.mock("@/lib/auth/server", async importOriginal => {
   const actual = await importOriginal<typeof import("@/lib/auth/server")>();
   return { ...actual, requireOwner };
 });
 vi.mock("@/lib/supabase", () => ({ supabaseRequestAll, supabaseRequest }));
+vi.mock("@/lib/listing-studio/ebay-taxonomy-client", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/listing-studio/ebay-taxonomy-client")>()),
+  getEbayItemConditionPolicies,
+}));
 
 import { GET as listRoute } from "@/app/api/listing-studio/groups/[draftId]/marketplace-drafts/route";
 import { GET as getRoute, PATCH as patchRoute } from "@/app/api/listing-studio/groups/[draftId]/marketplace-drafts/[marketplace]/route";
@@ -40,6 +45,8 @@ function row(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   requireOwner.mockClear(); supabaseRequestAll.mockReset(); supabaseRequest.mockReset();
   supabaseRequest.mockResolvedValue(new Response(null, { status: 204 }));
+  getEbayItemConditionPolicies.mockReset();
+  getEbayItemConditionPolicies.mockResolvedValue({ ok: true, data: [] });
 });
 
 describe("GET /api/listing-studio/groups/[draftId]/marketplace-drafts", () => {
@@ -109,6 +116,74 @@ describe("PATCH /api/listing-studio/groups/[draftId]/marketplace-drafts/[marketp
     const body = await response.json();
     expect(body.status).toBe("ready");
     expect(body.readiness.ready).toBe(true);
+  });
+
+  it("saves an exact category-supported eBay condition and clears the condition blocker", async () => {
+    supabaseRequestAll.mockResolvedValue([row({
+      category_id: "95672", category_name: "Trainers", price_pence: 2000, quantity: 1,
+      validation_messages_json: [{ code: "condition_not_set", message: "An eBay condition is required.", field: "condition", severity: "blocking" }],
+    })]);
+    getEbayItemConditionPolicies.mockResolvedValue({ ok: true, data: [
+      { conditionId: "2990", conditionDescription: "Pre-owned - Excellent", conditionHelpText: "Like new, no visible flaws or signs of use." },
+    ] });
+    const response = await patchRoute(patchRequest({ conditionValue: "Pre-owned - Excellent" }), marketplaceParams());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.validationMessages.some((message: { code: string }) => message.code === "condition_not_set")).toBe(false);
+    const patchCall = supabaseRequest.mock.calls.find(call => String(call[0]).includes("listing_marketplace_drafts?id=eq."));
+    const saved = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(saved.condition_value).toBe("Pre-owned - Excellent");
+    expect(saved.dynamic_data_json.__conditionSelection).toMatchObject({ value: "Pre-owned - Excellent", source: "manual", userConfirmed: true });
+  });
+
+  it("saves price, condition and every staged item-specific change in one atomic editor request", async () => {
+    supabaseRequestAll.mockResolvedValue([row({
+      category_id: "95672", category_name: "Trainers", quantity: 1,
+      dynamic_data_json: { Brand: { value: "Old brand", confidence: "high", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "2026-01-01T00:00:00.000Z" } },
+    })]);
+    getEbayItemConditionPolicies.mockResolvedValue({ ok: true, data: [
+      { conditionId: "2990", conditionDescription: "Pre-owned - Excellent", conditionHelpText: "Like new, no visible flaws or signs of use." },
+    ] });
+    const brand = { value: "New Balance", confidence: "high", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "2026-10-28T10:00:00.000Z" };
+    const productFacts = { brand: "New Balance", ukShoeSize: "3", itemFamily: "footwear", updatedAt: "2026-10-28T09:00:00.000Z" };
+    const contentGeneration = { state: "generated", attemptCount: 1, generatedAt: "2026-10-28T09:00:00.000Z" };
+    const response = await patchRoute(patchRequest({
+      pricePence: 3000,
+      conditionValue: "Pre-owned - Excellent",
+      dynamicData: { Brand: brand, __productFacts: productFacts, __contentGeneration: contentGeneration },
+    }), marketplaceParams());
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.pricePence).toBe(3000);
+    expect(body.conditionValue).toBe("Pre-owned - Excellent");
+    expect(body.dynamicData.Brand).toEqual(brand);
+    expect(body.dynamicData.__productFacts).toEqual(productFacts);
+    expect(body.dynamicData.__contentGeneration).toEqual(contentGeneration);
+    const patchCall = supabaseRequest.mock.calls.find(call => String(call[0]).includes("listing_marketplace_drafts?id=eq."));
+    const saved = JSON.parse((patchCall![1] as RequestInit).body as string);
+    expect(saved.price_pence).toBe(3000);
+    expect(saved.condition_value).toBe("Pre-owned - Excellent");
+    expect(saved.dynamic_data_json.Brand).toEqual(brand);
+    expect(saved.dynamic_data_json.__productFacts).toEqual(productFacts);
+  });
+
+  it("does not re-contact eBay when Save & close submits an unchanged condition", async () => {
+    supabaseRequestAll.mockResolvedValue([row({
+      category_id: "95672", condition_value: "Pre-owned - Excellent", price_pence: 3000, quantity: 1,
+    })]);
+    const response = await patchRoute(patchRequest({ pricePence: 3500, conditionValue: "Pre-owned - Excellent", dynamicData: {} }), marketplaceParams());
+    expect(response.status).toBe(200);
+    expect(getEbayItemConditionPolicies).not.toHaveBeenCalled();
+  });
+
+  it("rejects a condition eBay does not support in the selected category", async () => {
+    supabaseRequestAll.mockResolvedValue([row({ category_id: "95672" })]);
+    getEbayItemConditionPolicies.mockResolvedValue({ ok: true, data: [
+      { conditionId: "3000", conditionDescription: "Pre-owned - Good", conditionHelpText: "Gently used." },
+    ] });
+    const response = await patchRoute(patchRequest({ conditionValue: "Very Good" }), marketplaceParams());
+    expect(response.status).toBe(400);
   });
 
   it("REGRESSION: a settings-only patch merges into existing settings rather than replacing them", async () => {

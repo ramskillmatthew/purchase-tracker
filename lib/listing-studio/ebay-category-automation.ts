@@ -5,8 +5,9 @@ import { getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio
 import { computeMarketplaceReadiness } from "@/lib/listing-studio/marketplace-readiness";
 import { readContentGenerationState } from "@/lib/listing-studio/ebay-content-generation-state";
 import { buildSellingSettingsMessages, withoutMessageCodes, SELLING_SETTINGS_MESSAGE_CODES } from "@/lib/listing-studio/ebay-validation-messages";
-import { readEbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
-import { requiresWomensDepartment, categoryTextIndicatesWomens } from "@/lib/listing-studio/footwear-department-rule";
+import { buildEbayProductFacts, readEbayProductFacts, type EbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
+import { deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
+import { requiredFootwearDepartment, categoryTextMatchesFootwearDepartment, categoryTextIndicatesChildrens } from "@/lib/listing-studio/footwear-department-rule";
 import { resolveCategoryReviewState, readCategoryConfirmation } from "@/lib/listing-studio/ebay-category-review";
 import type { EbayErrorCode } from "@/lib/listing-studio/ebay-error-codes";
 import type { SharedFacts, MarketplaceValidationMessage, MarketplaceDraft, AutomationMode, EbayCategoryAlternative } from "@/lib/listing-studio/marketplace-types";
@@ -40,19 +41,54 @@ export type EbayCategoryAutomationOutcome =
   | { status: "left_unresolved"; readiness: ReturnType<typeof computeMarketplaceReadiness>; usedFixture: boolean }
   | { status: "failed"; reason: EbayCategorySuggestionOutcome["status"]; code: EbayErrorCode; message: string };
 
-type ProductRow = { brand: string | null; model: string | null; product_type: string | null; shared_facts_json: SharedFacts | null };
+type ProductRow = {
+  brand: string | null; model: string | null; product_type: string | null; shared_facts_json: SharedFacts | null;
+  colours: string[] | null; material: string | null; uk_size: string | null;
+  vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
+  sku: string | null; condition: string | null;
+};
 
 function sharedFactValue(facts: SharedFacts | null, name: string): string | null {
   return facts?.[name]?.value ?? null;
+}
+
+/** Repairs older eBay drafts whose generation predates __productFacts.
+ * It uses only the structured fields already saved on listing_drafts — no
+ * AI call and no guess. This is critical because department rules must not
+ * silently disappear merely because the draft is old. */
+function productFactsFromLegacyRow(product: ProductRow | undefined): EbayProductFacts | null {
+  if (!product) return null;
+  const itemFamily = deriveDraftItemFamily(product.product_type);
+  const requiredDepartment = requiredFootwearDepartment(itemFamily, product.uk_size);
+  const storedAudience = product.vinted_audience && product.vinted_audience !== "unknown" ? product.vinted_audience : null;
+  const gender = requiredDepartment === "Women" ? "womens" as const
+    : requiredDepartment === "Men" ? "mens" as const
+      : storedAudience === "boys" || storedAudience === "girls" ? null : storedAudience;
+  const conditionText = (product.condition ?? "").toLowerCase();
+  const conditionState = /^new\b/.test(conditionText)
+    ? "new" as const
+    : conditionText.includes("very good") ? "very_good_preowned" as const : "needs_review" as const;
+  return buildEbayProductFacts({
+    brand: product.brand, model: product.model, productType: product.product_type,
+    colours: product.colours ?? [], material: product.material,
+    ukShoeSize: itemFamily === "footwear" ? product.uk_size : null,
+    clothingSize: null, gender, itemFamily, internalSku: product.sku,
+    styleCode: null, conditionState,
+  });
 }
 
 export async function autoSuggestAndPersistEbayCategory(ownerId: string, productDraftId: string, automationMode: AutomationMode, ebayDraft?: MarketplaceDraft): Promise<EbayCategoryAutomationOutcome> {
   const resolvedDraft = ebayDraft ?? await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
   if (!resolvedDraft) return { status: "failed", reason: "no_results", code: "EBAY_NO_CATEGORY", message: "No eBay draft exists yet for this product." };
 
-  const products = await supabaseRequestAll<ProductRow>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=brand,model,product_type,shared_facts_json`);
+  const products = await supabaseRequestAll<ProductRow>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=brand,model,product_type,shared_facts_json,colours,material,uk_size,vinted_audience,sku,condition`);
   const product = products[0];
   const facts = product?.shared_facts_json ?? null;
+  const storedProductFacts = readEbayProductFacts(resolvedDraft.dynamicData);
+  const productFacts = storedProductFacts ?? productFactsFromLegacyRow(product);
+  const repairedDynamicData = storedProductFacts || !productFacts
+    ? resolvedDraft.dynamicData
+    : ({ ...resolvedDraft.dynamicData, __productFacts: productFacts } as unknown as typeof resolvedDraft.dynamicData);
 
   const outcome = await suggestEbayCategory({
     brand: product?.brand ?? null, productType: product?.product_type ?? null, model: product?.model ?? null,
@@ -94,21 +130,54 @@ export async function autoSuggestAndPersistEbayCategory(ownerId: string, product
   // including bypassing the "low confidence -> leave unresolved" safety
   // net below, since the deterministic rule is stronger evidence than an
   // uncertain AI/taxonomy match score for this one specific, narrow case.
-  const productFacts = readEbayProductFacts(resolvedDraft.dynamicData);
-  const footwearRuleApplies = requiresWomensDepartment(productFacts?.itemFamily ?? "uncertain", productFacts?.ukShoeSize ?? null);
+  const itemFamily = productFacts?.itemFamily ?? deriveDraftItemFamily(product?.product_type ?? null);
+  const ukShoeSize = productFacts?.ukShoeSize ?? (itemFamily === "footwear" ? product?.uk_size ?? null : null);
+  const requiredDepartment = requiredFootwearDepartment(itemFamily, ukShoeSize);
+  const rawCandidates = [outcome.selected, ...outcome.alternatives]
+    .filter((candidate, index, all) => all.findIndex(other => other.categoryId === candidate.categoryId) === index);
+  // This business never sells children's footwear. Such categories are
+  // excluded from both automatic selection and the choices persisted for
+  // manual review, even when eBay returns one as its top suggestion.
+  const permittedCandidates = itemFamily === "footwear"
+    ? rawCandidates.filter(candidate => !categoryTextIndicatesChildrens(`${candidate.categoryName} ${candidate.categoryPath}`))
+    : rawCandidates;
+  const departmentCandidate = requiredDepartment
+    ? permittedCandidates.find(candidate => categoryTextMatchesFootwearDepartment(`${candidate.categoryName} ${candidate.categoryPath}`, requiredDepartment))
+    : undefined;
+  const effectiveSelected = departmentCandidate ?? permittedCandidates[0];
+  const effectiveAlternatives = effectiveSelected
+    ? permittedCandidates.filter(candidate => candidate.categoryId !== effectiveSelected.categoryId)
+    : permittedCandidates;
+  const departmentRuleSatisfied = Boolean(requiredDepartment && effectiveSelected
+    && categoryTextMatchesFootwearDepartment(`${effectiveSelected.categoryName} ${effectiveSelected.categoryPath}`, requiredDepartment));
 
-  let effectiveSelected: EbayCategoryAlternative = outcome.selected;
-  let effectiveAlternatives: EbayCategoryAlternative[] = outcome.alternatives;
-  if (footwearRuleApplies && !categoryTextIndicatesWomens(`${effectiveSelected.categoryName} ${effectiveSelected.categoryPath}`)) {
-    const womensAlternative = effectiveAlternatives.find(a => categoryTextIndicatesWomens(`${a.categoryName} ${a.categoryPath}`));
-    if (womensAlternative) {
-      effectiveAlternatives = [effectiveSelected, ...effectiveAlternatives.filter(a => a.categoryId !== womensAlternative.categoryId)];
-      effectiveSelected = womensAlternative;
-    }
+  // If a known shoe size requires one adult department but eBay returned
+  // no real category for it, never auto-save a category from the wrong
+  // department. Leave it unresolved with only safe adult alternatives.
+  if (!effectiveSelected || (requiredDepartment && !departmentRuleSatisfied)) {
+    const validationMessages: MarketplaceValidationMessage[] = [
+      {
+        code: "category_not_set", field: "category", severity: "blocking",
+        message: requiredDepartment
+          ? `This UK shoe size requires a ${requiredDepartment}'s category, but eBay returned no matching adult category.`
+          : "This product needs an adult category before its eBay details can be prepared.",
+      },
+      ...baseValidationMessages, ...sellingSettingsMessages(),
+    ];
+    const readiness = computeMarketplaceReadiness({
+      hasCategory: false, hasCondition: !!resolvedDraft.conditionValue, hasTitle: !!resolvedDraft.title, hasDescriptionOrGenerationPath: !!resolvedDraft.description,
+      hasPhoto: true, hasPrice: resolvedDraft.pricePence != null, hasQuantity: resolvedDraft.quantity != null,
+      hasSufficientSellingSettings: true, hasGeneratedContent, requiredAspectsFilled: [], recommendedAspectsFilled: [],
+    });
+    await patchMarketplaceDraft(ownerId, resolvedDraft.id, {
+      category_alternatives_json: effectiveAlternatives.slice(0, 4), category_search_terms: outcome.searchTerms,
+      dynamic_data_json: repairedDynamicData,
+      status: "needs_information", readiness_json: readiness, validation_messages_json: validationMessages,
+    });
+    return { status: "left_unresolved", readiness, usedFixture: outcome.usedFixture ?? false };
   }
-  const footwearRuleSatisfied = footwearRuleApplies && categoryTextIndicatesWomens(`${effectiveSelected.categoryName} ${effectiveSelected.categoryPath}`);
 
-  if (effectiveSelected.confidence === "low" && !footwearRuleSatisfied) {
+  if (effectiveSelected.confidence === "low" && !departmentRuleSatisfied) {
     // Left unresolved — category_id stays whatever it already was (null
     // for a fresh draft), but the real alternatives (including this low-
     // confidence top pick) are stored so the owner sees genuine top
@@ -124,6 +193,7 @@ export async function autoSuggestAndPersistEbayCategory(ownerId: string, product
     });
     await patchMarketplaceDraft(ownerId, resolvedDraft.id, {
       category_alternatives_json: [effectiveSelected, ...effectiveAlternatives].slice(0, 4), category_search_terms: outcome.searchTerms,
+      dynamic_data_json: repairedDynamicData,
       status: "needs_information", readiness_json: readiness, validation_messages_json: validationMessages,
     });
     return { status: "left_unresolved", readiness, usedFixture: outcome.usedFixture ?? false };
@@ -144,7 +214,7 @@ export async function autoSuggestAndPersistEbayCategory(ownerId: string, product
   const reviewState = resolveCategoryReviewState({
     categoryId: effectiveSelected.categoryId, categoryName: effectiveSelected.categoryName, categoryPath: effectiveSelected.categoryPath,
     categoryConfidence: effectiveSelected.confidence, categorySource: "ai",
-    itemFamily: productFacts?.itemFamily ?? "uncertain", ukShoeSize: productFacts?.ukShoeSize ?? null,
+    itemFamily, ukShoeSize,
     // A freshly (re-)suggested category is a new AI outcome — any earlier
     // confirmation was for a specific category id, which may no longer be
     // this one; resolveCategoryReviewState only ever honours a
@@ -171,6 +241,7 @@ export async function autoSuggestAndPersistEbayCategory(ownerId: string, product
     category_id: effectiveSelected.categoryId, category_name: effectiveSelected.categoryName, category_path: effectiveSelected.categoryPath,
     category_source: "ai", category_confidence: effectiveSelected.confidence,
     category_alternatives_json: effectiveAlternatives, category_search_terms: outcome.searchTerms,
+    dynamic_data_json: repairedDynamicData,
     status: readiness.ready ? "ready" : "needs_information", readiness_json: readiness, validation_messages_json: validationMessages,
   });
   return { status: "applied", confidence: effectiveSelected.confidence, needsReview, readiness, usedFixture: outcome.usedFixture };

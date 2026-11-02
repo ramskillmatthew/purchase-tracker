@@ -309,7 +309,8 @@ describe("app/page.tsx — operational widgets are decoupled from the Compare-pe
   });
 
   it("loads operational data in its own effect that never re-runs on period change (only on a returns/losses mutation)", () => {
-    const opsEffect = source.slice(source.indexOf("OPERATIONAL scope"), source.indexOf("const report = useMemo"));
+    const opsEffectStart = source.indexOf('Promise.all([fetchDashboardHistory(operationalSalesUrl("pending")');
+    const opsEffect = source.slice(opsEffectStart, source.indexOf("const range = useMemo", opsEffectStart));
     expect(opsEffect).toContain("operationalSalesUrl");
     expect(opsEffect).toContain("setPendingTotal(pendingBody.total)");
     // deps: NOT `period`; re-runs only when a returns/losses mutation broadcasts.
@@ -318,8 +319,9 @@ describe("app/page.tsx — operational widgets are decoupled from the Compare-pe
   });
 
   it("the period-scoped sales effect no longer touches pending / recent sales, and re-runs on period OR a returns mutation", () => {
-    const periodEffect = source.slice(source.indexOf("FINANCIAL scope"), source.indexOf("OPERATIONAL scope"));
-    expect(periodEffect).toContain("}, [period, returnsRefreshKey]);");
+    const periodEffectStart = source.indexOf('fetchDashboardHistory(salesUrl(period, "completed", companyYearStart)');
+    const periodEffect = source.slice(periodEffectStart, source.indexOf('Promise.all([fetchDashboardHistory(operationalSalesUrl("pending")', periodEffectStart));
+    expect(periodEffect).toContain("}, [period, returnsRefreshKey, companyYearStart]);");
     expect(periodEffect).not.toContain('salesUrl(period, "pending")');
     expect(periodEffect).not.toContain("setPending(");
     expect(periodEffect).not.toContain("setRecentSales(");
@@ -339,10 +341,10 @@ describe("app/page.tsx — operational widgets are decoupled from the Compare-pe
   });
 
   it("financial cards remain period-scoped and the Net Profit fix is preserved", () => {
-    expect(source).toContain('salesUrl(period, "completed")');
-    expect(source).toContain('salesUrl(period, "all")');
-    expect(source).toContain("netProfitWithReturnsLossesPence(allSalesKpis?.profitPence ?? 0, operatingExpensePence, returnLossAdjustmentPence)");
-    expect(source).toContain("periodOperatingExpensePence(period, expenses)");
-    expect(source).toContain("computeHomeReport(period, purchases, expenses)");
+    expect(source).toContain('salesUrl(period, "completed", companyYearStart)');
+    expect(source).toContain('salesUrl(period, "all", companyYearStart)');
+    expect(source).toContain("netProfitWithReturnsLossesPence(allValidSalesProfitPence, operatingExpensePence, returnLossAdjustmentPence)");
+    expect(source).toContain("periodOperatingExpensePence(period, expenses, companyYearStart)");
+    expect(source).toContain("homeSpendBreakdown(periodPurchases)");
   });
 });

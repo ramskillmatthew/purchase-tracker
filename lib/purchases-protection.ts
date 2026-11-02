@@ -4,6 +4,11 @@ import { supabaseRequestAll } from "@/lib/supabase";
 /** purchase_id -> the sales_orders.id currently protecting it from deletion. */
 export type PurchaseProtectionMap = Map<string, string>;
 
+// Keep `id=in.(...)` URLs comfortably below common proxy/server limits. A
+// historical import can create thousands of sale orders, so one query with
+// every UUID is no longer safe even though it worked for a small account.
+const ORDER_LOOKUP_BATCH_SIZE = 100;
+
 /**
  * Computes which purchases are currently protected from deletion, and by
  * which sale, via bounded follow-up queries — never one request per
@@ -17,14 +22,18 @@ export type PurchaseProtectionMap = Map<string, string>;
  */
 export async function loadPurchaseProtectionMap(): Promise<PurchaseProtectionMap> {
   const items = await supabaseRequestAll<{ purchase_id: string | null; sales_order_id: string; is_active: boolean }>(
-    "sale_items?purchase_id=not.is.null&select=purchase_id,sales_order_id,is_active&order=created_at.asc",
+    "sale_items?purchase_id=not.is.null&select=purchase_id,sales_order_id,is_active&order=created_at.asc,id.asc",
   );
   if (!items.length) return new Map();
 
   const orderIds = Array.from(new Set(items.map(item => item.sales_order_id)));
-  const orders = await supabaseRequestAll<{ id: string; status: string }>(
-    `sales_orders?id=in.(${orderIds.join(",")})&select=id,status`,
-  );
+  const orders: { id: string; status: string }[] = [];
+  for (let index = 0; index < orderIds.length; index += ORDER_LOOKUP_BATCH_SIZE) {
+    const batchIds = orderIds.slice(index, index + ORDER_LOOKUP_BATCH_SIZE);
+    orders.push(...await supabaseRequestAll<{ id: string; status: string }>(
+      `sales_orders?id=in.(${batchIds.join(",")})&select=id,status&order=id.asc`,
+    ));
+  }
   const statusByOrderId = new Map(orders.map(order => [order.id, order.status]));
 
   const protection: PurchaseProtectionMap = new Map();

@@ -14,6 +14,10 @@ import { getCategorySuggestions } from "@/lib/listing-studio/ebay-taxonomy-clien
 import { describeEbayApiFailure } from "@/lib/listing-studio/ebay-error-codes";
 import { clearRealAspectFields } from "@/lib/listing-studio/ebay-aspect-matching";
 import { buildSellingSettingsMessages, withoutMessageCodes, withoutMessageCodePrefix, SELLING_SETTINGS_MESSAGE_CODES } from "@/lib/listing-studio/ebay-validation-messages";
+import { readEbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
+import { deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
+import { requiredFootwearDepartment, categoryTextMatchesFootwearDepartment, categoryTextIndicatesChildrens } from "@/lib/listing-studio/footwear-department-rule";
+import { supabaseRequestAll } from "@/lib/supabase";
 import type { MarketplaceValidationMessage } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
@@ -128,6 +132,20 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ dr
     const ancestors = match.categoryTreeNodeAncestors ?? [];
     const categoryName = match.category.categoryName;
     const categoryPath = [...ancestors.map(a => a.categoryName), categoryName].join(" > ");
+    const productFacts = readEbayProductFacts(ebayDraft.dynamicData);
+    const legacyRows = productFacts ? [] : await supabaseRequestAll<{ product_type: string | null; uk_size: string | null }>(
+      `listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=product_type,uk_size`,
+    );
+    const itemFamily = productFacts?.itemFamily ?? deriveDraftItemFamily(legacyRows[0]?.product_type ?? null);
+    const ukShoeSize = productFacts?.ukShoeSize ?? (itemFamily === "footwear" ? legacyRows[0]?.uk_size ?? null : null);
+    const categoryText = `${categoryName} ${categoryPath}`;
+    if (itemFamily === "footwear" && categoryTextIndicatesChildrens(categoryText)) {
+      return NextResponse.json({ error: "Children's footwear categories are not used. Choose an adult Women's or Men's category." }, { status: 422 });
+    }
+    const requiredDepartment = requiredFootwearDepartment(itemFamily, ukShoeSize);
+    if (requiredDepartment && !categoryTextMatchesFootwearDepartment(categoryText, requiredDepartment)) {
+      return NextResponse.json({ error: `UK size ${ukShoeSize} must use a ${requiredDepartment}'s category.` }, { status: 422 });
+    }
     const previousSelected = ebayDraft.categoryId ? { categoryId: ebayDraft.categoryId, categoryName: ebayDraft.categoryName ?? "", categoryPath: ebayDraft.categoryPath ?? "", rank: 99, confidence: "low" as const, reason: "Previously selected category." } : null;
     const nextAlternatives = [previousSelected, ...ebayDraft.categoryAlternatives ?? []].filter((a): a is NonNullable<typeof a> => !!a && a.categoryId !== categoryId).slice(0, 4);
 

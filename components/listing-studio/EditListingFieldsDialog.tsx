@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { VINTED_COLOURS, VINTED_MATERIALS, VINTED_AUDIENCE_VALUES, VINTED_AUDIENCE_LABELS, type VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 import { deriveDraftItemFamily, normaliseFootwearVintedAudience, normaliseFootwearListingText } from "@/lib/listing-studio/vinted-category-selection";
 import VintedCategoryPicker from "./VintedCategoryPicker";
+import UnsavedChangesDialog from "./UnsavedChangesDialog";
 
 export type ListingFieldsDraft = {
   brand: string;
@@ -87,13 +88,26 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
   onClose: () => void;
   onSave: (fields: ListingFieldsDraft) => void;
 }) {
-  const [draft, setDraft] = useState<ListingFieldsDraft>(() => buildInitialDraft(fields));
+  const [initialDraft] = useState<ListingFieldsDraft>(() => buildInitialDraft(fields));
+  const [draft, setDraft] = useState<ListingFieldsDraft>(initialDraft);
+  const [confirmingClose, setConfirmingClose] = useState(false);
+  const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(initialDraft);
+
+  const requestClose = useCallback(() => {
+    if (loading) return;
+    if (hasUnsavedChanges) setConfirmingClose(true);
+    else onClose();
+  }, [hasUnsavedChanges, loading, onClose]);
 
   useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) { if (event.key === "Escape" && !loading) onClose(); }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape" || loading) return;
+      if (confirmingClose) setConfirmingClose(false);
+      else requestClose();
+    }
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, loading]);
+  }, [confirmingClose, loading, requestClose]);
 
   function set<K extends Exclude<keyof ListingFieldsDraft, "colours">>(key: K, value: string) {
     setDraft(current => ({ ...current, [key]: value }));
@@ -146,11 +160,11 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
     setDraft(current => ({ ...current, vintedAudience: value, vintedCategoryId: null, vintedCategoryPath: null }));
   }
 
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !loading) onClose(); }}>
+  return <><div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) requestClose(); }}>
     <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby="edit-listing-fields-title">
       <div className="task-modal-heading">
         <h2 id="edit-listing-fields-title">Edit fields — {groupTitle}</h2>
-        <button type="button" onClick={onClose} disabled={loading} aria-label="Close">×</button>
+        <button type="button" onClick={requestClose} disabled={loading} aria-label="Close">×</button>
       </div>
       {error && <p className="upload-photo-error" role="alert">{error}</p>}
       <div className="task-modal-body edit-listing-fields-body">
@@ -216,9 +230,16 @@ export default function EditListingFieldsDialog({ groupTitle, fields, loading, e
         </label>
       </div>
       <div className="task-modal-actions">
-        <button type="button" className="button-secondary" onClick={onClose} disabled={loading}>Cancel</button>
-        <button type="button" className="button" disabled={loading} onClick={() => onSave(draft)}>{loading ? "Saving…" : "Save"}</button>
+        <button type="button" className="button-secondary" onClick={requestClose} disabled={loading}>Cancel</button>
+        <button type="button" className="button" disabled={loading || !hasUnsavedChanges} onClick={() => onSave(draft)}>{loading ? "Saving…" : "Save & close"}</button>
       </div>
     </div>
-  </div>;
+  </div>
+  {confirmingClose && <UnsavedChangesDialog
+    saving={loading}
+    onContinueEditing={() => setConfirmingClose(false)}
+    onExitWithoutSaving={onClose}
+    onSaveAndExit={() => { setConfirmingClose(false); onSave(draft); }}
+  />}
+  </>;
 }

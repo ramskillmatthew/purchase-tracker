@@ -37,3 +37,47 @@ describe("components/listing-studio/EbayCategoryAndAspectsDialog.tsx — Phase 1
     expect(source).toContain('className={degraded ? "ebay-details-status-failed" : "ebay-details-status-ok"}');
   });
 });
+
+describe("eBay details editor — in-place AI fill, condition choices and purchase price context", () => {
+  const source = read("components/listing-studio/EbayCategoryAndAspectsDialog.tsx");
+  const css = read("app/globals.css");
+
+  it("keeps the editor mounted while category and item specifics are filled", () => {
+    expect(source).toContain("const load = useCallback(async (preserveEditor = false) =>");
+    expect(source).toContain("if (!preserveEditor) setLoading(true);");
+    expect(source).toMatch(/async function suggestCategory\(\)[\s\S]*?await load\(true\);/);
+    expect(source).toMatch(/async function suggestAspects\(\)[\s\S]*?await load\(true\);/);
+    expect(source).toContain('hasFilledSpecificsWithAi ? "Refill with AI" : "Fill with AI"');
+    expect(source).not.toContain(">Run again<");
+  });
+
+  it("uses rounded, directly clickable eBay condition choices rather than a native rectangular dropdown", () => {
+    const conditionSection = source.slice(source.indexOf("function ConditionSection"), source.indexOf("function PackageSizeSection"));
+    expect(conditionSection).toContain('className="ebay-condition-options"');
+    expect(conditionSection).toContain('role="radio"');
+    expect(conditionSection).not.toContain("<select");
+    expect(css).toContain(".ebay-condition-option");
+    expect(css).toContain("border-radius:999px");
+  });
+
+  it("shows the exact purchase matching result beside the eBay price input in the bright red treatment", () => {
+    expect(source).toContain('fetch(`/api/listing-studio/groups/${draftId}/selling-price`)');
+    expect(source).toContain('<p className="ebay-price-paid">{purchasePriceText}</p>');
+    expect(css).toMatch(/\.ebay-price-paid\s*\{[^}]*color:#ff4d68/);
+  });
+
+  it("shows live profit or loss from the staged selling price without saving the field immediately", () => {
+    expect(source).toContain("const profitPence = parsedPrice !== null && purchasePricePence !== null ? parsedPrice - purchasePricePence : null;");
+    expect(source).toContain('{profitPence >= 0 ? "Profit" : "Loss"}: {formatPenceAsGBP(Math.abs(profitPence))}');
+    expect(source).toContain("function stagePrice(value: string)");
+    expect(source.slice(source.indexOf("function stagePrice(value: string)"), source.indexOf("const saveCondition"))).not.toContain("fetch(");
+  });
+
+  it("prompts before discarding dirty eBay changes and offers the two requested exit choices", () => {
+    expect(source).toContain("if (hasUnsavedChanges) setConfirmingClose(true);");
+    expect(source).toContain("<UnsavedChangesDialog");
+    const prompt = read("components/listing-studio/UnsavedChangesDialog.tsx");
+    expect(prompt).toContain("Save changes and exit");
+    expect(prompt).toContain("Exit without saving");
+  });
+});

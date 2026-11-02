@@ -15,24 +15,50 @@
  * for the two places eBay currently applies it.
  */
 
-const BELOW_UK_7_THRESHOLD = 6.5;
+const WOMENS_MIN_UK_SIZE = 3;
+const WOMENS_MAX_UK_SIZE = 6.5;
+const MENS_MIN_UK_SIZE = 7;
+
+export type FootwearDepartment = "Women" | "Men";
+
+function parseUkShoeSize(ukShoeSize: string | null | undefined): number | null {
+  if (!ukShoeSize) return null;
+  const parsed = Number.parseFloat(ukShoeSize.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 /** Parses a UK shoe size string ("4", "6.5", "6") and reports whether it
  * falls at or below the UK 6.5 boundary. A size that can't be parsed as a
  * plain number (null, empty, non-numeric) is never treated as "below 7" —
  * the rule only ever fires on a genuinely known, confirmed UK size. */
 export function isFootwearSizeBelowUk7(ukShoeSize: string | null | undefined): boolean {
-  if (!ukShoeSize) return false;
-  const parsed = Number.parseFloat(ukShoeSize.trim());
-  if (!Number.isFinite(parsed)) return false;
-  return parsed <= BELOW_UK_7_THRESHOLD;
+  const parsed = parseUkShoeSize(ukShoeSize);
+  return parsed !== null && parsed >= WOMENS_MIN_UK_SIZE && parsed <= WOMENS_MAX_UK_SIZE;
+}
+
+/** The business' complete adult-footwear department rule. Children's is
+ * never a valid footwear department in this app: UK 3–6.5 is Women's and
+ * UK 7+ is Men's. Values below UK 3 or malformed values are left unresolved
+ * rather than guessed, but children's categories are still excluded by the
+ * category pipeline. */
+export function requiredFootwearDepartment(itemFamily: string, ukShoeSize: string | null | undefined): FootwearDepartment | null {
+  if (itemFamily !== "footwear") return null;
+  const parsed = parseUkShoeSize(ukShoeSize);
+  if (parsed === null) return null;
+  if (parsed >= WOMENS_MIN_UK_SIZE && parsed <= WOMENS_MAX_UK_SIZE) return "Women";
+  if (parsed >= MENS_MIN_UK_SIZE) return "Men";
+  return null;
 }
 
 /** True when this item family/size combination is subject to the
  * mandatory-Women's rule. `itemFamily` gates it to footwear only — the
  * rule has no meaning for clothing/uncertain items. */
 export function requiresWomensDepartment(itemFamily: string, ukShoeSize: string | null | undefined): boolean {
-  return itemFamily === "footwear" && isFootwearSizeBelowUk7(ukShoeSize);
+  return requiredFootwearDepartment(itemFamily, ukShoeSize) === "Women";
+}
+
+export function requiresMensDepartment(itemFamily: string, ukShoeSize: string | null | undefined): boolean {
+  return requiredFootwearDepartment(itemFamily, ukShoeSize) === "Men";
 }
 
 /** Whether a category's own display text (name and/or full path) already
@@ -46,4 +72,19 @@ export function requiresWomensDepartment(itemFamily: string, ukShoeSize: string 
 export function categoryTextIndicatesWomens(text: string | null | undefined): boolean {
   if (!text) return false;
   return /\bwomen'?s\b|\bwomen\b/i.test(text);
+}
+
+export function categoryTextIndicatesMens(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /\bmen'?s\b|\bmen\b/i.test(text) && !categoryTextIndicatesWomens(text);
+}
+
+export function categoryTextIndicatesChildrens(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /\b(?:children'?s?|kids?|junior'?s?|youth|boys?|girls?|infant|toddler)\b/i.test(text);
+}
+
+export function categoryTextMatchesFootwearDepartment(text: string | null | undefined, department: FootwearDepartment): boolean {
+  if (categoryTextIndicatesChildrens(text)) return false;
+  return department === "Women" ? categoryTextIndicatesWomens(text) : categoryTextIndicatesMens(text);
 }

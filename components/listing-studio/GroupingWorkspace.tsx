@@ -1711,7 +1711,7 @@ export default function GroupingWorkspace() {
       // mutating action in this file already refreshes through, so the
       // row is recomputed from the just-persisted price/category/aspect
       // state, not a stale snapshot.
-      onDraftUpdated={() => { void loadWorkspace(); }}
+      onDraftUpdated={loadWorkspace}
     />}
   </div>;
 }

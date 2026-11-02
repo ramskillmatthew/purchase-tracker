@@ -1,0 +1,41 @@
+"use client";
+
+import Image from "next/image";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DASHBOARD_SCENE_EVENT, DASHBOARD_SCENE_STORAGE_KEY, isDashboardSceneMode, resolveDashboardScene, type DashboardSceneMode } from "@/lib/dashboard-scene";
+import styles from "./listing-dashboard.module.css";
+
+type Account = 1|2|3;
+type Platform = { marketplace:"vinted"|"ebay"; live:boolean; pricePence:number|null; itemId?:string|null };
+type Listing = { id:string; title:string; sku:string|null; ukSize:string|null; imageUrl:string|null; askingPricePence:number|null; costPence:number|null; profitPence:number|null; status:"listed"|"ready"|"needs_review"|"draft"; statusDetail:string|null; platforms:Platform[]; sourceUrl:string|null; updatedAt:string };
+type ResponseData = { listings:Listing[]; refreshedAt:string };
+type Assignments = Record<string,Account>;
+const STORE = "listing-dashboard-vinted-accounts-v1";
+const money = new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"});
+const labels = {listed:"Listed",ready:"Ready",needs_review:"Needs review",draft:"Draft"} as const;
+
+function EbayLogo(){return <span className={styles.ebayLogo} aria-label="eBay"><i>e</i><i>B</i><i>a</i><i>y</i></span>}
+function VintedLogo({account}:{account:Account}){return <span className={styles.vintedLogo} aria-label={`Vinted account ${account}`}><b>vinted</b><i>#{account}</i></span>}
+function loadAssignments():Assignments{try{const value=JSON.parse(localStorage.getItem(STORE)??"{}") as Assignments;return Object.fromEntries(Object.entries(value).filter(([,n])=>n===1||n===2||n===3)) as Assignments}catch{return {}}}
+
+export default function ListingDashboardWorkspace(){
+  const [data,setData]=useState<ResponseData|null>(null),[error,setError]=useState(""),[loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false);
+  const [search,setSearch]=useState(""),[platform,setPlatform]=useState("all"),[accountFilter,setAccountFilter]=useState("all"),[status,setStatus]=useState("all");
+  const [assignments,setAssignments]=useState<Assignments>({}),[menu,setMenu]=useState<string|null>(null),[sceneMode,setSceneMode]=useState<DashboardSceneMode>("auto"),[now,setNow]=useState(()=>new Date());
+  const menuRoot=useRef<HTMLDivElement|null>(null);
+  const load=useCallback(async(manual=false)=>{manual?setRefreshing(true):setLoading(true);setError("");try{const response=await fetch("/api/listing-dashboard",{cache:"no-store"});const body=await response.json() as ResponseData&{error?:string};if(!response.ok)throw new Error(body.error||"Could not refresh listings.");setData(body)}catch(reason){setError(reason instanceof Error?reason.message:"Could not refresh listings.")}finally{setLoading(false);setRefreshing(false)}},[]);
+  useEffect(()=>{setAssignments(loadAssignments());void load()},[load]);
+  useEffect(()=>{const sync=()=>{const saved=localStorage.getItem(DASHBOARD_SCENE_STORAGE_KEY);setSceneMode(isDashboardSceneMode(saved)?saved:"auto")};sync();window.addEventListener(DASHBOARD_SCENE_EVENT,sync);const timer=window.setInterval(()=>setNow(new Date()),60000);return()=>{window.removeEventListener(DASHBOARD_SCENE_EVENT,sync);window.clearInterval(timer)}},[]);
+  useEffect(()=>{const close=(event:MouseEvent)=>{if(menuRoot.current&&!menuRoot.current.contains(event.target as Node))setMenu(null)};document.addEventListener("mousedown",close);return()=>document.removeEventListener("mousedown",close)},[]);
+  function assign(id:string,n:Account){setAssignments(current=>{const next={...current,[id]:n};localStorage.setItem(STORE,JSON.stringify(next));return next});setMenu(null)}
+  const visible=useMemo(()=>{const query=search.trim().toLowerCase();return(data?.listings??[]).filter(item=>{const acct=assignments[item.id]??1,hasVinted=item.platforms.some(p=>p.marketplace==="vinted");return(!query||`${item.title} ${item.sku??""} ${item.ukSize??""}`.toLowerCase().includes(query))&&(platform==="all"||item.platforms.some(p=>p.marketplace===platform))&&(accountFilter==="all"||(hasVinted&&String(acct)===accountFilter))&&(status==="all"||item.status===status)})},[accountFilter,assignments,data,platform,search,status]);
+  const scene=resolveDashboardScene(sceneMode,now);
+  return <section className={`${styles.page} ${styles[scene]}`}><div className={styles.backdrop}/><div className={styles.content}>
+    <header className={styles.header}><div><span>Inventory control</span><h1>Listing Dashboard</h1><p>See exactly where every item is listed.</p></div><button type="button" onClick={()=>void load(true)} disabled={refreshing}><b aria-hidden="true">↻</b>{refreshing?"Refreshing…":"Refresh listings"}</button></header>
+    <div className={styles.toolbar}><label><span aria-hidden="true">⌕</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search title, SKU or size…"/></label><select value={platform} onChange={e=>setPlatform(e.target.value)} aria-label="Platform"><option value="all">All platforms</option><option value="ebay">eBay</option><option value="vinted">Vinted</option></select><select value={accountFilter} onChange={e=>setAccountFilter(e.target.value)} aria-label="Account"><option value="all">All accounts</option><option value="1">Vinted #1</option><option value="2">Vinted #2</option><option value="3">Vinted #3</option></select><select value={status} onChange={e=>setStatus(e.target.value)} aria-label="Status"><option value="all">All statuses</option><option value="listed">Listed</option><option value="ready">Ready</option><option value="needs_review">Needs review</option><option value="draft">Draft</option></select><strong>{visible.length} item{visible.length===1?"":"s"}</strong></div>
+    {error&&<div className={styles.error}>{error}<button onClick={()=>void load()}>Try again</button></div>}
+    {loading?<div className={styles.state}>Loading your listings…</div>:visible.length===0?<div className={styles.state}>No listings match these filters.</div>:<div className={styles.grid} ref={menuRoot}>{visible.map(item=>{const hasVinted=item.platforms.some(p=>p.marketplace==="vinted"),hasEbay=item.platforms.some(p=>p.marketplace==="ebay"),acct=assignments[item.id]??1,tone=item.status==="needs_review"?"danger":hasVinted?`account${acct}`:"ebay";return <article className={`${styles.card} ${styles[tone]}`} key={item.id}><div className={styles.photo}>{item.imageUrl?<Image src={item.imageUrl} alt="" fill sizes="20vw" unoptimized/>:<div>No photo</div>}<div className={styles.badges}>{hasVinted&&<VintedLogo account={acct}/>} {hasEbay&&<EbayLogo/>}</div><div className={styles.menuWrap}><button className={styles.menuButton} onClick={()=>setMenu(current=>current===item.id?null:item.id)} aria-label={`Actions for ${item.title}`}>•••</button>{menu===item.id&&<div className={styles.menu}><Link href="/listing-studio">Open in Listing Studio</Link><Link href="/listings-review">Open in Listings Review</Link>{item.platforms.find(p=>p.marketplace==="ebay")?.itemId&&<a href={`https://www.ebay.co.uk/itm/${item.platforms.find(p=>p.marketplace==="ebay")?.itemId}`} target="_blank" rel="noreferrer">Open eBay listing</a>}{hasVinted&&<div><span>Vinted account</span><section>{([1,2,3] as Account[]).map(n=><button className={acct===n?styles.selected:""} key={n} onClick={()=>assign(item.id,n)}>#{n}</button>)}</section></div>}</div>}</div></div><div className={styles.body}><h2>{item.title}</h2><div className={styles.meta}><span>{item.sku?`SKU ${item.sku}`:"No SKU"}</span><span>{item.ukSize?`UK ${item.ukSize}`:"Size not set"}</span></div><strong className={styles.price}>{item.askingPricePence===null?"Price not set":money.format(item.askingPricePence/100)}</strong><footer><span className={`${styles.status} ${styles[item.status]}`} title={item.statusDetail??undefined}><i/>{labels[item.status]}</span><span className={`${styles.profit} ${item.profitPence!==null&&item.profitPence<0?styles.loss:""}`}>{item.profitPence===null?"Profit —":`Profit ${money.format(item.profitPence/100)}`}</span></footer></div></article>})}</div>}
+    {data&&<p className={styles.refreshed}>Last refreshed {new Date(data.refreshedAt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</p>}
+  </div></section>
+}

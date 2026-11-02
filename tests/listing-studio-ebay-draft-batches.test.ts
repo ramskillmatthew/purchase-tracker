@@ -5,7 +5,7 @@ vi.mock("server-only", () => ({}));
 const {
   getMarketplaceDraft, patchMarketplaceDraft,
   getEbayConnection, listEbayPolicies, getValidEbayAccessToken,
-  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, createSignedDownloadUrl, createEbayPhotoProxyUrl,
+  createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, createSignedDownloadUrl, createEbayPhotoProxyUrl, createEbayImageFromFile,
 } = vi.hoisted(() => ({
   getMarketplaceDraft: vi.fn(async (_ownerId: string, _productDraftId: string, _marketplace: "EBAY_UK") => null as unknown),
   patchMarketplaceDraft: vi.fn(async (_ownerId: string, _id: string, _patch: Record<string, unknown>) => {}),
@@ -19,6 +19,9 @@ const {
   getInventoryItem: vi.fn(async (_accessToken: string, _sku: string) => null as unknown),
   createSignedDownloadUrl: vi.fn(async (_bucket: string, _path: string, _expiresInSeconds: number) => "https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc"),
   createEbayPhotoProxyUrl: vi.fn((_imageId: string, _expiresAt: number) => "https://project.supabase.co/api/ebay/photo/img-1?exp=1&sig=abc"),
+  createEbayImageFromFile: vi.fn(async (_accessToken: string, _bytes: ArrayBuffer, _mimeType: string, filename: string) => ({
+    imageUrl: `https://i.ebayimg.com/images/g/${filename}/s-l1600.jpg`, expirationDate: null, imageResourceUrl: null,
+  })),
 }));
 vi.mock("@/lib/listing-studio/marketplace-drafts", () => ({ getMarketplaceDraft, patchMarketplaceDraft, listMarketplaceDraftsForProducts: vi.fn(async () => new Map()) }));
 vi.mock("@/lib/ebay-account/client", () => ({ getEbayConnection, listEbayPolicies, getValidEbayAccessToken }));
@@ -28,6 +31,7 @@ vi.mock("@/lib/listing-studio/storage-rest", () => ({
   StorageBucketMissingError: class StorageBucketMissingError extends Error {},
 }));
 vi.mock("@/lib/listing-studio/ebay-photo-urls", () => ({ createEbayPhotoProxyUrl }));
+vi.mock("@/lib/ebay-account/media-client", () => ({ createEbayImageFromFile }));
 
 // ---------------------------------------------------------------------
 // A small, realistic IN-MEMORY simulation of the two tables this file's
@@ -172,7 +176,7 @@ beforeEach(() => {
   vi.resetModules();
   getMarketplaceDraft.mockReset(); patchMarketplaceDraft.mockReset();
   getEbayConnection.mockReset(); listEbayPolicies.mockReset(); getValidEbayAccessToken.mockReset();
-  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); getInventoryItem.mockReset(); createSignedDownloadUrl.mockReset(); createEbayPhotoProxyUrl.mockReset();
+  createOrReplaceInventoryItem.mockReset(); createOffer.mockReset(); getOffersForSku.mockReset(); getOffer.mockReset(); getInventoryItem.mockReset(); createSignedDownloadUrl.mockReset(); createEbayPhotoProxyUrl.mockReset(); createEbayImageFromFile.mockReset();
 
   // Stateful — a "creating_draft" step's own patchMarketplaceDraft(ebay_offer_id: ...)
   // call must be visible to the VERY NEXT tick's getMarketplaceDraft read
@@ -200,7 +204,10 @@ beforeEach(() => {
   getInventoryItem.mockResolvedValue(null);
   createSignedDownloadUrl.mockResolvedValue("https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc");
   createEbayPhotoProxyUrl.mockReturnValue("https://project.supabase.co/api/ebay/photo/img-1?exp=1&sig=abc");
-  global.fetch = vi.fn(async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+  createEbayImageFromFile.mockImplementation(async (_accessToken: string, _bytes: ArrayBuffer, _mimeType: string, filename: string) => ({
+    imageUrl: `https://i.ebayimg.com/images/g/${filename}/s-l1600.jpg`, expirationDate: null, imageResourceUrl: null,
+  }));
+  global.fetch = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/jpeg" } })) as unknown as typeof fetch;
 });
 
 async function loadModule(db: ReturnType<typeof makeFakeDb>) {
@@ -408,6 +415,19 @@ describe("Claiming — concurrency, lease expiry, and resume (real behavioural t
 });
 
 describe("Photo URL durability and safety (corrective pass)", () => {
+  it("falls back to a fresh Supabase signed URL when the configured app tunnel is offline", async () => {
+    const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "uploading_photos" })]);
+    global.fetch = vi.fn(async input => String(input).includes("/api/ebay/photo/")
+      ? new Response(null, { status: 502 })
+      : new Response(null, { status: 200 })) as unknown as typeof fetch;
+    const { preparePhotos } = await loadModule(db);
+    const result = await preparePhotos("owner-1", "product-1");
+
+    expect(result.imageUrls).toEqual(["https://project.supabase.co/storage/v1/object/sign/listing-drafts/x?token=abc"]);
+    expect(createSignedDownloadUrl).toHaveBeenCalledWith("listing-drafts", "owner-1/product-1/img-1-x.jpg", 300);
+    expect(result.photoState["img-1"].status).toBe("uploaded");
+  });
+
   it("REQUIREMENT: the signed photo URL is never persisted anywhere — only a status/timestamp/error is written to ebay_photo_state_json", async () => {
     const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "uploading_photos" })]);
     const { runEbayDraftBatchProcessTick } = await loadModule(db);
@@ -443,11 +463,11 @@ describe("Photo URL durability and safety (corrective pass)", () => {
     const { runEbayDraftBatchProcessTick } = await loadModule(db);
     await runEbayDraftBatchProcessTick("owner-1", "batch-1");
     const [, , payload] = createOrReplaceInventoryItem.mock.calls[0];
-    expect((payload as { product: { imageUrls: string[] } }).product.imageUrls[0]).toContain("/img-1?");
-    expect(createEbayPhotoProxyUrl.mock.calls[0]?.[0]).toBe("img-1");
+    expect((payload as { product: { imageUrls: string[] } }).product.imageUrls[0]).toContain("/img-1.jpg/");
+    expect(createEbayImageFromFile.mock.calls[0]?.[3]).toBe("img-1.jpg");
   });
 
-  it("never sends a local filesystem path or blob: URL to eBay — every imageUrls entry is a real https:// Supabase Storage URL", async () => {
+  it("never sends a local filesystem path, blob URL, or signed Storage URL to eBay — every imageUrls entry is an eBay-hosted EPS URL", async () => {
     const db = makeFakeDb(fakeBatch(), [fakeItem({ status: "creating_inventory_item" })]);
     const { runEbayDraftBatchProcessTick } = await loadModule(db);
     await runEbayDraftBatchProcessTick("owner-1", "batch-1");
@@ -455,6 +475,9 @@ describe("Photo URL durability and safety (corrective pass)", () => {
     for (const url of (payload as { product: { imageUrls: string[] } }).product.imageUrls) {
       expect(url).toMatch(/^https:\/\//);
       expect(url).not.toMatch(/^blob:|^file:|localhost/);
+      expect(url).toContain("i.ebayimg.com");
+      expect(url).not.toContain("supabase.co");
+      expect(url).not.toContain("token=");
     }
   });
 });

@@ -71,32 +71,36 @@ describe("PROVEN ROOT CAUSE — the product-row badge read a stale EbaySummary t
     });
   });
 
-  describe("the wiring that closes the gap: the dialog notifies the parent workspace, which re-fetches the authoritative summary", () => {
+  describe("the wiring that closes the gap: one atomic Save & close write then re-fetches the authoritative summary", () => {
     const dialogSource = read("components/listing-studio/EbayCategoryAndAspectsDialog.tsx");
     const workspaceSource = read("components/listing-studio/GroupingWorkspace.tsx");
 
-    it("the dialog accepts an onDraftUpdated callback and calls it after a successful price save", () => {
-      expect(dialogSource).toContain("onDraftUpdated?: () => void");
-      const savePriceBody = dialogSource.slice(dialogSource.indexOf("async function savePrice"), dialogSource.indexOf("async function savePrice") + 2000);
-      expect(savePriceBody).toContain("onDraftUpdated?.();");
+    it("the dialog stages price locally and persists price, condition and item specifics in one request", () => {
+      expect(dialogSource).toContain("onDraftUpdated?: () => unknown | Promise<unknown>");
+      const stagePriceBody = dialogSource.slice(dialogSource.indexOf("function stagePrice"), dialogSource.indexOf("const saveCondition"));
+      expect(stagePriceBody).not.toContain("fetch(");
+      const saveAllBody = dialogSource.slice(dialogSource.indexOf("async function saveAllChanges"), dialogSource.indexOf("if (loading) return"));
+      expect(saveAllBody).toContain("body: JSON.stringify({ pricePence: parsedPrice, conditionValue: draft.conditionValue, dynamicData: draft.dynamicData })");
+      expect(saveAllBody).toContain("await onDraftUpdated?.();");
+      expect(saveAllBody.indexOf("await onDraftUpdated?.();")).toBeLessThan(saveAllBody.indexOf("onClose();"));
     });
 
-    it("REQUIREMENT: a failed price save returns before onDraftUpdated is ever called — a failure is never treated as saved", () => {
-      const savePriceBody = dialogSource.slice(dialogSource.indexOf("async function savePrice"), dialogSource.indexOf("async function savePrice") + 2000);
-      const failureReturnIndex = savePriceBody.indexOf('return { ok: false, error: body.error || "Could not save this price." };');
-      const onDraftUpdatedIndex = savePriceBody.indexOf("onDraftUpdated?.();");
+    it("REQUIREMENT: a failed combined save returns before refresh or close — a failure is never treated as saved", () => {
+      const saveAllBody = dialogSource.slice(dialogSource.indexOf("async function saveAllChanges"), dialogSource.indexOf("if (loading) return"));
+      const failureReturnIndex = saveAllBody.indexOf('setActionError(body.error || "Could not save these eBay details.");');
+      const onDraftUpdatedIndex = saveAllBody.indexOf("await onDraftUpdated?.();");
       expect(failureReturnIndex).toBeGreaterThan(-1);
-      expect(onDraftUpdatedIndex).toBeGreaterThan(failureReturnIndex); // the failure `return` exits the function first
+      expect(saveAllBody.indexOf("return;", failureReturnIndex)).toBeLessThan(onDraftUpdatedIndex);
     });
 
-    it("category selection and item-specific saves also notify the parent, not just price — the same stale-row-badge bug applied to all of them", () => {
-      expect(dialogSource).toMatch(/setUsedFixture\(Boolean\(body\.usedFixture\)\);\s*await load\(\);\s*onDraftUpdated\?\.\(\);/);
-      expect(dialogSource).toMatch(/setSearchQuery\(""\);\s*await load\(\);\s*onDraftUpdated\?\.\(\);/);
-      expect(dialogSource).toContain('JSON.stringify({ aspectName, value, confirm: true }),\n    });\n    await load();\n    onDraftUpdated?.();');
+    it("manual item-specific edits are staged locally and are not written on each individual field change", () => {
+      const saveAspectBody = dialogSource.slice(dialogSource.indexOf("function saveAspect"), dialogSource.indexOf("async function confirmCategory"));
+      expect(saveAspectBody).toContain("setDraft(current => current ?");
+      expect(saveAspectBody).not.toContain("fetch(");
     });
 
     it("PROVEN ROOT CAUSE FIX: GroupingWorkspace wires onDraftUpdated to the SAME loadWorkspace() every other mutating action already refreshes through — not a second, bespoke refresh path", () => {
-      expect(workspaceSource).toContain("onDraftUpdated={() => { void loadWorkspace(); }}");
+      expect(workspaceSource).toContain("onDraftUpdated={loadWorkspace}");
     });
   });
 

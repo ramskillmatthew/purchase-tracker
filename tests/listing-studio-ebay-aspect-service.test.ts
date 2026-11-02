@@ -157,12 +157,12 @@ describe("resolveEbayAspects — automatic product-facts mapping (Live-diagnosti
     expect(outcome.dynamicData.Department).toMatchObject({ value: "Women", confidence: "high", needsReview: false, source: "footwear_size_rule" });
   });
 
-  it("REQUIREMENT: at UK size 7 and above, the deterministic rule does not apply — Department falls back to the ordinary gender-derived candidate", async () => {
+  it("REQUIREMENT: at UK size 7 and above, the deterministic rule sets Department to Men", async () => {
     footwearAspects();
     const outcome = await resolveEbayAspects(baseInput({ productFacts: { ...cloud5ProductFacts, ukShoeSize: "7", gender: "mens" } }));
     expect(outcome.status).toBe("success");
     if (outcome.status !== "success") return;
-    expect(outcome.dynamicData.Department).toMatchObject({ value: "Men", source: "product_facts" });
+    expect(outcome.dynamicData.Department).toMatchObject({ value: "Men", source: "footwear_size_rule", confidence: "high", needsReview: false });
   });
 
   it("REQUIREMENT: Vintage and Customised default to 'No', high confidence, never needing review, with no productFacts input required for them specifically", async () => {

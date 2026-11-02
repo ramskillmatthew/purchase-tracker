@@ -122,11 +122,16 @@ describe("autoSuggestAndPersistEbayCategory — the deterministic below-UK-7 foo
     });
   }
 
-  it("REQUIREMENT: UK size 7 does NOT use the automatic below-UK-7 rule — normal Medium-confidence review still applies", async () => {
-    suggestEbayCategory.mockResolvedValue({ status: "success", searchTerms: "x", selected: selected("medium", { categoryPath: "Women's Shoes > Women > Trainers" }), alternatives: [], stale: false });
+  it("REQUIREMENT: UK size 7 always resolves to the Men's category with no review", async () => {
+    suggestEbayCategory.mockResolvedValue({
+      status: "success", searchTerms: "x",
+      selected: selected("medium", { categoryId: "womens-1", categoryPath: "Women's Shoes > Women > Trainers" }),
+      alternatives: [selected("low", { categoryId: "mens-1", categoryPath: "Men's Shoes > Men > Trainers" })], stale: false,
+    });
     const outcome = await autoSuggestAndPersistEbayCategory("owner-1", "p1", "balanced", ebayDraft({ dynamicData: { __productFacts: footwearProductFacts({ ukShoeSize: "7" }) } }));
     expect(outcome.status).toBe("applied");
-    if (outcome.status === "applied") expect(outcome.needsReview).toBe(true);
+    if (outcome.status === "applied") expect(outcome.needsReview).toBe(false);
+    expect(patchMarketplaceDraft.mock.calls[0][2].category_id).toBe("mens-1");
   });
 
   it("REQUIREMENT: a UK size 4 product where eBay's TOP suggestion is Men's still resolves to Women's via a real alternative — never a fabricated category", async () => {
@@ -167,6 +172,8 @@ describe("autoSuggestAndPersistEbayCategory — the deterministic below-UK-7 foo
     });
     const outcome = await autoSuggestAndPersistEbayCategory("owner-1", "p1", "balanced", ebayDraft({ dynamicData: { __productFacts: footwearProductFacts({ ukShoeSize: "4" }) } }));
     if (outcome.status === "applied") expect(outcome.needsReview).toBe(false);
+    const alternatives = patchMarketplaceDraft.mock.calls[0][2].category_alternatives_json as { categoryId: string }[];
+    expect(alternatives.some(a => a.categoryId === "kids-1")).toBe(false);
   });
 
   it("REQUIREMENT: even a LOW-confidence Women's category is auto-applied for a qualifying size — bypasses the ordinary 'never auto-select low confidence' safety net", async () => {
@@ -188,7 +195,7 @@ describe("autoSuggestAndPersistEbayCategory — the deterministic below-UK-7 foo
     if (outcome.status === "applied") expect(outcome.needsReview).toBe(false);
   });
 
-  it("SAFETY NET: a UK size 4 product with NO Women's category anywhere in the real suggestions genuinely needs review, rather than silently accepting a wrong department", async () => {
+  it("SAFETY NET: a UK size 4 product with NO Women's category remains unresolved and never accepts a wrong department", async () => {
     suggestEbayCategory.mockResolvedValue({
       status: "success", searchTerms: "x",
       selected: selected("high", { categoryId: "mens-1", categoryPath: "Men's Shoes > Men > Trainers" }),
@@ -196,9 +203,31 @@ describe("autoSuggestAndPersistEbayCategory — the deterministic below-UK-7 foo
       stale: false,
     });
     const outcome = await autoSuggestAndPersistEbayCategory("owner-1", "p1", "balanced", ebayDraft({ dynamicData: { __productFacts: footwearProductFacts({ ukShoeSize: "4" }) } }));
-    expect(outcome.status).toBe("applied");
-    if (outcome.status === "applied") expect(outcome.needsReview).toBe(true);
+    expect(outcome.status).toBe("left_unresolved");
     const validationMessages = patchMarketplaceDraft.mock.calls[0][2].validation_messages_json as { code: string; message: string }[];
-    expect(validationMessages.find(m => m.code === "category_needs_confirmation")?.message).toMatch(/Women's category/);
+    expect(validationMessages.find(m => m.code === "category_not_set")?.message).toMatch(/Women's category/);
+    const alternatives = patchMarketplaceDraft.mock.calls[0][2].category_alternatives_json as { categoryId: string }[];
+    expect(alternatives.some(a => a.categoryId === "kids-1")).toBe(false);
+  });
+
+  it("REGRESSION: an older UK size 3 draft without __productFacts still auto-selects Women's and removes children's choices", async () => {
+    supabaseRequestAll.mockResolvedValue([{
+      brand: "New Balance", model: "327", product_type: "Trainers", shared_facts_json: {}, colours: ["Cream", "Mint"],
+      material: "Mesh", uk_size: "3", vinted_audience: "womens", sku: "1713", condition: "Very Good Condition",
+    }]);
+    suggestEbayCategory.mockResolvedValue({
+      status: "success", searchTerms: "New Balance Trainers 327",
+      selected: selected("low", { categoryId: "womens-1", categoryPath: "Women's Shoes > Women > Trainers" }),
+      alternatives: [
+        selected("low", { categoryId: "mens-1", categoryPath: "Men's Shoes > Men > Trainers" }),
+        selected("low", { categoryId: "kids-1", categoryName: "Unisex Kids' Shoes", categoryPath: "Unisex Kids > Kids > Shoes" }),
+      ], stale: false,
+    });
+    const outcome = await autoSuggestAndPersistEbayCategory("owner-1", "p1", "balanced", ebayDraft({ dynamicData: {} }));
+    expect(outcome.status).toBe("applied");
+    const patch = patchMarketplaceDraft.mock.calls[0][2];
+    expect(patch.category_id).toBe("womens-1");
+    expect((patch.category_alternatives_json as { categoryId: string }[]).some(a => a.categoryId === "kids-1")).toBe(false);
+    expect((patch.dynamic_data_json as Record<string, unknown>).__productFacts).toBeTruthy();
   });
 });

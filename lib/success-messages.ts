@@ -29,6 +29,13 @@ export function purchaseAddedMessage(): string {
   return "Cushty — purchase added";
 }
 
+// Manual single-purchase edit. The edit form closes after a successful
+// PATCH, so this explicit confirmation prevents a real saved change from
+// looking like the form simply disappeared without doing anything.
+export function purchaseUpdatedMessage(): string {
+  return "Sorted — purchase updated";
+}
+
 // Email Assistant / Purchase Import review-flow accepted candidates — count
 // must be the number of records actually saved, never shortlisted/displayed/
 // rejected/fallback candidates.

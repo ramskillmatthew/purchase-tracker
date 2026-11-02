@@ -14,8 +14,10 @@ describe("Listing Studio eBay import integration", () => {
     expect(dialog).toContain("rawUrls.split(/\\r?\\n/)");
   });
 
-  it("shows every extension-driven persistent processing stage", () => {
-    for (const label of ["Waiting for extension", "Reading in extension", "Saving photos", "Adding to Listing Studio", "Imported", "Failed", "Open Listing Assistant"]) expect(dialog).toContain(label);
+  it("imports directly from the connected eBay account without the extension handoff", () => {
+    for (const label of ["Queued", "Reading from eBay", "Saving photos", "Adding to Listing Studio", "Imported", "Failed", "No browser extension is required"]) expect(dialog).toContain(label);
+    expect(dialog).not.toContain("Open Listing Assistant");
+    expect(dialog).toContain("/items/${item.id}/process");
     expect(dialog).toContain("/api/listing-studio/ebay-imports");
   });
 

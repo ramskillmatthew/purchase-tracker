@@ -43,7 +43,7 @@ function draft(overrides: Partial<MarketplaceDraft> = {}): MarketplaceDraft {
 beforeEach(() => {
   supabaseRequestAll.mockReset(); resolveEbayAspects.mockReset(); getMarketplaceDraft.mockReset();
   patchMarketplaceDraft.mockReset(); getMarketplaceSettingsDefaults.mockReset(); resolveMarketplaceSettings.mockReset();
-  supabaseRequestAll.mockResolvedValue([{ brand: null, model: null, product_type: null, colours: null, material: null, shared_facts_json: {}, ai_result_json: null }]);
+  supabaseRequestAll.mockResolvedValue([{ brand: null, model: null, product_type: null, colours: null, material: null, uk_size: null, vinted_audience: null, sku: null, condition: null, shared_facts_json: {}, ai_result_json: null }]);
   getMarketplaceSettingsDefaults.mockResolvedValue(null);
   resolveMarketplaceSettings.mockReturnValue({ automationMode: "balanced" });
   readContentGenerationState.mockReturnValue({ state: "generated" });
@@ -133,6 +133,26 @@ describe("autoResolveAndPersistEbayAspects — productFacts wiring", () => {
 
     const resolveArg = resolveEbayAspects.mock.calls[0][0];
     expect(resolveArg.productFacts).toMatchObject({ brand: "On Running", model: "Cloud 5", ukShoeSize: "4", gender: "womens" });
+  });
+
+  it("repairs a legacy draft with no __productFacts from the product's saved structured fields", async () => {
+    getMarketplaceDraft.mockResolvedValue(draft({ dynamicData: {} }));
+    supabaseRequestAll.mockResolvedValue([{
+      brand: "Merrell", model: null, product_type: "Hiking Boots", colours: ["Mustard", "Black"], material: "Suede",
+      uk_size: "3", vinted_audience: "unisex", sku: "1273", condition: "Very good condition",
+      shared_facts_json: {}, ai_result_json: null,
+    }]);
+    resolveEbayAspects.mockResolvedValue({ status: "success", dynamicData: {}, grouped: { required: [], recommended: [], optional: [] } });
+
+    await autoResolveAndPersistEbayAspects("owner-1", "product-1");
+
+    const resolveArg = resolveEbayAspects.mock.calls[0][0];
+    expect(resolveArg.productFacts).toMatchObject({
+      brand: "Merrell", productType: "Hiking Boots", colours: ["Mustard", "Black"], material: "Suede",
+      ukShoeSize: "3", gender: "unisex", itemFamily: "footwear", internalSku: "1273",
+    });
+    const patchArg = patchMarketplaceDraft.mock.calls[0][2] as { dynamic_data_json: MarketplaceDynamicData };
+    expect(patchArg.dynamic_data_json.__productFacts).toBeTruthy();
   });
 });
 

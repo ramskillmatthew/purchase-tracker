@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import {
-  getDefaultCategoryTreeId, getCategorySuggestions, getItemAspectsForCategory, __resetEbayTokenCacheForTests,
+  getDefaultCategoryTreeId, getCategorySuggestions, getItemAspectsForCategory, getEbayItemConditionPolicies, __resetEbayTokenCacheForTests,
 } from "@/lib/listing-studio/ebay-taxonomy-client";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -227,6 +227,29 @@ describe("getItemAspectsForCategory", () => {
     const result = await getItemAspectsForCategory("3", "183454");
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.data[0].localizedAspectName).toBe("Game");
+  });
+});
+
+describe("getEbayItemConditionPolicies", () => {
+  it("returns the exact UK category condition labels and help text", async () => {
+    const fetchMock = vi.fn(async (url: string) => String(url).includes("oauth2/token") ? tokenResponse() : new Response(JSON.stringify({
+      itemConditionPolicies: [{
+        categoryId: "95672", itemConditionRequired: true,
+        itemConditions: [
+          { conditionId: "2990", conditionDescription: "Pre-owned - Excellent", conditionHelpText: "Like new, no visible flaws or signs of use." },
+          { conditionId: "3000", conditionDescription: "Pre-owned - Good", conditionHelpText: "Gently used with moderate signs of wear." },
+        ],
+      }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await getEbayItemConditionPolicies("95672");
+    expect(result).toEqual({ ok: true, data: [
+      { conditionId: "2990", conditionDescription: "Pre-owned - Excellent", conditionHelpText: "Like new, no visible flaws or signs of use." },
+      { conditionId: "3000", conditionDescription: "Pre-owned - Good", conditionHelpText: "Gently used with moderate signs of wear." },
+    ] });
+    const apiCall = fetchMock.mock.calls.find(call => !String(call[0]).includes("oauth2/token"));
+    expect(String(apiCall![0])).toContain("/sell/metadata/v1/marketplace/EBAY_GB/get_item_condition_policies");
+    expect(String(apiCall![0])).toContain(encodeURIComponent("categoryIds:{95672}"));
   });
 });
 

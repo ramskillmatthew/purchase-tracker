@@ -28,8 +28,10 @@ export const viewport: Viewport = {
 const themeScript = `
   try {
     const saved = localStorage.getItem('purchase-tracker-theme');
-    const dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const dark = saved ? saved !== 'light' : window.matchMedia('(prefers-color-scheme: dark)').matches;
     document.documentElement.classList.toggle('dark', dark);
+    document.documentElement.classList.toggle('space', saved === 'space');
+    document.documentElement.dataset.sidebarState = localStorage.getItem('purchase-tracker-sidebar-pinned') === 'false' ? 'collapsed' : 'pinned';
   } catch {}
 `;
 

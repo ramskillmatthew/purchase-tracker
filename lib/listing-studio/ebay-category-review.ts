@@ -1,4 +1,4 @@
-import { requiresWomensDepartment, categoryTextIndicatesWomens } from "@/lib/listing-studio/footwear-department-rule";
+import { requiredFootwearDepartment, categoryTextMatchesFootwearDepartment, categoryTextIndicatesChildrens } from "@/lib/listing-studio/footwear-department-rule";
 import type { MarketplaceDynamicData } from "@/lib/listing-studio/marketplace-types";
 
 /**
@@ -72,16 +72,10 @@ export function resolveCategoryReviewState(params: {
 }): CategoryReviewState {
   if (!params.categoryId) return { effectiveConfidence: "low", needsReview: false, reason: null, provenance: "ai_suggestion" };
 
-  // A manual "Change category" selection is the owner's own explicit,
-  // deliberate choice — same as everywhere else in this app a manual
-  // correction is trusted outright, never re-litigated.
-  if (params.categorySource === "manual") {
-    return { effectiveConfidence: "high", needsReview: false, reason: null, provenance: "manual" };
-  }
-
   const categoryText = `${params.categoryName ?? ""} ${params.categoryPath ?? ""}`;
-  if (requiresWomensDepartment(params.itemFamily, params.ukShoeSize)) {
-    if (categoryTextIndicatesWomens(categoryText)) {
+  const requiredDepartment = requiredFootwearDepartment(params.itemFamily, params.ukShoeSize);
+  if (requiredDepartment) {
+    if (categoryTextMatchesFootwearDepartment(categoryText, requiredDepartment)) {
       // The deterministic rule corroborates eBay's own selection — trusted
       // outright regardless of eBay's own (possibly Medium/Low) taxonomy
       // confidence. Never displayed as "the AI got more confident" — see
@@ -94,8 +88,22 @@ export function resolveCategoryReviewState(params: {
     // ordinary AI-confidence review.
     return {
       effectiveConfidence: "low", needsReview: true, provenance: "footwear_size_rule_mismatch",
-      reason: "This product's UK shoe size requires a Women's category, but the selected category is not a Women's category. Choose a Women's category.",
+      reason: `This product's UK shoe size requires a ${requiredDepartment}'s category, but the selected category does not match. Choose a ${requiredDepartment}'s category.`,
     };
+  }
+
+  if (params.itemFamily === "footwear" && categoryTextIndicatesChildrens(categoryText)) {
+    return {
+      effectiveConfidence: "low", needsReview: true, provenance: "footwear_size_rule_mismatch",
+      reason: "Children's footwear categories are not used in this app. Choose an adult Women's or Men's category.",
+    };
+  }
+
+  // A manual choice is trusted only after the non-negotiable footwear
+  // rules above. A manual click must never re-introduce a children's or
+  // wrong-department footwear category.
+  if (params.categorySource === "manual") {
+    return { effectiveConfidence: "high", needsReview: false, reason: null, provenance: "manual" };
   }
 
   if (params.confirmedForCategoryId && params.confirmedForCategoryId === params.categoryId) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HOME_PERIOD_TO_SALES_PRESET, homeSalesChart, pendingHomeSales, recentHomeSales } from "@/lib/home-sales";
+import { HOME_PERIOD_TO_SALES_PRESET, homeReportChart, homeSalesChart, pendingHomeSales, recentHomeSales } from "@/lib/home-sales";
 import type { SalesOrderListItem } from "@/lib/types";
 
 function order(id: string, date: string, processStatus: SalesOrderListItem["process_status"], revenue: number, profitPence: number): SalesOrderListItem {
@@ -31,5 +31,29 @@ describe("Home sales dashboard helpers", () => {
   it("aggregates real revenue and profit into chronological chart buckets", () => {
     const points = homeSalesChart([order("b", "2026-08-02", "completed", 20, -50), order("a", "2026-08-01", "completed", 10, 300)], 2);
     expect(points.map(point => [point.label, point.revenuePence, point.profitPence])).toEqual([["1 Aug", 1000, 300], ["2 Aug", 2000, -50]]);
+  });
+
+  it("combines every sale from the same date into one chart point", () => {
+    const rows = [
+      order("a", "2026-10-03", "completed", 10, 100),
+      order("b", "2026-10-03", "completed", 20, 200),
+      order("c", "2026-10-03", "completed", 30, 300),
+    ];
+    const points = homeSalesChart(rows, 3);
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ key: "2026-10-03", label: "3 Oct", revenuePence: 6000, profitPence: 600 });
+  });
+
+  it("condenses complete report data by time without duplicate date labels", () => {
+    const rows = Array.from({ length: 10 }, (_, index) => ({
+      key: `2026-10-${String(index + 1).padStart(2, "0")}`,
+      label: `${index + 1} Oct 2026`,
+      revenuePence: 100,
+      profitPence: 25,
+    }));
+    const points = homeReportChart(rows, 3);
+    expect(points.map(point => point.axisLabel)).toEqual(["4 Oct", "8 Oct", "10 Oct"]);
+    expect(points.map(point => point.revenuePence)).toEqual([400, 400, 200]);
+    expect(points[0].label).toBe("1 Oct 2026 – 4 Oct 2026");
   });
 });

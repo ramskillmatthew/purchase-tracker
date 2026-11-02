@@ -1,159 +1,211 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { Expense, Purchase, SalesOrderListItem } from "@/lib/types";
+import type { Expense, Purchase, SalesOrderListItem, Task } from "@/lib/types";
 import type { SalesHistoryResponse } from "@/lib/sales/history";
 import TodaysTasksCard from "@/components/TodaysTasksCard";
-import { computeHomeReport, periodOperatingExpensePence, periods, type Period } from "@/lib/home-report";
 import { netProfitWithReturnsLossesPence } from "@/lib/returns/net-profit";
 import { RETURNS_CHANGED_EVENT } from "@/lib/returns/events";
-import { calculateInStockValue } from "@/lib/purchases";
-import { HOME_PERIOD_TO_SALES_PRESET, homeSalesChart, pendingHomeSales, recentHomeSales } from "@/lib/home-sales";
+import { calculateAwaitingArrivalValue, countAwaitingArrival } from "@/lib/purchases";
+import { homeReportChart, pendingHomeSales, recentHomeSales } from "@/lib/home-sales";
+import type { SalesReportResponse } from "@/lib/sales/reporting";
 import { salesProcessPresentation } from "@/lib/sales/process-status";
+import { isTaskActionableToday, isTaskOverdue } from "@/lib/tasks";
+import { poundsToPence } from "@/lib/sales/money";
+import { DASHBOARD_SCENE_EVENT, DASHBOARD_SCENE_STORAGE_KEY, isDashboardSceneMode, resolveDashboardScene, type DashboardSceneMode } from "@/lib/dashboard-scene";
+import { homeSpendBreakdown } from "@/lib/home-spend";
+import { COMPANY_YEAR_CHANGED_EVENT, COMPANY_YEAR_STORAGE_KEY, DEFAULT_COMPANY_YEAR_START, companyYearDates, parseCompanyYearStart } from "@/lib/company-year";
 import styles from "./home.module.css";
 
 const money = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const shortMoney = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
+type DashboardPeriod = "7-days" | "30-days" | "90-days" | "month" | "tax-year" | "all-time";
+const periods: { value: DashboardPeriod; label: string }[] = [
+  { value: "7-days", label: "7 days" }, { value: "30-days", label: "30 days" }, { value: "90-days", label: "90 days" },
+  { value: "month", label: "This month" }, { value: "tax-year", label: "Company year" }, { value: "all-time", label: "All time" },
+];
 
-function Icon({ name }: { name: "purchases" | "spend" | "revenue" | "profit" | "margin" | "stock" }) {
-  const paths = {
-    purchases: <><path d="M3 4h2l1.4 9h9.8l2-6H6"/><circle cx="9" cy="18" r="1"/><circle cx="16" cy="18" r="1"/></>,
-    spend: <><path d="M4 5v6l8 8 7-7-8-8H5a1 1 0 0 0-1 1Z"/><circle cx="8" cy="8" r="1"/></>,
-    revenue: <><path d="M4 17 9 12l3 3 7-8"/><path d="M14 7h5v5"/><path d="M4 20h16"/></>,
-    profit: <><path d="M14.5 6.5c-.4-1.8-1.6-3-3.5-3-2.2 0-3.5 1.5-3.5 3.7 0 3.4 4 3.6 4 6.2 0 1.5-1 2.6-2.6 2.6-1.1 0-2-.3-2.9-1"/><path d="M5 10h8M5 19h11"/></>,
-    margin: <><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/><path d="m18 4-12 16"/></>,
-    stock: <><path d="M4 7h16v5H4zM6 14h12v5H6z"/><path d="M10 9.5h4M10 16.5h4"/></>,
-  };
-  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+function dateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
+function periodRange(period: DashboardPeriod, companyYearStart = DEFAULT_COMPANY_YEAR_START): { start: string; end: string } | null {
+  const now = new Date(); const end = dateKey(now);
+  if (period === "all-time") return null;
+  if (period === "month") return { start: dateKey(new Date(now.getFullYear(), now.getMonth(), 1)), end };
+  if (period === "tax-year") {
+    const companyYear = companyYearDates(now, parseCompanyYearStart(companyYearStart));
+    return { start: companyYear.start, end: companyYear.today };
+  }
+  const days = period === "7-days" ? 7 : period === "30-days" ? 30 : 90;
+  const start = new Date(now); start.setDate(start.getDate() - (days - 1));
+  return { start: dateKey(start), end };
 }
-
+function queryForPeriod(period: DashboardPeriod, companyYearStart = DEFAULT_COMPANY_YEAR_START) {
+  if (period === "all-time") return "preset=all-time";
+  if (period === "month") return "preset=this-month";
+  const range = periodRange(period, companyYearStart)!;
+  return `preset=custom&start=${range.start}&end=${range.end}`;
+}
+function netProfitAdjustmentUrl(period: DashboardPeriod, companyYearStart = DEFAULT_COMPANY_YEAR_START) {
+  return `/api/returns-losses/net-profit-adjustment?preset=${queryForPeriod(period, companyYearStart).replace(/^preset=/, "")}`;
+}
+function periodOperatingExpensePence(period: DashboardPeriod, expenses: readonly Expense[], companyYearStart = DEFAULT_COMPANY_YEAR_START) {
+  const range = periodRange(period, companyYearStart);
+  const rows = range ? expenses.filter(row => row.purchase_date >= range.start && row.purchase_date <= range.end) : expenses;
+  return rows.reduce((sum, row) => sum + poundsToPence(Number(row.cost || 0)), 0);
+}
+function salesUrl(period: DashboardPeriod, status: "completed" | "all", companyYearStart = DEFAULT_COMPANY_YEAR_START) { return `/api/sales?status=${status}&${queryForPeriod(period, companyYearStart)}&pageSize=100&sort=date&direction=desc&includeMeta=false`; }
+function salesReportUrl(period: DashboardPeriod, companyYearStart = DEFAULT_COMPANY_YEAR_START) { return `/api/sales/reports?${queryForPeriod(period, companyYearStart)}`; }
+function operationalSalesUrl(status: "pending" | "all") { return `/api/sales?status=${status}&preset=all-time&pageSize=10&sort=date&direction=desc&includeMeta=false`; }
+async function fetchDashboardHistory(url: string, signal: AbortSignal): Promise<SalesHistoryResponse> {
+  let lastError = "Sales information could not be loaded.";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(url, { signal });
+    const body = await response.json().catch(() => null);
+    if (response.ok) return body as SalesHistoryResponse;
+    lastError = body?.error || lastError;
+    if (response.status < 500 || attempt === 1) break;
+  }
+  throw new Error(lastError);
+}
 function platformLabel(row: SalesOrderListItem) { return row.platform === "other" && row.custom_platform_name ? row.custom_platform_name : row.platform === "ebay" ? "eBay" : row.platform.charAt(0).toUpperCase() + row.platform.slice(1); }
 function itemLabel(row: SalesOrderListItem) { return row.itemGroups.map(group => group.quantity > 1 ? `${group.description} × ${group.quantity}` : group.description).join(", ") || "Sale"; }
-function salesUrl(period: Period, status: "completed" | "all") { return `/api/sales?status=${status}&preset=${HOME_PERIOD_TO_SALES_PRESET[period]}&pageSize=100&sort=date&direction=desc`; }
-// Pending Orders + Recent Sales are OPERATIONAL widgets — always all-time,
-// never scoped to the financial Compare-period selector. A small server-side
-// page is enough (the widgets only ever show 4 / 5 rows); the authoritative
-// pending count comes from the response's own pre-pagination `total`.
-function operationalSalesUrl(status: "pending" | "all") { return `/api/sales?status=${status}&preset=all-time&pageSize=10&sort=date&direction=desc`; }
 function orderCountLabel(total: number) { return `${total} ${total === 1 ? "order" : "orders"}`; }
+
+function MetricIcon({ name }: { name: "profit" | "revenue" | "stock" | "locked" }) {
+  if (name === "profit") return <span aria-hidden="true">£</span>;
+  const paths = {
+    revenue: <><path d="M4 17 9 12l3 3 7-8"/><path d="M14 7h5v5"/></>,
+    stock: <><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></>,
+    locked: <><circle cx="12" cy="12" r="7"/><path d="m12 12 4-4M12 3v3m0 12v3M3 12h3m12 0h3"/></>,
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function LineChart({ rows, label }: { rows: ReturnType<typeof homeReportChart>; label: string }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  if (!rows.length) return <div className={styles.chartEmpty}>No completed sales in this period.</div>;
+  const width = 600, height = 190, left = 54, right = 18, top = 24, bottom = 34;
+  const max = Math.max(1, ...rows.flatMap(row => [row.revenuePence, Math.max(0, row.profitPence)]));
+  const point = (value: number, index: number) => `${left + (rows.length === 1 ? 0 : index * ((width - left - right) / (rows.length - 1)))},${top + (1 - Math.max(0, value) / max) * (height - top - bottom)}`;
+  const revenue = rows.map((row, index) => point(row.revenuePence, index));
+  const profit = rows.map((row, index) => point(row.profitPence, index));
+  const firstX = revenue[0].split(",")[0], lastX = revenue[revenue.length - 1].split(",")[0], floor = height - bottom;
+  const activeIndex = hoverIndex === null ? null : Math.min(rows.length - 1, Math.max(0, hoverIndex));
+  const activeRow = activeIndex === null ? null : rows[activeIndex];
+  const activeX = activeIndex === null ? 0 : left + (rows.length === 1 ? 0 : activeIndex * ((width-left-right)/(rows.length-1)));
+  function selectPoint(clientX: number, element: HTMLDivElement) {
+    const bounds = element.getBoundingClientRect();
+    const chartX = ((clientX - bounds.left) / bounds.width) * width;
+    const ratio = Math.min(1, Math.max(0, (chartX - left) / (width - left - right)));
+    setHoverIndex(rows.length === 1 ? 0 : Math.round(ratio * (rows.length - 1)));
+  }
+  return <div className={styles.lineChart} role="img" aria-label={`Revenue and profit chart for ${label}`} tabIndex={0} onPointerMove={event => selectPoint(event.clientX, event.currentTarget)} onPointerLeave={() => setHoverIndex(null)} onFocus={() => setHoverIndex(rows.length - 1)} onBlur={() => setHoverIndex(null)}>
+    <div className={styles.legend}><span><i/>Revenue</span><span><i/>Profit</span></div>
+    {activeRow && <div className={styles.chartTooltip} style={{ left: `${Math.min(76, Math.max(24, (activeX / width) * 100))}%` }}><strong>{activeRow.label}</strong><span><i/>Revenue <b>{money.format(activeRow.revenuePence/100)}</b></span><span><i/>Profit <b>{money.format(activeRow.profitPence/100)}</b></span></div>}
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+      <defs><linearGradient id="revenueArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#7657ff" stopOpacity=".35"/><stop offset="1" stopColor="#7657ff" stopOpacity="0"/></linearGradient><linearGradient id="profitArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#1ee6a0" stopOpacity=".25"/><stop offset="1" stopColor="#1ee6a0" stopOpacity="0"/></linearGradient></defs>
+      {[0, .25, .5, .75, 1].map(step => <line key={step} x1={left} x2={width-right} y1={top + step*(height-top-bottom)} y2={top + step*(height-top-bottom)} className={styles.gridLine}/>)}
+      <polygon points={`${firstX},${floor} ${revenue.join(" ")} ${lastX},${floor}`} fill="url(#revenueArea)"/><polygon points={`${firstX},${floor} ${profit.join(" ")} ${lastX},${floor}`} fill="url(#profitArea)"/>
+      <polyline points={revenue.join(" ")} className={styles.revenueLine}/><polyline points={profit.join(" ")} className={styles.profitLine}/>
+      {activeIndex !== null && <line x1={activeX} x2={activeX} y1={top} y2={floor} className={styles.hoverGuide}/>}
+      {revenue.map((coords, index) => <circle key={rows[index].key} cx={coords.split(",")[0]} cy={coords.split(",")[1]} r="3.5" className={styles.revenueDot}/>)}
+      {activeIndex !== null && <><circle cx={activeX} cy={revenue[activeIndex].split(",")[1]} r="5" className={styles.activeRevenueDot}/><circle cx={activeX} cy={profit[activeIndex].split(",")[1]} r="5" className={styles.activeProfitDot}/></>}
+      {rows.map((row, index) => <text key={row.key} x={left + (rows.length === 1 ? 0 : index * ((width-left-right)/(rows.length-1)))} y={height-8} textAnchor={index === 0 ? "start" : index === rows.length-1 ? "end" : "middle"} className={styles.axisText}>{row.axisLabel ?? row.label}</text>)}
+    </svg>
+  </div>;
+}
 
 export default function HomePage() {
   const router = useRouter();
-  const [period, setPeriod] = useState<Period>("month");
-  const [purchases, setPurchases] = useState<Purchase[]>([]);
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [completed, setCompleted] = useState<SalesHistoryResponse | null>(null);
-  // Server-side KPIs over EVERY valid sale in the period (status "completed",
-  // any operational process_status) — the "completed" fetch above narrows to
-  // process_status === "completed", which must not gate monthly net profit.
-  const [allSalesKpis, setAllSalesKpis] = useState<SalesHistoryResponse["kpis"] | null>(null);
-  // Operational widgets (Pending Orders, Recent Sales) — all-time, loaded once
-  // on entry and NEVER re-scoped by `period`. `pendingTotal` is the API's exact
-  // pre-limit count (the Sales page's authoritative Pending total); `pending`
-  // is only ever the 4-row preview.
-  const [pending, setPending] = useState<SalesOrderListItem[]>([]);
-  const [pendingTotal, setPendingTotal] = useState(0);
-  const [recentSales, setRecentSales] = useState<SalesOrderListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [salesLoading, setSalesLoading] = useState(true);
-  const [opsLoading, setOpsLoading] = useState(true);
-  // SIGNED return/loss net-profit adjustment for the selected period, from
-  // /api/returns-losses/net-profit-adjustment — ADDED as-is to the Net profit
-  // card (never clamped). Active + completed returns reverse their sale's
-  // signed profit (negative for a profitable sale, positive for a loss-making
-  // one), plus return postage/fees and inventory losses (always negative).
-  // Never affects any other card. 0 while not loaded / feature not migrated.
-  const [returnLossAdjustmentPence, setReturnLossAdjustmentPence] = useState(0);
-  const [error, setError] = useState("");
-  const [salesError, setSalesError] = useState("");
-  const [opsError, setOpsError] = useState("");
-  // Bumped when a returns/losses mutation elsewhere changes figures the
-  // financial + operational scopes below depend on (active-return net-profit
-  // impact, Sales Overview status).
-  const [returnsRefreshKey, setReturnsRefreshKey] = useState(0);
-  useEffect(() => {
-    const onChange = () => setReturnsRefreshKey(k => k + 1);
-    window.addEventListener(RETURNS_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(RETURNS_CHANGED_EVENT, onChange);
-  }, []);
+  const [period, setPeriod] = useState<DashboardPeriod>("month");
+  const [companyYearStart, setCompanyYearStart] = useState(DEFAULT_COMPANY_YEAR_START);
+  const [purchases, setPurchases] = useState<Purchase[]>([]); const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [completed, setCompleted] = useState<SalesHistoryResponse | null>(null); const [allSalesKpis, setAllSalesKpis] = useState<SalesHistoryResponse["kpis"] | null>(null);
+  const [salesReport, setSalesReport] = useState<SalesReportResponse | null>(null);
+  const [pending, setPending] = useState<SalesOrderListItem[]>([]); const [pendingTotal, setPendingTotal] = useState(0); const [recentSales, setRecentSales] = useState<SalesOrderListItem[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]); const [now, setNow] = useState(new Date());
+  const [dashboardSceneMode, setDashboardSceneMode] = useState<DashboardSceneMode>("auto");
+  const [loading, setLoading] = useState(true); const [salesLoading, setSalesLoading] = useState(true); const [opsLoading, setOpsLoading] = useState(true);
+  const [returnLossAdjustmentPence, setReturnLossAdjustmentPence] = useState(0); const [returnsRefreshKey, setReturnsRefreshKey] = useState(0);
+  const [lockedInScore, setLockedInScore] = useState(82); const [lockedInDraft, setLockedInDraft] = useState(82); const [editingLockedIn, setEditingLockedIn] = useState(false);
+  const [dashboardError, setDashboardError] = useState(""); const [salesError, setSalesError] = useState(""); const [opsError, setOpsError] = useState("");
 
   useEffect(() => {
-    Promise.all([fetch("/api/purchases"), fetch("/api/expenses")]).then(async ([purchaseResponse, expenseResponse]) => {
-      if (!purchaseResponse.ok || !expenseResponse.ok) throw new Error("Could not load purchasing information.");
-      const [purchaseRows, expenseRows] = await Promise.all([purchaseResponse.json(), expenseResponse.json()]);
-      setPurchases(purchaseRows); setExpenses(expenseRows);
-    }).catch((reason: Error) => setError(reason.message)).finally(() => setLoading(false));
+    document.documentElement.classList.add("dark", "space", "home-dashboard"); localStorage.setItem("purchase-tracker-theme", "space"); window.dispatchEvent(new Event("purchase-theme-change"));
+    const syncSceneMode = () => { const saved = window.localStorage.getItem(DASHBOARD_SCENE_STORAGE_KEY); setDashboardSceneMode(isDashboardSceneMode(saved) ? saved : "auto"); };
+    syncSceneMode(); window.addEventListener(DASHBOARD_SCENE_EVENT, syncSceneMode);
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => { document.documentElement.classList.remove("home-dashboard"); delete document.documentElement.dataset.dashboardScene; window.removeEventListener(DASHBOARD_SCENE_EVENT, syncSceneMode); window.clearInterval(timer); };
   }, []);
-
-  // FINANCIAL scope — re-fetched whenever the Compare-period changes. Supplies
-  // Revenue, Net profit, Margin, Sales Overview and the chart only.
+  useEffect(() => { document.documentElement.dataset.dashboardScene = resolveDashboardScene(dashboardSceneMode, now); }, [dashboardSceneMode, now]);
+  useEffect(() => { const saved = window.localStorage.getItem("home-locked-in-score"); if (saved === null) return; const stored = Number(saved); if (Number.isFinite(stored) && stored >= 0 && stored <= 100) { setLockedInScore(stored); setLockedInDraft(stored); } }, []);
+  useEffect(() => { const sync = () => setCompanyYearStart(window.localStorage.getItem(COMPANY_YEAR_STORAGE_KEY) || DEFAULT_COMPANY_YEAR_START); sync(); window.addEventListener(COMPANY_YEAR_CHANGED_EVENT, sync); return () => window.removeEventListener(COMPANY_YEAR_CHANGED_EVENT, sync); }, []);
+  useEffect(() => { const onChange = () => setReturnsRefreshKey(key => key + 1); window.addEventListener(RETURNS_CHANGED_EVENT, onChange); return () => window.removeEventListener(RETURNS_CHANGED_EVENT, onChange); }, []);
   useEffect(() => {
-    const controller = new AbortController();
-    setSalesLoading(true); setSalesError("");
-    Promise.all([fetch(salesUrl(period, "completed"), { signal: controller.signal }), fetch(salesUrl(period, "all"), { signal: controller.signal })]).then(async responses => {
-      if (responses.some(response => !response.ok)) throw new Error("Could not load sales information.");
-      const [completedBody, allBody] = await Promise.all(responses.map(response => response.json())) as SalesHistoryResponse[];
-      setCompleted(completedBody); setAllSalesKpis(allBody.kpis);
-    }).catch(reason => { if (reason.name !== "AbortError") setSalesError(reason.message); }).finally(() => { if (!controller.signal.aborted) setSalesLoading(false); });
-    // Returns/losses adjustment for the same period — a best-effort extra: a
-    // failure (e.g. the returns-losses migration not applied yet) leaves the
-    // adjustment at 0 rather than breaking the Net profit card.
-    fetch(`/api/returns-losses/net-profit-adjustment?preset=${HOME_PERIOD_TO_SALES_PRESET[period]}`, { signal: controller.signal })
-      .then(response => response.ok ? response.json() : { adjustmentPence: 0 })
-      .then(body => setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0))
-      .catch(() => { if (!controller.signal.aborted) setReturnLossAdjustmentPence(0); });
+    setDashboardError(""); Promise.all([fetch("/api/purchases"), fetch("/api/expenses"), fetch("/api/tasks")]).then(async responses => { if (responses.some(response => !response.ok)) throw new Error("Some dashboard information could not be loaded."); const [purchaseRows, expenseRows, taskRows] = await Promise.all(responses.map(response => response.json())); setPurchases(purchaseRows); setExpenses(expenseRows); setTasks(taskRows); }).catch((reason: Error) => setDashboardError(reason.message)).finally(() => setLoading(false));
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController(); setSalesLoading(true); setSalesError("");
+    Promise.all([
+      fetchDashboardHistory(salesUrl(period, "completed", companyYearStart), controller.signal),
+      fetchDashboardHistory(salesUrl(period, "all", companyYearStart), controller.signal),
+      fetch(salesReportUrl(period, companyYearStart), { signal: controller.signal }).then(async response => {
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error || "Sales chart could not be loaded.");
+        return body as SalesReportResponse;
+      }),
+    ]).then(([completedBody, allBody, reportBody]) => { setCompleted(completedBody); setAllSalesKpis(allBody.kpis); setSalesReport(reportBody); }).catch(reason => { if (reason.name !== "AbortError") setSalesError(reason.message); }).finally(() => { if (!controller.signal.aborted) setSalesLoading(false); });
+    fetch(netProfitAdjustmentUrl(period, companyYearStart), { signal: controller.signal }).then(response => response.ok ? response.json() : { adjustmentPence: 0 }).then(body => setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0)).catch(() => { if (!controller.signal.aborted) setReturnLossAdjustmentPence(0); });
     return () => controller.abort();
-  }, [period, returnsRefreshKey]);
-
-  // OPERATIONAL scope — loaded once on entry, all-time, independent of `period`.
-  // Changing the Compare-period must never blank these or move their totals; a
-  // returns/losses mutation (which can flip a sale's Overview status) does.
+  }, [period, returnsRefreshKey, companyYearStart]);
   useEffect(() => {
-    const controller = new AbortController();
-    setOpsLoading(true); setOpsError("");
-    Promise.all([fetch(operationalSalesUrl("pending"), { signal: controller.signal }), fetch(operationalSalesUrl("all"), { signal: controller.signal })]).then(async responses => {
-      if (responses.some(response => !response.ok)) throw new Error("Could not load orders.");
-      const [pendingBody, recentBody] = await Promise.all(responses.map(response => response.json())) as SalesHistoryResponse[];
-      setPendingTotal(pendingBody.total); setPending(pendingHomeSales(pendingBody.rows)); setRecentSales(recentHomeSales(recentBody.rows));
-    }).catch(reason => { if (reason.name !== "AbortError") setOpsError(reason.message); }).finally(() => { if (!controller.signal.aborted) setOpsLoading(false); });
+    const controller = new AbortController(); setOpsLoading(true); setOpsError("");
+    Promise.all([fetchDashboardHistory(operationalSalesUrl("pending"), controller.signal), fetchDashboardHistory(operationalSalesUrl("all"), controller.signal)]).then(([pendingBody, recentBody]) => { setPendingTotal(pendingBody.total); setPending(pendingHomeSales(pendingBody.rows)); setRecentSales(recentHomeSales(recentBody.rows)); }).catch(reason => { if (reason.name !== "AbortError") setOpsError(reason.message || "Orders could not be loaded."); }).finally(() => { if (!controller.signal.aborted) setOpsLoading(false); });
     return () => controller.abort();
   }, [returnsRefreshKey]);
 
-  const report = useMemo(() => computeHomeReport(period, purchases, expenses), [period, purchases, expenses]);
-  const stockValue = useMemo(() => calculateInStockValue(purchases), [purchases]);
-  // Operating expenses dated in the selected period, in integer pence — the
-  // second half of monthly net profit (valid-sales profit minus this).
-  const operatingExpensePence = useMemo(() => periodOperatingExpensePence(period, expenses), [period, expenses]);
-  const chart = useMemo(() => homeSalesChart(completed?.rows ?? []), [completed]);
-  const chartMax = Math.max(1, ...chart.flatMap(point => [point.revenuePence, Math.max(0, point.profitPence)]));
-  const selectedPeriod = periods.find(option => option.value === period)?.label ?? "This Month";
-  const kpis = completed?.kpis;
-  const metricCards = [
-    { name: "purchases" as const, label: "Purchases", value: loading ? "—" : report.periodPurchases.length.toLocaleString("en-GB"), caption: selectedPeriod },
-    { name: "spend" as const, label: "Stock spend", value: loading ? "—" : money.format(report.stockSpend), caption: "Purchases in period" },
-    { name: "revenue" as const, label: "Revenue", value: salesLoading ? "—" : money.format((kpis?.revenuePence ?? 0) / 100), caption: "Sales in period" },
-    { name: "profit" as const, label: "Net profit", value: salesLoading || loading ? "—" : money.format(netProfitWithReturnsLossesPence(allSalesKpis?.profitPence ?? 0, operatingExpensePence, returnLossAdjustmentPence) / 100), caption: "Sales profit, less expenses, returns & losses", profit: true },
-    { name: "margin" as const, label: "Margin", value: salesLoading ? "—" : `${(kpis?.margin ?? 0).toFixed(2)}%`, caption: "Profit margin" },
-    { name: "stock" as const, label: "Stock value", value: loading ? "—" : money.format(stockValue), caption: `${purchases.filter(row => row.stock_status === "in_stock").length} items in stock` },
-  ];
+  const range = useMemo(() => periodRange(period, companyYearStart), [period, companyYearStart]);
+  const periodPurchases = useMemo(() => range ? purchases.filter(row => row.order_date >= range.start && row.order_date <= range.end) : purchases, [purchases, range]);
+  const operatingExpensePence = periodOperatingExpensePence(period, expenses, companyYearStart);
+  const recentPurchases = useMemo(() => [...periodPurchases].sort((a,b) => b.order_date.localeCompare(a.order_date) || b.created_at.localeCompare(a.created_at)).slice(0,6), [periodPurchases]);
+  const spendCategories = useMemo(() => homeSpendBreakdown(periodPurchases), [periodPurchases]);
+  const donutStyle = useMemo(() => { const stops = spendCategories.rows.map((row, index) => { const start = spendCategories.rows.slice(0, index).reduce((sum, item) => sum + item.percentage, 0); const end = start + row.percentage; return `${row.color} ${start}% ${end}%`; }); return { "--donut": stops.length ? `conic-gradient(${stops.join(",")})` : "conic-gradient(#273043 0 100%)" } as CSSProperties; }, [spendCategories]);
+  const chart = useMemo(() => homeReportChart(salesReport?.chart.daily ?? salesReport?.chart.monthly ?? []), [salesReport]);
+  const selectedPeriod = periods.find(option => option.value === period)?.label ?? "This month";
+  const kpis = completed?.kpis; const allValidSalesProfitPence = allSalesKpis?.profitPence ?? 0;
+  const netProfitPence = netProfitWithReturnsLossesPence(allValidSalesProfitPence, operatingExpensePence, returnLossAdjustmentPence);
+  const completedRevenuePence = kpis?.revenuePence ?? 0; const pendingRevenuePence = Math.max(0, (allSalesKpis?.revenuePence ?? 0) - completedRevenuePence);
+  const pendingSalesCount = Math.max(0, (allSalesKpis?.completedSales ?? 0) - (kpis?.completedSales ?? 0));
+  const netMargin = (allSalesKpis?.revenuePence ?? 0) ? netProfitPence / (allSalesKpis?.revenuePence ?? 1) * 100 : 0;
+  const inStockUnits = purchases.filter(row => row.stock_status === "in_stock").reduce((sum,row) => sum + Math.max(1, Number(row.quantity)||1), 0);
+  const awaitingValue = calculateAwaitingArrivalValue(purchases); const awaitingCount = countAwaitingArrival(purchases);
+  const actionableTasks = tasks.filter(task => isTaskActionableToday(task)); const overdueTasks = tasks.filter(task => isTaskActionableToday(task) && isTaskOverdue(task));
+  const hour = now.getHours(); const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const error = dashboardError || salesError || opsError;
 
-  return <section className={`page-shell ${styles.page}`}>
-    <header className={styles.header}><h1>Home</h1><div className={styles.periodControl}><span className={styles.periodLabel}>Compare period</span><div className={styles.periodSwitch} aria-label="Compare period">{periods.map(option => <button key={option.value} type="button" className={period === option.value ? styles.active : ""} aria-pressed={period === option.value} onClick={() => setPeriod(option.value)}>{option.label}</button>)}</div></div></header>
-    {error && <div className={styles.error}>{error}</div>}{salesError && <div className={styles.error}>{salesError}</div>}
-    <div className={styles.kpis} aria-busy={loading || salesLoading}>{metricCards.map(card => <article className={styles.kpi} key={card.label}><span className={`${styles.kpiIcon} ${card.profit ? styles.profitIcon : ""}`}><Icon name={card.name}/></span><span className={styles.kpiLabel}>{card.label}</span><strong className={`${styles.kpiValue} ${card.profit ? styles.profit : ""}`}>{card.value}</strong><small className={styles.kpiCaption}>{card.caption}</small></article>)}</div>
+  function saveLockedIn() { const score = Math.min(100, Math.max(0, Math.round(lockedInDraft))); setLockedInScore(score); setLockedInDraft(score); window.localStorage.setItem("home-locked-in-score", String(score)); setEditingLockedIn(false); }
 
-    <div className={styles.grid}><TodaysTasksCard maxTasks={4}/><section className={styles.panel}><div className={styles.heading}><h2>Sales Overview</h2><span>{selectedPeriod}</span></div><div className={styles.overviewBody}><div className={styles.overviewStats}>
-      <div className={styles.stat}><span className={styles.statIcon}>▢</span><strong>{salesLoading ? "—" : kpis?.completedSales ?? 0}</strong><small>Completed sales</small></div>
-      <div className={styles.stat}><span className={styles.statIcon}>£</span><strong>{salesLoading ? "—" : money.format((kpis?.revenuePence ?? 0) / 100)}</strong><small>Total revenue</small></div>
-      <div className={styles.stat}><span className={`${styles.statIcon} ${styles.profitIcon}`}>£</span><strong className={styles.profit}>{salesLoading ? "—" : money.format((kpis?.profitPence ?? 0) / 100)}</strong><small>Total profit</small></div><Link className={styles.viewSales} href="/sales">View sales →</Link>
-    </div><div className={styles.chart} role="img" aria-label={`Revenue and profit chart for ${selectedPeriod}. Revenue ${money.format((kpis?.revenuePence ?? 0) / 100)}, profit ${money.format((kpis?.profitPence ?? 0) / 100)}.`}><div className={styles.legend}><span><i/>Revenue</span><span><i/>Profit</span></div>{chart.length ? <div className={styles.bars}>{chart.map(point => <span className={styles.barGroup} key={point.key} title={`${point.label}: revenue ${money.format(point.revenuePence / 100)}, profit ${money.format(point.profitPence / 100)}`}><i className={styles.bar} style={{height:`${Math.max(2,point.revenuePence/chartMax*115)}px`}}/><i className={`${styles.bar} ${styles.barProfit}`} style={{height:`${Math.max(2,Math.max(0,point.profitPence)/chartMax*115)}px`}}/><small>{point.label}</small></span>)}</div> : <div className={styles.empty}>{salesLoading ? "Loading sales…" : "No completed sales in this period."}</div>}</div></div></section></div>
+  return <section className={styles.page}>
+    <section className={styles.hero}>
+      <div className={styles.constellation} aria-hidden="true"><i/><i/><i/><i/><i/><i/></div>
+      <div className={styles.heroCopy}><span className={styles.eyebrow}>Overview</span><h1>{greeting}, Matthew</h1><div className={styles.heroBadges}><Link href="/tasks">☑ <b>{actionableTasks.length}</b> tasks due</Link><Link href="/tasks" className={styles.overdue}>△ <b>{overdueTasks.length}</b> overdue</Link><Link href="/sales?status=pending">◇ <b>{pendingTotal}</b> pending orders</Link></div></div>
+      <div className={styles.clock}><span>{now.toLocaleDateString("en-GB", { weekday: "long" })}</span><strong>{now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false })}</strong><small>{now.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</small></div>
+      <div className={styles.health}><span><i/>All running</span><span><i/>Database synced</span><span><i/>eBay synced</span></div>
+      <div className={styles.periodSwitch} aria-label="Dashboard period">{periods.map(option => <button key={option.value} type="button" className={period === option.value ? styles.active : ""} onClick={() => setPeriod(option.value)} aria-pressed={period === option.value}>{option.label}</button>)}</div>
+    </section>
+    {error && <div className={styles.error}>{error}</div>}
+    <section className={styles.metrics} aria-busy={loading || salesLoading}>
+      <article className={`${styles.metric} ${styles.profitMetric}`}><span className={styles.metricLabel}>Net profit</span><span className={styles.metricIcon}><MetricIcon name="profit"/></span><strong>{salesLoading ? "—" : money.format(netProfitPence/100)}</strong><small><b>{salesLoading ? "—" : `${netMargin.toFixed(1)}%`}</b> margin</small></article>
+      <article className={`${styles.metric} ${styles.revenueMetric}`}><span className={styles.metricLabel}>Revenue</span><span className={styles.metricIcon}><MetricIcon name="revenue"/></span><div className={styles.revenueSplit}><span><small>Completed</small><strong>{salesLoading ? "—" : money.format(completedRevenuePence/100)}</strong><em>{kpis?.completedSales ?? 0} completed sales</em></span><span><small>Pending</small><strong>{salesLoading ? "—" : money.format(pendingRevenuePence/100)}</strong><em>{pendingSalesCount} pending sales</em></span></div></article>
+      <article className={`${styles.metric} ${styles.stockMetric}`}><span className={styles.metricLabel}>Stock</span><span className={styles.metricIcon}><MetricIcon name="stock"/></span><strong>{loading ? "—" : `${inStockUnits.toLocaleString("en-GB")} units in stock`}</strong><small>{loading ? "Loading stock…" : `${money.format(awaitingValue)} incoming · ${awaitingCount} units`}</small></article>
+      <article className={`${styles.metric} ${styles.lockedMetric}`}><span className={styles.metricLabel}>Locked in</span><span className={styles.metricIcon}><MetricIcon name="locked"/></span><strong>{lockedInScore} <i>/ 100</i></strong><small>Your efficiency rating</small><button className={styles.editScore} type="button" aria-label="Edit Locked In score" onClick={() => { setLockedInDraft(lockedInScore); setEditingLockedIn(value => !value); }}>✎</button>{editingLockedIn && <div className={styles.scorePopover}><h3>Edit Locked In score</h3><div className={styles.scoreControl}><input type="range" min="0" max="100" value={lockedInDraft} onChange={event => setLockedInDraft(Number(event.target.value))}/><output>{lockedInDraft}</output></div><p>Your personal efficiency rating</p><div><button type="button" onClick={() => setEditingLockedIn(false)}>Cancel</button><button type="button" onClick={saveLockedIn}>Save</button></div></div>}</article>
+    </section>
 
-    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Pending Orders</h2><span>{opsLoading || opsError ? "" : orderCountLabel(pendingTotal)}</span></div><div className={styles.orderRows}>{pending.length ? pending.map(row => { const status = salesProcessPresentation(row); return <Link href={`/sales/${row.id}`} className={styles.orderRow} key={row.id}><span className={`${styles.status} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span><span className={styles.item}>{itemLabel(row)}</span><span className={styles.platform}>{platformLabel(row)}</span><span className={styles.amount}>{money.format(Number(row.total_revenue))}</span><span aria-hidden="true">›</span></Link>; }) : <div className={styles.empty}>{opsLoading ? "Loading orders…" : opsError ? "Pending orders could not be loaded." : "No pending orders."}</div>}</div></section>
-      <section className={styles.panel}><div className={styles.heading}><h2>Recent Sales</h2><span>Latest 5</span></div><div className={styles.tableWrap}><table className={`${styles.table} ${styles.recentSales}`}><thead><tr><th>Date</th><th>Item</th><th>Platform</th><th>Revenue</th><th>Profit</th><th>Status</th></tr></thead><tbody>{recentSales.length ? recentSales.map(row => { const status = salesProcessPresentation(row); return <tr key={row.id} tabIndex={0} onClick={() => router.push(`/sales/${row.id}`)} onKeyDown={event => { if(event.key === "Enter") router.push(`/sales/${row.id}`); }}><td>{new Date(`${row.sale_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td title={itemLabel(row)}>{itemLabel(row)}</td><td>{platformLabel(row)}</td><td>{money.format(Number(row.total_revenue))}</td><td className={`${styles.profitCell} ${row.profitPence < 0 ? styles.negative : ""}`}>{money.format(row.profitPence/100)}</td><td><span className={`${styles.statusCell} ${styles[status.tone]}`}><i className={styles.dot}/>{status.shortLabel}</span></td></tr>; }) : <tr><td colSpan={6}>{opsLoading ? "Loading sales…" : opsError ? "Recent sales could not be loaded." : "No recent sales."}</td></tr>}</tbody></table></div></section></div>
-
-    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Where My Money Went</h2><span>{report.sources.length} sources</span></div><div className={styles.spendBody}>{report.sources.length ? report.sources.slice(0,5).map(source => <div className={styles.source} key={source.source}><div className={styles.sourceMeta}><strong>{source.source}</strong><span>{shortMoney.format(source.spend)} <i>{source.percentage.toFixed(0)}%</i></span></div><div className={styles.track}><span style={{width:`${source.percentage}%`}}/></div></div>) : <div className={styles.empty}>No purchase spending in this period.</div>}</div></section>
-      <section className={styles.panel}><div className={styles.heading}><h2>Recent Purchases</h2><span>Latest 6</span></div><div className={styles.tableWrap}><table className={`${styles.table} ${styles.recentPurchases}`}><thead><tr><th>Date</th><th>Description</th><th>Size</th><th>Price</th><th>SKU</th></tr></thead><tbody>{report.recent.slice(0,6).map(row => <tr key={row.id} tabIndex={0} onClick={() => router.push(`/purchases/${row.id}`)} onKeyDown={event => { if(event.key === "Enter") router.push(`/purchases/${row.id}`); }}><td>{new Date(`${row.order_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td>{row.item_description}</td><td>{row.item_size}</td><td>{money.format(Number(row.price_purchased))}</td><td><span className={styles.sku}>{row.sku}</span></td></tr>)}{!report.recent.length && <tr><td colSpan={5}>{loading ? "Loading purchases…" : "No purchases in this period."}</td></tr>}</tbody></table></div></section></div>
+    <div className={styles.grid}><TodaysTasksCard maxTasks={4}/><section className={styles.panel}><div className={styles.heading}><h2>Sales Overview</h2><span>{selectedPeriod}</span></div><div className={styles.overviewBody}><div className={styles.overviewStats}><div><span>□</span><strong>{salesLoading ? "—" : kpis?.completedSales ?? 0}</strong><small>Completed sales</small></div><div><span>£</span><strong>{salesLoading ? "—" : money.format(completedRevenuePence/100)}</strong><small>Completed revenue</small></div><div><span>£</span><strong className={styles.green}>{salesLoading ? "—" : money.format((kpis?.profitPence ?? 0)/100)}</strong><small>Total profit</small></div><Link href="/sales">View sales →</Link></div><LineChart rows={chart} label={selectedPeriod}/></div></section></div>
+    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Pending Orders</h2><span>{opsLoading || opsError ? "" : orderCountLabel(pendingTotal)}</span></div><div className={styles.orderRows}>{pending.length ? pending.map(row => { const status = salesProcessPresentation(row); return <Link href={`/sales/${row.id}`} className={styles.orderRow} key={row.id}><span className={styles.status}><i/>{status.shortLabel}</span><strong title={itemLabel(row)}>{itemLabel(row)}</strong><span>{platformLabel(row)}</span><b>{money.format(Number(row.total_revenue))}</b><em>›</em></Link>; }) : <div className={styles.empty}>{opsLoading ? "Loading orders…" : opsError ? "Pending orders could not be loaded." : "No pending orders."}</div>}</div></section><section className={styles.panel}><div className={styles.heading}><h2>Recent Sales</h2><span>{opsLoading || opsError ? "" : "Latest 5"}</span></div><div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Date</th><th>Item</th><th>Platform</th><th>Revenue</th><th>Profit</th><th>Status</th></tr></thead><tbody>{recentSales.length ? recentSales.map(row => { const status=salesProcessPresentation(row); return <tr key={row.id} onClick={() => router.push(`/sales/${row.id}`)}><td>{new Date(`${row.sale_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td>{itemLabel(row)}</td><td>{platformLabel(row)}</td><td>{money.format(Number(row.total_revenue))}</td><td className={row.profitPence < 0 ? styles.red : styles.green}>{money.format(row.profitPence/100)}</td><td><span className={styles.status}><i/>{status.shortLabel}</span></td></tr>}) : <tr><td colSpan={6} className={styles.empty}>{opsLoading ? "Loading sales…" : opsError ? "Recent sales could not be loaded." : "No recent sales."}</td></tr>}</tbody></table></div></section></div>
+    <div className={styles.grid}><section className={styles.panel}><div className={styles.heading}><h2>Where My Money Went</h2><span>{selectedPeriod}</span></div><div className={styles.spendBody}>{spendCategories.rows.length ? <><div className={styles.donut} style={donutStyle}><div><strong>{shortMoney.format(spendCategories.total)}</strong><span>Total spent</span></div></div><div className={styles.categoryList}>{spendCategories.rows.map(row => <div key={row.name}><i style={{background:row.color}}/><strong>{row.name}</strong><b>{shortMoney.format(row.value)}</b><span>{row.percentage.toFixed(1)}%</span></div>)}</div></> : <div className={styles.empty}>No purchase spending in this period.</div>}</div></section><section className={styles.panel}><div className={styles.heading}><h2>Recent Purchases</h2><span>Latest 6</span></div><div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Date</th><th>Description</th><th>Size</th><th>Price</th><th>SKU</th></tr></thead><tbody>{recentPurchases.map(row => <tr key={row.id} onClick={() => router.push(`/purchases/${row.id}`)}><td>{new Date(`${row.order_date}T00:00:00`).toLocaleDateString("en-GB")}</td><td>{row.item_description}</td><td>{row.item_size}</td><td>{money.format(Number(row.price_purchased))}</td><td>{row.sku}</td></tr>)}</tbody></table></div></section></div>
+    <footer className={styles.footer}><span>TROTTER&apos;S ATTIRE</span><i/>Trading HQ<nav><a href="#">Help</a><a href="#">Privacy</a><a href="#">Terms</a><b><i/>All systems operational</b></nav></footer>
   </section>;
 }

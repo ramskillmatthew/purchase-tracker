@@ -5,6 +5,7 @@ import {
   expenseAddedMessage,
   expensesImportedMessage,
   purchaseAddedMessage,
+  purchaseUpdatedMessage,
   purchasesAddedMessage,
   purchasesImportedMessage,
   salesCancelledMessage,
@@ -27,6 +28,10 @@ describe("lib/success-messages.ts — exact wording and pluralisation", () => {
 
   it("purchaseAddedMessage (manual single add) never includes a count", () => {
     expect(purchaseAddedMessage()).toBe("Cushty — purchase added");
+  });
+
+  it("purchaseUpdatedMessage confirms a successful manual edit", () => {
+    expect(purchaseUpdatedMessage()).toBe("Sorted — purchase updated");
   });
 
   it("purchasesAddedMessage singular", () => {

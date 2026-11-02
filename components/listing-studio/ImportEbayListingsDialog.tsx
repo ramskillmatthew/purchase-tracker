@@ -7,7 +7,7 @@ type ImportItem = { id: string; batch_id: string; source_url: string; ebay_item_
 type ImportBatch = { id: string; status: string; total_count: number; created_at?: string; items: ImportItem[] };
 
 const STATUS_LABELS: Record<EbayImportStatus, string> = {
-  waiting: "Waiting for extension", extracting: "Reading in extension", downloading_photos: "Saving photos",
+  waiting: "Queued", extracting: "Reading from eBay", downloading_photos: "Saving photos",
   processing: "Adding to Listing Studio", imported: "Imported", failed: "Failed",
 };
 
@@ -16,6 +16,7 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
   const [batches, setBatches] = useState<ImportBatch[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   const [clearing, setClearing] = useState<"waiting" | "history" | null>(null);
   const [error, setError] = useState("");
   const lines = useMemo(() => rawUrls.split(/\r?\n/).map(value => value.trim()).filter(Boolean), [rawUrls]);
@@ -40,6 +41,25 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
     return () => clearInterval(timer);
   }, [open, batches, loadImports]);
 
+  const processItems = useCallback(async (items: ImportItem[]) => {
+    const queue = [...items];
+    setProcessingIds(current => new Set([...current, ...queue.map(item => item.id)]));
+    async function worker() {
+      while (queue.length) {
+        const item = queue.shift();
+        if (!item) return;
+        try {
+          await fetch(`/api/listing-studio/ebay-imports/${item.batch_id}/items/${item.id}/process`, { method: "POST" });
+        } finally {
+          setProcessingIds(current => { const next = new Set(current); next.delete(item.id); return next; });
+          await loadImports();
+        }
+      }
+    }
+    await Promise.all([worker(), worker()]);
+    await onImported();
+  }, [loadImports, onImported]);
+
   async function createImport() {
     if (!validation.urls.length || validation.errors.length) return;
     setCreating(true); setError("");
@@ -49,8 +69,14 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
       if (!response.ok) throw new Error(body.error || "Could not start the import.");
       const batch = body.batch as ImportBatch;
       setBatches(current => [batch, ...current]); setRawUrls("");
+      await processItems(batch.items);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start the import."); }
     finally { setCreating(false); }
+  }
+
+  async function retryItem(item: ImportItem) {
+    setError("");
+    await processItems([item]);
   }
 
   async function clearWaiting() {
@@ -81,7 +107,7 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
   const completed = queueItems.filter(item => item.status === "imported").length;
   const failed = queueItems.filter(item => item.status === "failed").length;
   const waiting = queueItems.filter(item => item.status === "waiting").length;
-  const busy = creating || Boolean(clearing) || queueItems.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status));
+  const busy = creating || processingIds.size > 0 || Boolean(clearing) || queueItems.some(item => ["extracting", "downloading_photos", "processing"].includes(item.status));
 
   return <div className="ebay-import-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <section className="ebay-import-dialog" role="dialog" aria-modal="true" aria-labelledby="ebay-import-title">
@@ -99,12 +125,12 @@ export default function ImportEbayListingsDialog({ open, onClose, onImported }: 
           <div className="ebay-import-progress-head"><div><strong>Import queue</strong><span>{completed} imported{waiting ? ` · ${waiting} waiting` : ""}{failed ? ` · ${failed} failed` : ""}</span></div><div className="ebay-import-progress-actions"><button type="button" className="button-secondary" onClick={clearWaiting} disabled={!waiting || Boolean(clearing)}>{clearing === "waiting" ? "Clearing…" : "Clear waiting"}</button><button type="button" className="button-secondary" onClick={clearHistory} disabled={(!completed && !failed) || Boolean(clearing)}>{clearing === "history" ? "Clearing…" : "Clear completed & failed"}</button><button type="button" className="button-secondary" onClick={loadImports}>Refresh</button></div></div>
           {loading && !queueItems.length ? <p className="ebay-import-loading">Loading imports…</p> : <div className="ebay-import-items">{queueItems.map(item => <article key={item.id} className={`ebay-import-item ebay-import-item-${item.status}`}>
             <span className="ebay-import-item-icon" aria-hidden="true">{item.status === "imported" ? "✓" : item.status === "failed" ? "!" : item.status === "waiting" ? "·" : "↻"}</span>
-            <div><strong>{item.title || `eBay item ${item.ebay_item_id}`}</strong><small>{STATUS_LABELS[item.status]}{item.photo_count ? ` · ${item.photo_count} photos` : ""}</small>{item.safe_error && <p>{item.safe_error}</p>}</div>
+            <div><strong>{item.title || `eBay item ${item.ebay_item_id}`}</strong><small>{processingIds.has(item.id) ? "Importing directly from eBay" : STATUS_LABELS[item.status]}{item.photo_count ? ` · ${item.photo_count} photos` : ""}</small>{item.safe_error && <p>{item.safe_error}</p>}{item.status === "failed" && <button type="button" className="button-secondary" onClick={() => retryItem(item)} disabled={processingIds.has(item.id)}>Retry import</button>}</div>
           </article>)}</div>}
         </div>}
         {error && <div className="ebay-import-error" role="alert">{error}</div>}
       </div>
-      <footer><span>Open Listing Assistant and press Start importing. Completed listings and photos are saved permanently.</span><button type="button" className="button-secondary" onClick={async () => { if (completed) await onImported(); onClose(); }} disabled={busy}>Done</button></footer>
+      <footer><span>Listings are read directly from your connected eBay account. No browser extension is required.</span><button type="button" className="button-secondary" onClick={async () => { if (completed) await onImported(); onClose(); }} disabled={busy}>Done</button></footer>
     </section>
   </div>;
 }

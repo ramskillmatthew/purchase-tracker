@@ -14,6 +14,7 @@ import type { MarketplaceDraftStatus, MarketplaceValidationMessage, MarketplaceR
 import type { ListingGenerationFields, VintedAudienceValue } from "@/lib/listing-studio/listing-generation-schemas";
 import type { DraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { buildEbayProductFacts, type EbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
+import { DEFAULT_EBAY_CONDITION } from "@/lib/listing-studio/ebay-condition";
 
 /**
  * Stage 6 (genuinely eBay-specific generation, fixing the reported Fault 1
@@ -48,11 +49,8 @@ function mapItemFamily(family: DraftItemFamily): EbayItemFamily {
  * keeps the draft not-ready with zero changes needed at any of those call
  * sites — see ebay-description-renderer.ts's resolveEbayConditionText. */
 function conditionValueLabel(state: "very_good_preowned" | "new" | "needs_review"): string | null {
-  switch (state) {
-    case "very_good_preowned": return "Used – Very Good";
-    case "new": return "New";
-    case "needs_review": return null;
-  }
+  void state;
+  return DEFAULT_EBAY_CONDITION;
 }
 
 export type EbayDraftGenerationResult = {
@@ -188,9 +186,6 @@ export async function buildEbayDraftFromGeneratedFields(input: {
     const conditionResolution = resolveEbayConditionText(conditionEvidence);
     conditionValue = conditionValueLabel(conditionResolution.state);
     conditionState = conditionResolution.state;
-    if (conditionResolution.state === "needs_review") {
-      aiWarnings.push({ code: "condition_needs_review", message: "The available condition evidence suggests a defect that needs a human-written condition description — please review and confirm the condition before this draft is ready.", field: "condition", severity: "warning" });
-    }
     const descriptionFacts: EbayDescriptionFacts = {
       brand: fields.brand.value, model: fields.model.value, gender, productType: fields.productType.value,
       ukShoeSize, clothingSize, primaryColour, secondaryColour, material: fields.material.value,
@@ -200,7 +195,7 @@ export async function buildEbayDraftFromGeneratedFields(input: {
     description = renderEbayDescription(descriptionFacts);
   } else {
     description = fallbackDescription(fields, input.ukSize);
-    conditionValue = null;
+    conditionValue = DEFAULT_EBAY_CONDITION;
   }
 
   let descriptionIssues = validateEbayDescription(description);

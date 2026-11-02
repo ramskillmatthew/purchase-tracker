@@ -227,11 +227,20 @@ describe("app/page.tsx wiring — Net profit card no longer gated on process_sta
     // pulls the process-status-independent server KPIs (the "all" fetch)
     expect(source).toContain("setAllSalesKpis(allBody.kpis)");
     // Net profit value = valid sales profit − operating expenses − returns/losses adjustment, via the shared helper
-    expect(source).toContain("netProfitWithReturnsLossesPence(allSalesKpis?.profitPence ?? 0, operatingExpensePence, returnLossAdjustmentPence)");
-    expect(source).toContain("periodOperatingExpensePence(period, expenses)");
+    expect(source).toContain("netProfitWithReturnsLossesPence(allValidSalesProfitPence, operatingExpensePence, returnLossAdjustmentPence)");
+    expect(source).toContain("periodOperatingExpensePence(period, expenses, companyYearStart)");
     // Stage 1: the signed adjustment comes from the dedicated endpoint, folded (added) into the card
     expect(source).toContain("/api/returns-losses/net-profit-adjustment?preset=");
     expect(source).toContain("setReturnLossAdjustmentPence(Number(body?.adjustmentPence) || 0)");
+    // The redesigned four-card home summary keeps each live business signal
+    // visible without exposing the old calculation strip.
+    expect(source).toContain("Net profit");
+    expect(source).toContain("Completed");
+    expect(source).toContain("Pending");
+    expect(source).toContain("Locked in");
+    expect(source).toContain("calculateAwaitingArrivalValue(purchases)");
+    expect(source).toContain('window.localStorage.setItem("home-locked-in-score"');
+    expect(source).not.toContain("Net profit calculation");
     // and is NOT the old process-status-gated completed-only figure
     expect(source).not.toContain('money.format((kpis?.profitPence ?? 0) / 100), caption: "Profit in period"');
   });

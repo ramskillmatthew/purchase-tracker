@@ -1,6 +1,7 @@
 import type { Period } from "@/lib/home-report";
 import type { SalesOrderListItem } from "@/lib/types";
 import type { DateRangePreset } from "@/lib/sales/report-date-range";
+import type { ReportChartPoint } from "@/lib/sales/reporting";
 import { PENDING_PROCESS_STATUSES, effectiveSalesProcessStatus, isPendingProcessStatus } from "@/lib/sales/process-status";
 
 export const HOME_PERIOD_TO_SALES_PRESET: Record<Period, Exclude<DateRangePreset, "today" | "custom">> = {
@@ -40,23 +41,53 @@ export function recentHomeSales(rows: SalesOrderListItem[]): SalesOrderListItem[
   return [...rows].sort((a, b) => b.sale_date.localeCompare(a.sale_date) || b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)).slice(0, 5);
 }
 
-export type HomeSalesChartPoint = { key: string; label: string; revenuePence: number; profitPence: number };
+export type HomeSalesChartPoint = { key: string; label: string; axisLabel?: string; revenuePence: number; profitPence: number };
 
-export function homeSalesChart(rows: SalesOrderListItem[], maxPoints = 6): HomeSalesChartPoint[] {
-  const chronological = [...rows].sort((a, b) => a.sale_date.localeCompare(b.sale_date) || a.created_at.localeCompare(b.created_at));
-  if (!chronological.length) return [];
-  const bucketCount = Math.min(maxPoints, chronological.length);
-  const bucketSize = Math.ceil(chronological.length / bucketCount);
+function compactChartLabel(label: string): string {
+  return label.replace(/\s+\d{4}$/, "");
+}
+
+/**
+ * Condenses a complete, chronological date series into a small number of
+ * contiguous TIME buckets. This deliberately buckets calendar points rather
+ * than individual sales: a busy date can therefore appear only once, and a
+ * long reporting period cannot collapse into several identically-labelled
+ * points merely because many orders happened on one day.
+ */
+export function homeReportChart(rows: readonly ReportChartPoint[], maxPoints = 7): HomeSalesChartPoint[] {
+  if (!rows.length) return [];
+  if (rows.length <= maxPoints) return rows.map(row => ({ ...row, axisLabel: compactChartLabel(row.label) }));
+  const bucketSize = Math.ceil(rows.length / maxPoints);
   const points: HomeSalesChartPoint[] = [];
-  for (let index = 0; index < chronological.length; index += bucketSize) {
-    const bucket = chronological.slice(index, index + bucketSize);
+  for (let index = 0; index < rows.length; index += bucketSize) {
+    const bucket = rows.slice(index, index + bucketSize);
+    const first = bucket[0];
     const last = bucket[bucket.length - 1];
     points.push({
-      key: `${bucket[0].sale_date}:${last.sale_date}`,
-      label: new Date(`${last.sale_date}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
-      revenuePence: bucket.reduce((sum, row) => sum + Math.round(Number(row.total_revenue) * 100), 0),
+      key: `${first.key}:${last.key}`,
+      label: first.key === last.key ? first.label : `${first.label} – ${last.label}`,
+      axisLabel: compactChartLabel(last.label),
+      revenuePence: bucket.reduce((sum, row) => sum + row.revenuePence, 0),
       profitPence: bucket.reduce((sum, row) => sum + row.profitPence, 0),
     });
   }
   return points;
+}
+
+export function homeSalesChart(rows: SalesOrderListItem[], maxPoints = 6): HomeSalesChartPoint[] {
+  const chronological = [...rows].sort((a, b) => a.sale_date.localeCompare(b.sale_date) || a.created_at.localeCompare(b.created_at));
+  if (!chronological.length) return [];
+  const daily = new Map<string, HomeSalesChartPoint>();
+  for (const row of chronological) {
+    const current = daily.get(row.sale_date) ?? {
+      key: row.sale_date,
+      label: new Date(`${row.sale_date}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
+      revenuePence: 0,
+      profitPence: 0,
+    };
+    current.revenuePence += Math.round(Number(row.total_revenue) * 100);
+    current.profitPence += row.profitPence;
+    daily.set(row.sale_date, current);
+  }
+  return homeReportChart([...daily.values()], maxPoints);
 }

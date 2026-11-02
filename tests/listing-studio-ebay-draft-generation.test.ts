@@ -49,7 +49,7 @@ describe("buildEbayDraftFromGeneratedFields — AI success path", () => {
   it("condition resolves to the standard pre-owned label by default (no evidence given) — never left null when it doesn't need to be", async () => {
     runEbayListingGeneration.mockResolvedValue(aiSuccess());
     const result = await buildEbayDraftFromGeneratedFields(baseInput());
-    expect(result.conditionValue).toBe("Used – Very Good");
+    expect(result.conditionValue).toBe("Pre-owned - Excellent");
     expect(result.productFacts.conditionState).toBe("very_good_preowned");
     expect(result.validationMessages.map(m => m.code)).not.toContain("condition_not_set");
   });
@@ -65,12 +65,12 @@ describe("buildEbayDraftFromGeneratedFields — AI success path", () => {
     expect(result.productFacts.internalSku).toBe("1648");
   });
 
-  it("REQUIREMENT: a flagged defect in the AI's condition evidence leaves conditionValue null and needs_review, never a fabricated standard sentence", async () => {
+  it("OWNER RULE: even when the description evidence needs attention, the eBay condition defaults to Pre-owned - Excellent and remains manually editable", async () => {
     runEbayListingGeneration.mockResolvedValue(aiSuccess({ conditionEvidence: "There is a tear near the sole and a stain on the upper." }));
     const result = await buildEbayDraftFromGeneratedFields(baseInput());
-    expect(result.conditionValue).toBeNull();
-    expect(result.validationMessages.some(m => m.code === "condition_needs_review")).toBe(true);
-    expect(result.validationMessages.some(m => m.code === "condition_not_set")).toBe(false); // the specific message, not the generic one
+    expect(result.conditionValue).toBe("Pre-owned - Excellent");
+    expect(result.validationMessages.some(m => m.code === "condition_needs_review")).toBe(false);
+    expect(result.validationMessages.some(m => m.code === "condition_not_set")).toBe(false);
   });
 
   it("PROVEN ROOT CAUSE FIX: 'On Running' (brand) and 'Running Trainers' (product type) are different, non-adjacent fields — both real occurrences of 'Running' are kept, never silently dropped", async () => {
@@ -184,7 +184,7 @@ describe("buildEbayDraftFromGeneratedFields — AI failure falls back safely", (
     expect(result.description).toBeTruthy();
     expect(result.description).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u);
     expect(result.validationMessages.some(m => m.code === "ebay_generation_degraded")).toBe(true);
-    expect(result.conditionValue).toBeNull();
+    expect(result.conditionValue).toBe("Pre-owned - Excellent");
   });
 
   it("not_configured also falls back gracefully rather than throwing", async () => {

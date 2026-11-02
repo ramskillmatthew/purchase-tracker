@@ -4,10 +4,29 @@ import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { uuidSchema, updateSellingPriceRequestSchema } from "@/lib/validation/listing-studio-uploads";
 import { parseSellingPricePounds } from "@/lib/listing-studio/selling-price";
+import { buildPurchaseMatchIndex, buildPurchaseSkuLookupQueries, describePurchaseMatch, matchSkuToPurchase, type PurchaseMatchRecord } from "@/lib/listing-studio/purchase-match";
 
 export const runtime = "nodejs";
 
-type DraftRow = { id: string };
+type DraftRow = { id: string; sku?: string | null };
+
+/** Lightweight editor context for the eBay price step. Uses the exact
+ * same SKU matching and wording as Listings Review, so “You paid” can
+ * never disagree between the two screens. */
+export async function GET(_request: Request, { params }: { params: Promise<{ draftId: string }> }) {
+  try {
+    const user = await requireOwner();
+    const { draftId } = await params;
+    if (!uuidSchema.safeParse(draftId).success) return NextResponse.json({ error: "Invalid group id." }, { status: 400 });
+    const rows = await supabaseRequestAll<DraftRow>(`listing_drafts?id=eq.${draftId}&owner_id=eq.${user.id}&select=id,sku`);
+    const draft = rows[0];
+    if (!draft) return NextResponse.json({ error: "Listing not found." }, { status: 404 });
+    const purchaseQueries = buildPurchaseSkuLookupQueries([draft.sku ?? null]);
+    const chunks = await Promise.all(purchaseQueries.map(query => supabaseRequestAll<PurchaseMatchRecord>(query)));
+    const purchaseMatch = matchSkuToPurchase(draft.sku ?? null, buildPurchaseMatchIndex(chunks.flat()));
+    return NextResponse.json({ purchaseMatch, purchasePriceText: describePurchaseMatch(purchaseMatch) });
+  } catch (error) { return safeApiError(error, "Could not load this item's purchase price."); }
+}
 
 /**
  * Milestone 6 (purchase-price lookup and manual Vinted selling price) — the

@@ -126,7 +126,9 @@ beforeEach(() => {
     // across a first attempt and a Retry actually meaningful to assert on.
     ebayRow = {
       id: "mdraft-1", ownerId: input.ownerId, productDraftId: input.productDraftId, marketplace: "EBAY_UK",
-      title: input.title, description: input.description, dynamicData: ebayRow?.dynamicData ?? {}, categoryId: null, categoryName: null,
+      sourceType: input.sourceType, contentMode: input.contentMode, settings: input.settings ?? {},
+      title: input.title, description: input.description, dynamicData: input.dynamicData ?? ebayRow?.dynamicData ?? {}, categoryId: null, categoryName: null,
+      categoryPath: null, categoryConfidence: null, categorySource: null, categoryAlternatives: [],
       conditionValue: input.conditionValue ?? null, pricePence: input.pricePence ?? null, quantity: input.quantity ?? null,
       validationMessages: input.validationMessages ?? [], readiness: input.readiness ?? { ready: false, completionPercent: 0, requiredComplete: 0, requiredTotal: 8, recommendedComplete: 0, recommendedTotal: 0 },
     };
@@ -144,7 +146,7 @@ beforeEach(() => {
   });
   suggestEbayCategory.mockResolvedValue({
     status: "success", searchTerms: "On Running Cloud 5 Trainers",
-    selected: { categoryId: "183454", categoryName: "Trainers", categoryPath: "Clothes > Trainers", rank: 1, confidence: "high", reason: "match" },
+    selected: { categoryId: "183454", categoryName: "Women's Trainers", categoryPath: "Women > Shoes > Trainers", rank: 1, confidence: "high", reason: "match" },
     alternatives: [], stale: false,
   });
   resolveEbayAspects.mockResolvedValue({ status: "success", grouped: { required: [], recommended: [], optional: [] }, dynamicData: {}, stale: false, aiCost: null });
@@ -256,7 +258,7 @@ describe("Generate Listings — regeneration of an existing eBay draft", () => {
     // so a regeneration can never clobber a manually-confirmed category
     // or item specifics as a side effect of refreshing title/description.
     expect(written).not.toHaveProperty("categoryId");
-    expect(written).not.toHaveProperty("dynamicData");
+    expect(written.dynamicData).toMatchObject({ __contentGeneration: expect.any(Object), __productFacts: expect.any(Object) });
   });
 });
 

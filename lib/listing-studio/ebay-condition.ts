@@ -100,6 +100,10 @@ export const EBAY_CONDITION_ENUM_VALUES = [
 
 export type EbayInventoryConditionEnum = (typeof EBAY_CONDITION_ENUM_VALUES)[number];
 
+/** Default used for every newly generated eBay draft. The owner can
+ * override it with any condition returned by the category metadata. */
+export const DEFAULT_EBAY_CONDITION = "Pre-owned - Excellent";
+
 export type EbayConditionTranslation =
   | { ok: true; enumValue: EbayInventoryConditionEnum }
   | { ok: false; reason: string };
@@ -134,7 +138,7 @@ function normalize(label: string): string {
  */
 const AMBIGUOUS_TERMS: ReadonlySet<string> = new Set([
   "used", "pre owned", "preowned",
-  "good", "pre owned good",
+  "good",
   "fair",
   "open box used",
 ]);
@@ -174,11 +178,11 @@ const LABEL_TO_ENUM: ReadonlyMap<string, EbayInventoryConditionEnum> = new Map([
   // (grade word present); bare "pre owned" is in AMBIGUOUS_TERMS instead.
   ["pre owned excellent", "PRE_OWNED_EXCELLENT"],
   ["pre owned fair", "PRE_OWNED_FAIR"],
-  // USED_EXCELLENT — explicit grade word required. Bare "used" and bare/
-  // confusingly-named "pre owned good" (eBay's own display synonym for
-  // this id, despite containing the word "Good") are both in
-  // AMBIGUOUS_TERMS instead — never silently upgraded here.
-  ["used excellent", "USED_EXCELLENT"],
+  // USED_EXCELLENT — eBay's UK category metadata uses the exact label
+  // “Pre-owned - Good” for condition id 3000. It is accepted here because
+  // the editor now validates the selected label against that live metadata
+  // before persisting it; the bare word “Good” remains ambiguous.
+  ["used excellent", "USED_EXCELLENT"], ["pre owned good", "USED_EXCELLENT"],
   // USED_VERY_GOOD — "very good" is itself a complete, unambiguous grade
   // phrase in eBay's own vocabulary (no other condition shares it) — this
   // is the confirmed SKU 1644 mapping ("Used – Very Good").

@@ -10,7 +10,7 @@ import TaskToast from "@/components/TaskToast";
 import PageSizeSelect from "@/components/PageSizeSelect";
 import ArrivalToggle from "@/components/ArrivalToggle";
 import StockStatusToggle from "@/components/StockStatusToggle";
-import { purchaseAddedMessage, purchasesDeletedMessage, stockStatusChangedMessage } from "@/lib/success-messages";
+import { purchaseAddedMessage, purchaseUpdatedMessage, purchasesDeletedMessage, stockStatusChangedMessage } from "@/lib/success-messages";
 import { DEFAULT_PAGE_SIZE, parseStoredPageSize, totalPagesFor, type PageSize } from "@/lib/pagination";
 import { matchesStockFilter, parseStockFilter, stockFilters, type StockFilter } from "@/lib/purchases";
 import { buildPurchaseSearchText, matchesPurchaseSearchText, normalizeSearchTerms } from "@/lib/purchase-search";
@@ -70,6 +70,7 @@ function PurchasesPageInner() {
   // non-destructive explanation instead of the normal delete confirmation.
   const [protectedNoticeSaleId, setProtectedNoticeSaleId] = useState<string | null>(null);
   const [addedToast, setAddedToast] = useState(false);
+  const [updatedToast, setUpdatedToast] = useState(false);
   const [stockToast, setStockToast] = useState<string | null>(null);
   const [deleteToast, setDeleteToast] = useState<string | null>(null);
   // Selected purchase UUIDs, independent of the current page/filter/sort —
@@ -455,6 +456,7 @@ function PurchasesPageInner() {
       const wasCreate = editing === undefined;
       setEditing(undefined); setOpen(false); load();
       if (wasCreate) setAddedToast(true);
+      else setUpdatedToast(true);
     }} /></div>}
 
     <div className="data-panel">
@@ -556,6 +558,7 @@ function PurchasesPageInner() {
     {importOpen && <PurchaseImportDialog onClose={() => setImportOpen(false)} onImported={load} />}
     {bulkArrivalsOpen && <BulkArrivalsDialog onClose={() => setBulkArrivalsOpen(false)} onApplied={applyBulkArrivals} />}
     {addedToast && <TaskToast message={purchaseAddedMessage()} onDismiss={() => setAddedToast(false)} />}
+    {updatedToast && <TaskToast message={purchaseUpdatedMessage()} onDismiss={() => setUpdatedToast(false)} />}
     {stockToast && <TaskToast message={stockToast} onDismiss={() => setStockToast(null)} position="bottom-right" />}
     {deleteToast && <TaskToast message={deleteToast} onDismiss={() => setDeleteToast(null)} />}
     {bulkUpdateToast && <TaskToast message={bulkUpdateToast} onDismiss={() => setBulkUpdateToast(null)} />}

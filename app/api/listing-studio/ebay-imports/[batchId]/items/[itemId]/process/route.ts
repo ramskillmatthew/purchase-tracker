@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/auth/server";
 import { safeApiError } from "@/lib/auth/api";
 import { supabaseRequest, supabaseRequestAll } from "@/lib/supabase";
-import { extractEbayListing, decodeHtml } from "@/lib/listing-studio/ebay-extractor";
+import { decodeHtml } from "@/lib/listing-studio/ebay-extractor";
 import { buildDraftImageStoragePath, LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import { deleteStorageObjects, uploadStorageObject } from "@/lib/listing-studio/storage-rest";
 import { z } from "zod";
@@ -12,6 +12,10 @@ import { extensionCorsJson, extensionCorsPreflight, extensionSafeApiError } from
 import type { EbayExtractedListing } from "@/lib/listing-studio/ebay-extractor";
 import { mapEbayListingFields } from "@/lib/listing-studio/ebay-field-mapping";
 import { resolveVintedCategoryAssignment } from "@/lib/listing-studio/vinted-category-assignment";
+import { getValidEbayAccessToken } from "@/lib/ebay-account/client";
+import { fetchEbayTradingItem } from "@/lib/ebay-account/trading-item-client";
+import { upsertImportedEbayMarketplaceDraft } from "@/lib/listing-studio/imported-ebay-draft";
+import { autoLinkImportedListing } from "@/lib/listing-studio/inventory-link";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -87,7 +91,9 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
 
     stage = "validating the data read from eBay";
     const body = extensionRequest ? await request.json() : null;
-    const listing: EbayExtractedListing = extensionRequest ? browserListingSchema.parse(body?.listing) : await extractEbayListing(item.source_url);
+    const listing: EbayExtractedListing = extensionRequest
+      ? browserListingSchema.parse(body?.listing)
+      : await fetchEbayTradingItem((await getValidEbayAccessToken(ownerId)).accessToken, item.source_url);
     if (listing.itemId !== item.source_url.match(/\/itm\/(\d{9,15})/)?.[1]) throw new Error("The eBay page did not match the queued listing.");
     // Defensive second decode: the browser extension already decodes HTML
     // entities in the title before submitting it, but an older/un-updated
@@ -133,6 +139,10 @@ export async function POST(request: Request, context: { params: Promise<{ batchI
     }
     await patchItem(itemId, ownerId, { status: "processing", photo_count: imageRows.length });
     await supabaseRequest("listing_draft_images", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(imageRows) });
+    stage = "saving the original eBay details";
+    await upsertImportedEbayMarketplaceDraft({ ownerId, draftId, listing, hasPhoto: imageRows.length > 0 });
+    stage = "matching the imported listing to stock";
+    await autoLinkImportedListing(draftId, ownerId, `${listing.title} ${Object.values(listing.itemSpecifics).join(" ")}`).catch(() => null);
     await patchItem(itemId, ownerId, { status: "imported", draft_id: draftId, photo_count: imageRows.length, completed_at: new Date().toISOString() });
     await finishBatch(batchId, ownerId);
     const success = { ok: true, draftId, title: listing.title, photoCount: imageRows.length };

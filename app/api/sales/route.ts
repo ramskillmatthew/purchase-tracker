@@ -143,6 +143,7 @@ export async function GET(request: Request) {
     const platform = (url.searchParams.get("platform") ?? "").trim().toLowerCase();
     const category = (url.searchParams.get("category") ?? "").trim().toLowerCase();
     const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+    const includeMeta = url.searchParams.get("includeMeta") !== "false";
 
     const filters = [`owner_id=eq.${user.id}`, "select=*", "order=sale_date.desc,created_at.desc,id.desc"];
     if (status === "pending" || status === "completed") filters.push("status=eq.completed");
@@ -166,13 +167,18 @@ export async function GET(request: Request) {
     const page = Math.min(requestedPage, totalPages);
     const rows = filtered.slice((page - 1) * pageSize, page * pageSize).map(({ categorySnapshots: _categories, ...order }) => order);
 
-    const today = londonToday();
-    const todayOrders = await hydrateOrders(await supabaseRequestAll<SalesOrder>(`sales_orders?owner_id=eq.${user.id}&status=eq.completed&sale_date=eq.${today}&select=*&order=sale_date.desc,created_at.desc,id.desc`));
-    const recentResponse = await supabaseRequest(`sales_orders?owner_id=eq.${user.id}&select=*&order=updated_at.desc,id.desc`, { headers: { Range: "0-4" } });
-    const recentActivity = await hydrateOrders(await recentResponse.json() as SalesOrder[]);
-    const allPlatformResponse = await supabaseRequestAll<Pick<SalesOrder, "platform" | "custom_platform_name">>(`sales_orders?owner_id=eq.${user.id}&select=platform,custom_platform_name&order=created_at.asc`);
-    const platforms = [...new Set(allPlatformResponse.map(order => order.platform === "other" && order.custom_platform_name ? order.custom_platform_name : order.platform))].sort((a, b) => a.localeCompare(b));
-    const todayKpis = computeHistoryKpis(todayOrders);
+    let todayKpis = { completedSales: 0, revenuePence: 0, profitPence: 0, margin: 0, averageOrderPence: 0 };
+    let recentActivity: SalesOrderListItem[] = [];
+    let platforms: string[] = [];
+    if (includeMeta) {
+      const today = londonToday();
+      const todayOrders = await hydrateOrders(await supabaseRequestAll<SalesOrder>(`sales_orders?owner_id=eq.${user.id}&status=eq.completed&sale_date=eq.${today}&select=*&order=sale_date.desc,created_at.desc,id.desc`));
+      const recentResponse = await supabaseRequest(`sales_orders?owner_id=eq.${user.id}&select=*&order=updated_at.desc,id.desc`, { headers: { Range: "0-4" } });
+      recentActivity = await hydrateOrders(await recentResponse.json() as SalesOrder[]);
+      const allPlatformResponse = await supabaseRequestAll<Pick<SalesOrder, "platform" | "custom_platform_name">>(`sales_orders?owner_id=eq.${user.id}&select=platform,custom_platform_name&order=created_at.asc`);
+      platforms = [...new Set(allPlatformResponse.map(order => order.platform === "other" && order.custom_platform_name ? order.custom_platform_name : order.platform))].sort((a, b) => a.localeCompare(b));
+      todayKpis = computeHistoryKpis(todayOrders);
+    }
     const response: SalesHistoryResponse = {
       rows, page, pageSize, total, totalPages, kpis: computeHistoryKpis(filtered),
       today: { orders: todayKpis.completedSales, revenuePence: todayKpis.revenuePence, profitPence: todayKpis.profitPence },

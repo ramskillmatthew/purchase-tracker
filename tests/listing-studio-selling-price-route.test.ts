@@ -13,7 +13,7 @@ vi.mock("@/lib/auth/server", async importOriginal => {
 });
 vi.mock("@/lib/supabase", () => ({ supabaseRequestAll, supabaseRequest }));
 
-import { PATCH as sellingPriceRoute } from "@/app/api/listing-studio/groups/[draftId]/selling-price/route";
+import { GET as purchasePriceRoute, PATCH as sellingPriceRoute } from "@/app/api/listing-studio/groups/[draftId]/selling-price/route";
 import { AuthError } from "@/lib/auth/server";
 
 const DRAFT_ID = "11111111-1111-4111-8111-111111111111";
@@ -124,5 +124,41 @@ describe("PATCH /api/listing-studio/groups/[draftId]/selling-price — Milestone
     const response = await sellingPriceRoute(patchRequest({ sellingPrice: "45.00" }), params());
     expect(response.status).toBe(500);
     expect(JSON.stringify(await response.json())).not.toContain("db exploded");
+  });
+});
+
+describe("GET /api/listing-studio/groups/[draftId]/selling-price — eBay price-step purchase context", () => {
+  it("returns the exact shared Listings Review 'You paid' text for a unique SKU match", async () => {
+    supabaseRequestAll
+      .mockResolvedValueOnce([{ id: DRAFT_ID, sku: "AA1713" }])
+      .mockResolvedValueOnce([{ id: "purchase-1", sku: "aa1713", order_date: "2026-10-01", item_description: "New Balance trainers", price_purchased: "5.85" }]);
+
+    const response = await purchasePriceRoute(new Request(`http://test/api/listing-studio/groups/${DRAFT_ID}/selling-price`), params());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      purchasePriceText: "You paid: £5.85",
+      purchaseMatch: { status: "matched", sku: "AA1713", purchasePricePence: 585 },
+    });
+  });
+
+  it("does not query the purchases table when the listing has no SKU", async () => {
+    supabaseRequestAll.mockResolvedValueOnce([{ id: DRAFT_ID, sku: null }]);
+
+    const response = await purchasePriceRoute(new Request(`http://test/api/listing-studio/groups/${DRAFT_ID}/selling-price`), params());
+    expect(response.status).toBe(200);
+    expect((await response.json()).purchasePriceText).toBe("Purchase price unavailable — SKU missing");
+    expect(supabaseRequestAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps duplicate purchase matches explicit instead of guessing a cost", async () => {
+    supabaseRequestAll
+      .mockResolvedValueOnce([{ id: DRAFT_ID, sku: "AA1713" }])
+      .mockResolvedValueOnce([
+        { id: "purchase-1", sku: "AA1713", order_date: "2026-10-01", item_description: "Pair one", price_purchased: 5.85 },
+        { id: "purchase-2", sku: "AA1713", order_date: "2026-10-02", item_description: "Pair two", price_purchased: 6.25 },
+      ]);
+
+    const response = await purchasePriceRoute(new Request(`http://test/api/listing-studio/groups/${DRAFT_ID}/selling-price`), params());
+    expect((await response.json()).purchasePriceText).toBe("Multiple purchases found for SKU AA1713");
   });
 });

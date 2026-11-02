@@ -16,6 +16,7 @@ const {
   upsertMarketplaceDraft: vi.fn(async (_input: {
     status: string; pricePence?: number | null; quantity?: number | null; contentMode: string;
     readiness: { ready: boolean }; validationMessages: { code: string }[];
+    dynamicData?: Record<string, unknown>;
   }) => "marketplace-draft-1"),
   getMarketplaceSettingsDefaults: vi.fn(async () => ({} as Record<string, unknown>)),
   // Step 5 (parcel-size suggestion) — the generate route reads the
@@ -263,21 +264,18 @@ describe("POST /api/listing-studio/groups/[draftId]/generate — Stage 2 marketp
     it("REQUIREMENT: a fresh eBay draft with no prior package size gets a suggestion persisted via dynamic_data_json.__packageSize, never overwriting other stored aspects", async () => {
       getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: { Colour: { value: "Black", confidence: "high", source: "x", appliedAutomatically: true, needsReview: false, userConfirmed: true, updatedAt: "x" } } });
       await generateRoute(requestWithTargets(["EBAY_UK"]), params());
-      expect(patchMarketplaceDraft).toHaveBeenCalled();
-      const [ownerId, id, patch] = patchMarketplaceDraft.mock.calls[0];
-      expect(ownerId).toBe("owner-1");
-      expect(id).toBe("mdraft-1");
-      const dynamicData = patch.dynamic_data_json as Record<string, { value: unknown; userConfirmed: boolean }>;
+      const dynamicData = upsertMarketplaceDraft.mock.calls[0][0].dynamicData as Record<string, { value: unknown; userConfirmed: boolean }>;
       expect(dynamicData.Colour.value).toBe("Black"); // untouched, still present
       expect(dynamicData.__packageSize).toBeTruthy();
       expect(dynamicData.__packageSize.userConfirmed).toBe(false);
+      expect(patchMarketplaceDraft).not.toHaveBeenCalled();
     });
 
     it("Problem 8: persists structured product facts (style code, resolved condition state) via dynamic_data_json.__productFacts, ready for a future eBay API listing stage", async () => {
       getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: {} });
       await generateRoute(requestWithTargets(["EBAY_UK"]), params());
-      const patch = patchMarketplaceDraft.mock.calls[0][2] as { dynamic_data_json: Record<string, unknown> };
-      const productFacts = patch.dynamic_data_json.__productFacts as { styleCode: string | null; conditionState: string; updatedAt: string };
+      const dynamicData = upsertMarketplaceDraft.mock.calls[0][0].dynamicData as Record<string, unknown>;
+      const productFacts = dynamicData.__productFacts as { styleCode: string | null; conditionState: string; updatedAt: string };
       expect(productFacts).toBeTruthy();
       expect(["very_good_preowned", "new", "needs_review"]).toContain(productFacts.conditionState);
       expect(productFacts.updatedAt).toBeTruthy();
@@ -286,22 +284,17 @@ describe("POST /api/listing-studio/groups/[draftId]/generate — Stage 2 marketp
     it("REQUIREMENT (manual override always wins): a package size the owner already confirmed is never overwritten by a fresh suggestion", async () => {
       getMarketplaceDraft.mockResolvedValue({ id: "mdraft-1", dynamicData: { __packageSize: { value: "large_letter", confidence: "medium", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "x" } } });
       await generateRoute(requestWithTargets(["EBAY_UK"]), params());
-      // Phase 3 fix — patchMarketplaceDraft is now ALSO the write path for
-      // the authoritative content-generation state (dynamicData.
-      // __contentGeneration), so it's no longer expected to be uncalled
-      // outright; the real, still-load-bearing assertion is that the
-      // owner's own confirmed __packageSize choice is never part of that
-      // write's payload.
-      expect(patchMarketplaceDraft).toHaveBeenCalled();
-      const dynamicDataPatch = (patchMarketplaceDraft.mock.calls[0][2] as { dynamic_data_json: Record<string, unknown> }).dynamic_data_json;
+      const dynamicDataPatch = upsertMarketplaceDraft.mock.calls[0][0].dynamicData as Record<string, unknown>;
       expect(dynamicDataPatch.__packageSize).toEqual({ value: "large_letter", confidence: "medium", source: "manual", appliedAutomatically: false, needsReview: false, userConfirmed: true, updatedAt: "x" });
       expect(dynamicDataPatch.__contentGeneration).toBeTruthy();
+      expect(patchMarketplaceDraft).not.toHaveBeenCalled();
     });
 
-    it("never breaks 'Generate listings' when persisting the package suggestion fails — the eBay draft itself is still returned successfully", async () => {
+    it("fails honestly when the existing eBay draft cannot be read, rather than reporting success without preserving its details", async () => {
       getMarketplaceDraft.mockRejectedValue(new Error("network blip"));
       const response = await generateRoute(requestWithTargets(["EBAY_UK"]), params());
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(500);
+      expect(upsertMarketplaceDraft).not.toHaveBeenCalled();
     });
 
     it("does nothing when no eBay draft is being generated (VINTED-only request)", async () => {

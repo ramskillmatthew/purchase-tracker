@@ -17,6 +17,7 @@ export default function GlobalPurchaseSearch() {
   const [focused, setFocused] = useState(false);
 
   useEffect(() => {
+    if (pathname === "/") return;
     fetch("/api/purchases")
       .then(response => response.ok ? response.json() : [])
       .then(setPurchases)
@@ -77,6 +78,8 @@ export default function GlobalPurchaseSearch() {
       return true;
     } catch { return false; }
   }
+
+  if (pathname === "/") return null;
 
   return <div className="global-search-shell">
     <div className="global-search-inner" ref={searchRef}>

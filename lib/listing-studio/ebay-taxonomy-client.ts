@@ -284,5 +284,37 @@ export async function getItemAspectsForCategory(categoryTreeId: string, category
   return { ok: true, data: result.data.aspects };
 }
 
+const itemConditionSchema = z.object({
+  conditionId: z.string().min(1),
+  conditionDescription: z.string().min(1),
+  conditionHelpText: z.string().optional().default(""),
+});
+const itemConditionPoliciesResponseSchema = z.object({
+  itemConditionPolicies: z.array(z.object({
+    categoryId: z.string().min(1),
+    itemConditionRequired: z.boolean().optional(),
+    itemConditions: z.array(itemConditionSchema).default([]),
+  })).default([]),
+});
+export type EbayItemCondition = z.infer<typeof itemConditionSchema>;
+
+/**
+ * Returns the exact condition choices eBay currently permits for one UK
+ * category. This deliberately uses Metadata rather than the general eBay
+ * condition table: footwear categories, for example, expose
+ * “Pre-owned - Excellent/Good/Fair” instead of a generic “Very Good”.
+ */
+export async function getEbayItemConditionPolicies(categoryId: string): Promise<{ ok: true; data: EbayItemCondition[] } | EbayApiFailure> {
+  const filter = `categoryIds:{${categoryId}}`;
+  const result = await ebayGet(
+    `/sell/metadata/v1/marketplace/EBAY_GB/get_item_condition_policies?filter=${encodeURIComponent(filter)}`,
+    itemConditionPoliciesResponseSchema,
+  );
+  if (!result.ok) return result;
+  const policy = result.data.itemConditionPolicies.find(item => item.categoryId === categoryId)
+    ?? result.data.itemConditionPolicies[0];
+  return { ok: true, data: policy?.itemConditions ?? [] };
+}
+
 /** Test-only: clears the in-memory OAuth token cache between test cases. */
 export function __resetEbayTokenCacheForTests(): void { cachedToken = null; }

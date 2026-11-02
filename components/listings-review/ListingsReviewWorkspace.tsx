@@ -10,6 +10,7 @@ import { RecoverStuckBatchDialog, type RecoverDialogBatch, type RecoverDialogLis
 import PhotoCarouselDialog from "./PhotoCarouselDialog";
 import EditListingFieldsDialog, { type ListingFieldsDraft } from "@/components/listing-studio/EditListingFieldsDialog";
 import PreviewListingDialog from "@/components/listing-studio/PreviewListingDialog";
+import EbayCategoryAndAspectsDialog from "@/components/listing-studio/EbayCategoryAndAspectsDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import OverflowMenu from "@/components/listing-studio/OverflowMenu";
 import { KpiIcon } from "./KpiIcon";
@@ -56,7 +57,8 @@ type EbayMarketplaceDraftRow = {
   id: string; productDraftId: string; title: string | null; description: string | null;
   categoryId: string | null; categoryPath: string | null; conditionValue: string | null;
   pricePence: number | null; quantity: number | null;
-  readiness: { ready: boolean };
+  readiness: { ready: boolean; requiredComplete: number; requiredTotal: number; recommendedComplete: number; recommendedTotal: number; completionPercent: number };
+  validationMessages: Array<{ code: string; message: string; field: string | null; severity: "blocking" | "warning" | "suggestion" }>;
   ebayFulfillmentPolicyId: string | null; ebayReturnPolicyId: string | null; ebayPaymentPolicyId: string | null;
   ebayMerchantLocationKey: string | null; ebayOfferId: string | null;
   ebayLiveListingId: string | null;
@@ -262,6 +264,7 @@ type ListingRow = ListingDetails & ReviewableListing & {
   errorMessage: string | null;
   hasEbayPreparation: boolean;
   ebayContentReady: boolean;
+  ebayReviewReasons: string[];
   ebayWorkflowStatus: EbayFeedItemStatus | null;
   ebayQueuePosition: number | null;
   ebayErrorMessage: string | null;
@@ -280,6 +283,23 @@ type ListingRow = ListingDetails & ReviewableListing & {
   // for how this takes priority over the Feed-pipeline-derived label.
   ebayExtensionActiveState: { label: string; tone: string; pulse: boolean } | null;
 };
+
+function buildEbayReviewReasons(draft: EbayMarketplaceDraftRow | null): string[] {
+  if (!draft || draft.readiness.ready) return [];
+  const reasons: string[] = draft.validationMessages
+    .filter(message => message.severity === "blocking" || message.severity === "warning")
+    .map(message => message.message.trim())
+    .filter(Boolean);
+  if (!draft.title?.trim()) reasons.push("The eBay title is missing.");
+  if (!draft.description?.trim()) reasons.push("The eBay description is missing.");
+  if (!draft.categoryId) reasons.push("An eBay category has not been selected.");
+  if (!draft.conditionValue) reasons.push("An eBay condition has not been selected.");
+  if (draft.quantity == null) reasons.push("The listing quantity is missing.");
+  if (draft.readiness.requiredComplete < draft.readiness.requiredTotal && reasons.length === 0) {
+    reasons.push(`${draft.readiness.requiredTotal - draft.readiness.requiredComplete} required eBay field${draft.readiness.requiredTotal - draft.readiness.requiredComplete === 1 ? " is" : "s are"} incomplete.`);
+  }
+  return [...new Set(reasons.length ? reasons : ["Required eBay information is incomplete. Open eBay listing details to review it."])];
+}
 
 async function runWithConcurrencyLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
@@ -445,6 +465,7 @@ export default function ListingsReviewWorkspace() {
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
 
   const [editFieldsListingId, setEditFieldsListingId] = useState<string | null>(null);
+  const [ebayDetailsListingId, setEbayDetailsListingId] = useState<string | null>(null);
   const [savingListingFields, setSavingListingFields] = useState(false);
   const [editFieldsError, setEditFieldsError] = useState("");
 
@@ -938,6 +959,7 @@ export default function ListingsReviewWorkspace() {
     // the purchase, not the marketplace. Only the SELLING price and
     // therefore profit differ per marketplace.
     const ebayProfitPence = ebayDraft ? computeProfitPence(costPence, ebayDraft.pricePence) : null;
+    const ebayReviewReasons = buildEbayReviewReasons(ebayDraft);
     return {
       ...reviewable,
       id: draft.id,
@@ -963,6 +985,7 @@ export default function ListingsReviewWorkspace() {
       hasVintedPreparation: Boolean(draft.generated_title) && Boolean(draft.generated_description),
       hasEbayPreparation: ebayDraft !== null,
       ebayContentReady: ebayDraft?.readiness.ready ?? false,
+      ebayReviewReasons,
       ebaySellingPricePence: ebayDraft?.pricePence ?? null,
       ebayProfitPence,
       ebayLiveListingId: ebayDraft?.ebayLiveListingId ?? null,
@@ -975,6 +998,7 @@ export default function ListingsReviewWorkspace() {
         profitPence: ebayProfitPence,
         quantity: ebayDraft.quantity,
         conditionValue: ebayDraft.conditionValue,
+        reviewReasons: ebayReviewReasons,
         selection: {
           fulfillmentPolicyId: ebayDraft.ebayFulfillmentPolicyId, returnPolicyId: ebayDraft.ebayReturnPolicyId,
           paymentPolicyId: ebayDraft.ebayPaymentPolicyId, merchantLocationKey: ebayDraft.ebayMerchantLocationKey,
@@ -1238,6 +1262,7 @@ export default function ListingsReviewWorkspace() {
   const carouselListing = carouselListingId ? listingsById.get(carouselListingId) ?? null : null;
   const previewListing = previewListingId ? listingsById.get(previewListingId) ?? null : null;
   const editFieldsListing = editFieldsListingId ? listingsById.get(editFieldsListingId) ?? null : null;
+  const ebayDetailsListing = ebayDetailsListingId ? listingsById.get(ebayDetailsListingId) ?? null : null;
 
   const toggleQuickFilter = useCallback((filter: ListingQuickFilter) => {
     setActiveQuickFilters(current => {
@@ -3529,6 +3554,7 @@ export default function ListingsReviewWorkspace() {
           onOpenCarousel={(id, photoId) => openCarousel(id, photoId)}
           onPreview={setPreviewListingId}
           onEditFields={setEditFieldsListingId}
+          onEditEbayDetails={setEbayDetailsListingId}
           onAssignCategory={handleAssignCategory}
           onReassessAudience={handleReassessAudience}
           onMarkReady={handleMarkReady}
@@ -3715,6 +3741,12 @@ export default function ListingsReviewWorkspace() {
       error={editFieldsError}
       onClose={() => { setEditFieldsListingId(null); setEditFieldsError(""); }}
       onSave={handleSaveListingFields}
+    />}
+    {ebayDetailsListing && <EbayCategoryAndAspectsDialog
+      draftId={ebayDetailsListing.id}
+      groupTitle={ebayDetailsListing.generatedTitle || "this listing"}
+      onClose={() => setEbayDetailsListingId(null)}
+      onDraftUpdated={loadListings}
     />}
 
     {ebayLivePreview && (() => {

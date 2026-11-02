@@ -2,7 +2,8 @@ import "server-only";
 import { supabaseRequestAll } from "@/lib/supabase";
 import { resolveEbayAspects, type EbayAspectResolutionOutcome } from "@/lib/listing-studio/ebay-aspect-service";
 import { isAspectValueFilled, isAspectCountableForReadiness } from "@/lib/listing-studio/ebay-aspect-matching";
-import { readEbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
+import { buildEbayProductFacts, readEbayProductFacts, type EbayProductFacts } from "@/lib/listing-studio/ebay-product-facts";
+import { deriveDraftItemFamily } from "@/lib/listing-studio/vinted-category-selection";
 import { getMarketplaceDraft, patchMarketplaceDraft, getMarketplaceSettingsDefaults } from "@/lib/listing-studio/marketplace-drafts";
 import { resolveMarketplaceSettings } from "@/lib/listing-studio/marketplace-settings";
 import { computeMarketplaceReadiness } from "@/lib/listing-studio/marketplace-readiness";
@@ -24,12 +25,40 @@ export type EbayAspectAutomationOutcome =
   | { status: "applied"; readiness: ReturnType<typeof computeMarketplaceReadiness> }
   | { status: "failed"; reason: EbayAspectResolutionOutcome["status"]; code: EbayErrorCode; message: string };
 
-type ProductRow = { brand: string | null; model: string | null; product_type: string | null; colours: string[] | null; material: string | null; shared_facts_json: SharedFacts | null; ai_result_json: { itemSpecifics?: Record<string, string> } | null };
+type ProductRow = {
+  brand: string | null; model: string | null; product_type: string | null; colours: string[] | null; material: string | null;
+  uk_size: string | null; vinted_audience: "mens" | "womens" | "boys" | "girls" | "unisex" | "unknown" | null;
+  sku: string | null; condition: string | null;
+  shared_facts_json: SharedFacts | null; ai_result_json: { itemSpecifics?: Record<string, string> } | null;
+};
 
 function flattenSharedFacts(facts: SharedFacts | null): Record<string, string> {
   const flat: Record<string, string> = {};
   for (const [name, fact] of Object.entries(facts ?? {})) if (fact?.value) flat[name] = fact.value;
   return flat;
+}
+
+/**
+ * Repairs drafts created before __productFacts was persisted reliably.
+ * These are the same already-saved, structured listing fields shown on the
+ * product card — no AI call and no inference beyond the existing
+ * deterministic item-family classification.
+ */
+function productFactsFromLegacyRow(product: ProductRow | undefined): EbayProductFacts | null {
+  if (!product) return null;
+  const itemFamily = deriveDraftItemFamily(product.product_type);
+  const audience = product.vinted_audience && product.vinted_audience !== "unknown" ? product.vinted_audience : null;
+  const conditionText = (product.condition ?? "").toLowerCase();
+  const conditionState = /^new\b/.test(conditionText)
+    ? "new" as const
+    : conditionText.includes("very good") ? "very_good_preowned" as const : "needs_review" as const;
+  return buildEbayProductFacts({
+    brand: product.brand, model: product.model, productType: product.product_type,
+    colours: product.colours ?? [], material: product.material,
+    ukShoeSize: itemFamily === "footwear" ? product.uk_size : null,
+    clothingSize: null, gender: audience, itemFamily, internalSku: product.sku,
+    styleCode: null, conditionState,
+  });
 }
 
 /**
@@ -59,8 +88,10 @@ export async function autoResolveAndPersistEbayAspects(ownerId: string, productD
   const resolvedDraft = ebayDraft ?? await getMarketplaceDraft(ownerId, productDraftId, "EBAY_UK");
   if (!resolvedDraft?.categoryId) return { status: "failed", reason: "not_configured", code: "EBAY_NOT_CONFIGURED", message: "This product needs a category before its eBay item specifics can be prepared." };
 
-  const products = await supabaseRequestAll<ProductRow>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=brand,model,product_type,colours,material,shared_facts_json,ai_result_json`);
+  const products = await supabaseRequestAll<ProductRow>(`listing_drafts?id=eq.${productDraftId}&owner_id=eq.${ownerId}&select=brand,model,product_type,colours,material,uk_size,vinted_audience,sku,condition,shared_facts_json,ai_result_json`);
   const product = products[0];
+  const storedProductFacts = readEbayProductFacts(resolvedDraft.dynamicData);
+  const productFacts = storedProductFacts ?? productFactsFromLegacyRow(product);
 
   const accountDefaults = await getMarketplaceSettingsDefaults(ownerId, "EBAY_UK");
   const settings = resolveMarketplaceSettings(accountDefaults, null, resolvedDraft.settings);
@@ -76,7 +107,7 @@ export async function autoResolveAndPersistEbayAspects(ownerId: string, productD
     // real, high-confidence fact to map from even when this product has
     // no Vinted draft at all (whose base-row columns brand/productType/
     // model above stay null in that case).
-    productFacts: readEbayProductFacts(resolvedDraft.dynamicData),
+    productFacts,
     automationMode: settings.automationMode,
   });
 
@@ -87,6 +118,9 @@ export async function autoResolveAndPersistEbayAspects(ownerId: string, productD
   }
 
   const mergedDynamicData = mergeAspectDynamicData(resolvedDraft.dynamicData, outcome.dynamicData);
+  if (!storedProductFacts && productFacts) {
+    mergedDynamicData.__productFacts = productFacts as unknown as MarketplaceDynamicData[string];
+  }
 
   const emptyValue = { value: null, confidence: "unknown" as const, source: "none", appliedAutomatically: false, needsReview: false, userConfirmed: false, updatedAt: "" };
   // Live-diagnostic follow-up fix (proven root cause of "0/18 recommended"

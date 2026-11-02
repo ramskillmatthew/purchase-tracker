@@ -11,6 +11,7 @@ export type EbayExtractedListing = {
   currency: string | null;
   condition: string | null;
   category: string | null;
+  categoryId?: string | null;
   brand: string | null;
   size: string | null;
   colours: string[];

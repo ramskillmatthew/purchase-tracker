@@ -61,11 +61,12 @@ describe("eBay live listing safety boundary", () => {
     expect(service).toContain("resolveEbayListingPolicies(draft, connection, policies)");
   });
 
-  it("uses short signed app photo URLs instead of long storage signed URLs", () => {
+  it("uses short signed app photo URLs with a secure Storage fallback when a local tunnel is unavailable", () => {
     const batches = read("lib/listing-studio/ebay-draft-batches.ts");
     const photoUrls = read("lib/listing-studio/ebay-photo-urls.ts");
     const photoRoute = read("app/api/ebay/photo/[imageId]/route.ts");
     expect(batches).toContain("createEbayPhotoProxyUrl(image.id, proxyExpiresAt)");
+    expect(batches).toContain("createSignedDownloadUrl(LISTING_STUDIO_BUCKET, image.storage_path, EBAY_IMAGE_URL_LIFETIME_SECONDS)");
     expect(photoUrls).toContain('createHmac("sha256"');
     expect(photoUrls).toContain("timingSafeEqual");
     expect(photoRoute).toContain("verifyEbayPhotoProxySignature");

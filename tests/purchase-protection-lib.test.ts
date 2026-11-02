@@ -75,4 +75,28 @@ describe("loadPurchaseProtectionMap", () => {
     await loadPurchaseProtectionMap();
     expect(supabaseRequestAll).toHaveBeenCalledTimes(2);
   });
+
+  it("batches large sales-order lookups so an imported history cannot exceed URL limits", async () => {
+    const items = Array.from({ length: 205 }, (_, index) => ({
+      purchase_id: `purchase-${index}`,
+      sales_order_id: `order-${index}`,
+      is_active: true,
+    }));
+    supabaseRequestAll.mockResolvedValueOnce(items);
+    for (let batch = 0; batch < 3; batch += 1) {
+      const start = batch * 100;
+      const end = Math.min(start + 100, items.length);
+      supabaseRequestAll.mockResolvedValueOnce(items.slice(start, end).map(item => ({ id: item.sales_order_id, status: "completed" })));
+    }
+
+    const map = await loadPurchaseProtectionMap();
+
+    expect(map.size).toBe(205);
+    expect(supabaseRequestAll).toHaveBeenCalledTimes(4);
+    for (const [path] of supabaseRequestAll.mock.calls.slice(1)) {
+      const ids = String(path).match(/id=in\.\(([^)]+)\)/)?.[1].split(",") ?? [];
+      expect(ids.length).toBeLessThanOrEqual(100);
+      expect(path).toContain("order=id.asc");
+    }
+  });
 });

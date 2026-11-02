@@ -6,8 +6,10 @@ import { getEbayConnection, listEbayPolicies, getValidEbayAccessToken } from "@/
 import { createOrReplaceInventoryItem, createOffer, getOffersForSku, getOffer, getInventoryItem, type EbayInventoryItemPayload } from "@/lib/ebay-account/inventory-client";
 import { evaluateEbayDraftEligibility } from "@/lib/listing-studio/ebay-draft-eligibility";
 import { toEbayInventoryCondition, type EbayInventoryConditionEnum } from "@/lib/listing-studio/ebay-condition";
-import { StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
+import { createSignedDownloadUrl, StorageBucketMissingError } from "@/lib/listing-studio/storage-rest";
 import { createEbayPhotoProxyUrl } from "@/lib/listing-studio/ebay-photo-urls";
+import { createEbayImageFromFile } from "@/lib/ebay-account/media-client";
+import { LISTING_STUDIO_BUCKET } from "@/lib/listing-studio/storage-paths";
 import type { MarketplaceDynamicData, MarketplaceDraft } from "@/lib/listing-studio/marketplace-types";
 import type { EbayDraftItemStatus, EbayDraftBatchStatus } from "@/lib/listing-studio/ebay-workflow-status";
 
@@ -309,11 +311,17 @@ type EbayPhotoState = { status: "pending" | "uploading" | "uploaded" | "failed";
 // value chosen to let it linger.
 const EBAY_IMAGE_URL_LIFETIME_SECONDS = 300;
 
-/** Builds and verifies genuinely-reachable public HTTPS Supabase Storage
- * signed URLs for every uploaded photo of this product, in stored order
+/** Builds and verifies genuinely-reachable public HTTPS photo URLs for
+ * every uploaded photo of this product, in stored order
  * (first = main photo) — never a local filesystem path or a blob: URL.
  * "Verified reachable" means a real HEAD request to the signed URL itself
  * succeeded, not merely that Storage returned a signing response.
+ *
+ * The preferred URL is the app's short signed proxy. Local development can
+ * legitimately have a stale/offline temporary tunnel in NEXT_PUBLIC_APP_URL,
+ * so a failed proxy check falls back to a fresh, short-lived private
+ * Supabase Storage URL. Both URLs are signed, HTTPS-only and expire after
+ * this immediate eBay operation; neither is persisted.
  *
  * The returned `imageUrls` are for THIS CALL's own immediate in-memory use
  * only (passed straight into an eBay API call by the caller within the
@@ -321,7 +329,7 @@ const EBAY_IMAGE_URL_LIFETIME_SECONDS = 300;
  * included in `photoState` (which the caller persists) or any other
  * write. Never call this function and then hold its result across a
  * later, separate invocation/tick. */
-export async function preparePhotos(ownerId: string, productDraftId: string): Promise<{ imageUrls: string[]; photoState: Record<string, EbayPhotoState> }> {
+export async function preparePhotos(ownerId: string, productDraftId: string, accessToken?: string): Promise<{ imageUrls: string[]; photoState: Record<string, EbayPhotoState> }> {
   const images = await supabaseRequestAll<ImageRow>(
     `listing_draft_images?draft_id=eq.${productDraftId}&owner_id=eq.${ownerId}&upload_state=eq.uploaded&select=id,storage_path,sort_order&order=sort_order.asc`,
   );
@@ -330,18 +338,52 @@ export async function preparePhotos(ownerId: string, productDraftId: string): Pr
   const proxyExpiresAt = Math.floor(Date.now() / 1000) + EBAY_IMAGE_URL_LIFETIME_SECONDS;
   for (const image of images) {
     try {
-      const url = createEbayPhotoProxyUrl(image.id, proxyExpiresAt);
-      const check = await fetch(url, { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10_000) }).catch(() => null);
-      if (check && check.ok) {
+      let url: string | null = null;
+      if (accessToken) {
+        const storageUrl = await createSignedDownloadUrl(LISTING_STUDIO_BUCKET, image.storage_path, EBAY_IMAGE_URL_LIFETIME_SECONDS);
+        const source = await fetch(storageUrl, { method: "GET", cache: "no-store", signal: AbortSignal.timeout(30_000) }).catch(() => null);
+        if (!source?.ok) throw new Error(`Could not download this photo from Storage (HTTP ${source?.status ?? "network error"}).`);
+        const mimeType = (source.headers.get("content-type") || "application/octet-stream").split(";")[0].trim().toLowerCase();
+        const filename = image.storage_path.split("/").pop() || `${image.id}.jpg`;
+        const hosted = await createEbayImageFromFile(accessToken, await source.arrayBuffer(), mimeType, filename);
+        url = hosted.imageUrl;
+      }
+
+      let proxyStatus: number | "network error" = "network error";
+      if (!url) {
+        try {
+          const proxyUrl = createEbayPhotoProxyUrl(image.id, proxyExpiresAt);
+          const proxyCheck = await fetch(proxyUrl, { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10_000) }).catch(() => null);
+          proxyStatus = proxyCheck?.status ?? "network error";
+          if (proxyCheck?.ok) url = proxyUrl;
+        } catch { /* A missing/stale local app origin is handled by Storage below. */ }
+      }
+
+      if (!url) {
+        const storageUrl = await createSignedDownloadUrl(LISTING_STUDIO_BUCKET, image.storage_path, EBAY_IMAGE_URL_LIFETIME_SECONDS);
+        const storageCheck = await fetch(storageUrl, { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10_000) }).catch(() => null);
+        if (storageCheck?.ok) url = storageUrl;
+        else {
+          photoState[image.id] = {
+            status: "failed", checkedAt: new Date().toISOString(),
+            error: `Photo URL not reachable (app proxy: ${proxyStatus}; storage: HTTP ${storageCheck?.status ?? "network error"}).`,
+          };
+          continue;
+        }
+      }
+
+      if (url) {
         imageUrls.push(url);
         photoState[image.id] = { status: "uploaded", checkedAt: new Date().toISOString() };
-      } else {
-        photoState[image.id] = { status: "failed", checkedAt: new Date().toISOString(), error: `Photo URL not reachable (HTTP ${check?.status ?? "network error"}).` };
       }
     } catch (error) {
       if (error instanceof StorageBucketMissingError) throw error;
       photoState[image.id] = { status: "failed", checkedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "Could not prepare this photo." };
     }
+  }
+  if (accessToken && imageUrls.length !== images.length) {
+    const firstFailure = Object.values(photoState).find(state => state.status === "failed")?.error;
+    throw new Error(firstFailure || "One or more listing photos could not be uploaded to eBay.");
   }
   return { imageUrls, photoState };
 }
@@ -456,7 +498,8 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
       const sku = productRows[0]?.sku ?? null;
       if (!sku) { await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "not_eligible", "Missing SKU"); return; }
       try {
-        const { imageUrls } = await preparePhotos(ownerId, item.product_draft_id);
+        const { accessToken } = await getValidEbayAccessToken(ownerId);
+        const { imageUrls } = await preparePhotos(ownerId, item.product_draft_id, accessToken);
         if (imageUrls.length === 0) { await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "no_reachable_photos", "No photo could be verified as reachable."); return; }
         // CORRECTIVE PASS (failed first draft, root cause) — the dangerous
         // `draft.conditionValue ?? "USED_EXCELLENT"` fallback is gone. That
@@ -477,7 +520,6 @@ async function advanceClaimedItem(ownerId: string, item: ClaimedItemRow): Promis
           await markItemFailed(item.item_id, ownerId, item.marketplace_draft_id, "not_eligible", condition.ok ? "Missing or unsupported eBay condition." : condition.reason);
           return;
         }
-        const { accessToken } = await getValidEbayAccessToken(ownerId);
         await patchItem(item.item_id, { attempt_count: item.attempt_count + 1 });
         // A PUT keyed by SKU — safe to repeat on retry (idempotent).
         await createOrReplaceInventoryItem(accessToken, sku, payload);

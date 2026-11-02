@@ -52,6 +52,7 @@ export type ListingTableRow = {
   // spec's own "Visibility rules" for the workflow toggle).
   hasEbayPreparation: boolean;
   ebayContentReady: boolean;
+  ebayReviewReasons: string[];
   ebayWorkflowStatus: EbayFeedItemStatus | null;
   ebayQueuePosition: number | null;
   ebayErrorMessage: string | null;
@@ -147,7 +148,11 @@ function resolveWorkflowDisplay(row: ListingTableRow, activeMarketplace: Listing
     // cell — errorMessage is deliberately omitted here (queue position
     // only); the real message lives in View error / the status panel /
     // the wider inspector panel instead.
-    secondaryLine: computeEbayFeedWorkflowSecondaryLine({ itemStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: null }),
+    secondaryLine: row.ebayWorkflowStatus
+      ? computeEbayFeedWorkflowSecondaryLine({ itemStatus: row.ebayWorkflowStatus, queuePosition: row.ebayQueuePosition, errorMessage: null })
+      : !row.ebayContentReady
+        ? `${row.ebayReviewReasons[0] ?? "Required information is incomplete."}${row.ebayReviewReasons.length > 1 ? ` (+${row.ebayReviewReasons.length - 1} more)` : ""}`
+        : null,
     pricePence: row.ebaySellingPricePence, profitPence: row.ebayProfitPence,
   };
 }

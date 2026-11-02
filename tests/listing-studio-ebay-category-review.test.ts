@@ -28,32 +28,46 @@ describe("resolveCategoryReviewState — the ONE shared source of truth the row 
     expect(result.reason).toMatch(/Women's category/);
   });
 
-  it("REQUIREMENT: UK size 7+ does not use the deterministic rule — falls through to ordinary confidence-based review", () => {
+  it("UK size 7+ requires a Men's category and rejects Women's", () => {
+    const accepted = resolveCategoryReviewState(baseParams({ ukShoeSize: "7", categoryName: "Trainers", categoryPath: "Men's Shoes > Men > Trainers" }));
+    expect(accepted).toEqual({ effectiveConfidence: "high", needsReview: false, reason: null, provenance: "footwear_size_rule" });
+    const rejected = resolveCategoryReviewState(baseParams({ ukShoeSize: "7", categoryName: "Trainers", categoryPath: "Women's Shoes > Women > Trainers" }));
+    expect(rejected.needsReview).toBe(true);
+    expect(rejected.reason).toMatch(/Men's category/);
+  });
+
+  it("children's footwear categories are rejected even when the size is unavailable", () => {
+    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: null, categoryName: "Kids Trainers", categoryPath: "Kids > Junior Shoes" }));
+    expect(result.needsReview).toBe(true);
+    expect(result.reason).toMatch(/Children's footwear categories are not used/);
+  });
+
+  it("REQUIREMENT: UK size 7+ rejects a Women's category regardless of AI confidence", () => {
     const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "7" }));
     expect(result.needsReview).toBe(true);
-    expect(result.provenance).toBe("ai_suggestion");
-    expect(result.reason).toMatch(/medium-confidence/);
+    expect(result.provenance).toBe("footwear_size_rule_mismatch");
+    expect(result.reason).toMatch(/Men's category/);
   });
 
   it("a High-confidence category (no footwear rule involved) never needs review", () => {
-    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "9", categoryConfidence: "high" }));
+    const result = resolveCategoryReviewState(baseParams({ itemFamily: "clothing", ukShoeSize: null, categoryConfidence: "high" }));
     expect(result.needsReview).toBe(false);
   });
 
-  it("REQUIREMENT: a manual category selection is always trusted outright, regardless of size", () => {
-    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "9", categorySource: "manual", categoryConfidence: null }));
-    expect(result).toEqual({ effectiveConfidence: "high", needsReview: false, reason: null, provenance: "manual" });
+  it("REQUIREMENT: a manual category selection is trusted when it obeys the department rule", () => {
+    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "9", categoryName: "Trainers", categoryPath: "Men's Shoes > Men > Trainers", categorySource: "manual", categoryConfidence: null }));
+    expect(result).toEqual({ effectiveConfidence: "high", needsReview: false, reason: null, provenance: "footwear_size_rule" });
   });
 
-  it("REQUIREMENT: a genuine UK-7+ Medium-confidence category resolves once the user confirms it — Confidence and confirmation stay separate concepts (confidence is NOT mutated to High)", () => {
-    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "9", categoryConfidence: "medium", confirmedForCategoryId: "95672" }));
+  it("REQUIREMENT: a Medium-confidence non-footwear category resolves once the user confirms it", () => {
+    const result = resolveCategoryReviewState(baseParams({ itemFamily: "clothing", ukShoeSize: null, categoryConfidence: "medium", confirmedForCategoryId: "95672" }));
     expect(result.needsReview).toBe(false);
     expect(result.effectiveConfidence).toBe("medium"); // never silently promoted to high
     expect(result.provenance).toBe("user_confirmed");
   });
 
   it("REQUIREMENT: a confirmation for a DIFFERENT category id (stale, from before a category change) is ignored", () => {
-    const result = resolveCategoryReviewState(baseParams({ ukShoeSize: "9", categoryConfidence: "medium", confirmedForCategoryId: "some-other-category" }));
+    const result = resolveCategoryReviewState(baseParams({ itemFamily: "clothing", ukShoeSize: null, categoryConfidence: "medium", confirmedForCategoryId: "some-other-category" }));
     expect(result.needsReview).toBe(true);
   });
 

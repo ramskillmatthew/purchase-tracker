@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isFootwearSizeBelowUk7, requiresWomensDepartment, categoryTextIndicatesWomens } from "@/lib/listing-studio/footwear-department-rule";
+import { isFootwearSizeBelowUk7, requiresWomensDepartment, requiresMensDepartment, requiredFootwearDepartment, categoryTextIndicatesWomens, categoryTextIndicatesMens, categoryTextIndicatesChildrens } from "@/lib/listing-studio/footwear-department-rule";
 
 describe("isFootwearSizeBelowUk7 — the ONE deterministic below-UK-7 threshold, shared by eBay and Vinted", () => {
   for (const size of ["3", "4", "5", "6", "6.5"]) {
@@ -22,6 +22,24 @@ describe("requiresWomensDepartment — gated to footwear only", () => {
   it("an uncertain item family never triggers the rule", () => expect(requiresWomensDepartment("uncertain", "4")).toBe(false));
 });
 
+describe("requiredFootwearDepartment — complete adult footwear rule", () => {
+  for (const size of ["3", "4", "5", "6", "6.5"]) {
+    it(`UK ${size} is always Women's`, () => expect(requiredFootwearDepartment("footwear", size)).toBe("Women"));
+  }
+  for (const size of ["7", "7.5", "8", "10", "13"]) {
+    it(`UK ${size} is always Men's`, () => expect(requiredFootwearDepartment("footwear", size)).toBe("Men"));
+  }
+  it("never applies a footwear department rule to clothing", () => expect(requiredFootwearDepartment("clothing", "8")).toBeNull());
+  it("does not guess malformed or below-range sizes", () => {
+    expect(requiredFootwearDepartment("footwear", "unknown")).toBeNull();
+    expect(requiredFootwearDepartment("footwear", "2.5")).toBeNull();
+  });
+  it("retains the explicit boolean helpers", () => {
+    expect(requiresWomensDepartment("footwear", "6.5")).toBe(true);
+    expect(requiresMensDepartment("footwear", "7")).toBe(true);
+  });
+});
+
 describe("categoryTextIndicatesWomens — recognises real eBay category text, never fabricates one", () => {
   it("recognises the real eBay UK category path from the screenshots", () => {
     expect(categoryTextIndicatesWomens("Women's Shoes > Women > Clothes, Shoes & Accessories > Trainers")).toBe(true);
@@ -35,4 +53,14 @@ describe("categoryTextIndicatesWomens — recognises real eBay category text, ne
     expect(categoryTextIndicatesWomens(null)).toBe(false);
     expect(categoryTextIndicatesWomens("")).toBe(false);
   });
+});
+
+describe("adult/children category recognition", () => {
+  it("distinguishes Men's from Women's category text", () => {
+    expect(categoryTextIndicatesMens("Men's Shoes > Men > Trainers")).toBe(true);
+    expect(categoryTextIndicatesMens("Women's Shoes > Women > Trainers")).toBe(false);
+  });
+  for (const text of ["Children's Shoes", "Kids Trainers", "Junior Boots", "Boys' Shoes", "Girls Shoes", "Youth Trainers"]) {
+    it(`recognises ${text} as a children's category`, () => expect(categoryTextIndicatesChildrens(text)).toBe(true));
+  }
 });

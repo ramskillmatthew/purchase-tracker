@@ -23,10 +23,10 @@ import { buildEbayDraftFromGeneratedFields } from "@/lib/listing-studio/ebay-dra
 import { readContentGenerationState, serialiseContentGenerationRecord } from "@/lib/listing-studio/ebay-content-generation-state";
 import { autoSuggestAndPersistEbayCategory } from "@/lib/listing-studio/ebay-category-automation";
 import { autoResolveAndPersistEbayAspects } from "@/lib/listing-studio/ebay-aspect-persistence";
-import { upsertMarketplaceDraft, getMarketplaceSettingsDefaults, getMarketplaceDraft, patchMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
+import { upsertMarketplaceDraft, getMarketplaceSettingsDefaults, getMarketplaceDraft } from "@/lib/listing-studio/marketplace-drafts";
 import { resolveMarketplaceSettings, defaultContentModeForSourceType } from "@/lib/listing-studio/marketplace-settings";
 import { marketplaceDraftSettingsSchema } from "@/lib/validation/listing-studio-marketplace";
-import type { Marketplace } from "@/lib/listing-studio/marketplace-types";
+import type { Marketplace, MarketplaceDynamicData } from "@/lib/listing-studio/marketplace-types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -383,18 +383,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
       // "Generate listings" call; it just means attemptCount starts back
       // at 0 for this one attempt (the worst case is an undercount, never
       // a broken generation).
-      let previousAttemptCount = 0;
-      try {
-        const existingEbayDraft = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
-        if (existingEbayDraft) {
-          previousAttemptCount = readContentGenerationState(existingEbayDraft.dynamicData, {
+      const existingEbayDraft = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
+      const previousAttemptCount = existingEbayDraft
+        ? readContentGenerationState(existingEbayDraft.dynamicData, {
             sourceType: existingEbayDraft.sourceType, contentMode: existingEbayDraft.contentMode,
             hasTitle: Boolean(existingEbayDraft.title), hasDescription: Boolean(existingEbayDraft.description),
-          }).attemptCount;
-        }
-      } catch {
-        // Never lets a read failure here break "Generate listings".
-      }
+          }).attemptCount
+        : 0;
 
       const generation = await buildEbayDraftFromGeneratedFields({
         fields, ukSize: finalUkSize, vintedAudience: finalVintedAudience, itemFamily: draftItemFamily,
@@ -402,66 +397,34 @@ export async function POST(request: Request, { params }: { params: Promise<{ dra
         knownConditionEvidence: fields.notes, previousAttemptCount,
       });
       ebayDraft = generation;
+      const nextDynamicData: Record<string, unknown> = {
+        ...(existingEbayDraft?.dynamicData ?? {}),
+        __contentGeneration: serialiseContentGenerationRecord(generation.contentGeneration),
+        __productFacts: generation.productFacts,
+      };
+      const existingPackage = existingEbayDraft?.dynamicData.__packageSize;
+      if (!existingPackage?.userConfirmed) {
+        nextDynamicData.__packageSize = {
+          value: generation.packageSuggestion.size, confidence: generation.packageSuggestion.confidence,
+          source: "heuristic", appliedAutomatically: true, needsReview: generation.packageSuggestion.requiresReview,
+          userConfirmed: false, updatedAt: new Date().toISOString(), reason: generation.packageSuggestion.reason,
+        };
+      }
+      const conditionWasManuallySelected = Boolean(existingEbayDraft?.dynamicData.__conditionSelection?.userConfirmed && existingEbayDraft.conditionValue);
       await upsertMarketplaceDraft({
         productDraftId: draftId, ownerId: user.id, marketplace: "EBAY_UK",
         sourceType: "generated", contentMode,
         title: generation.title, description: generation.description,
-        conditionValue: generation.conditionValue,
+        conditionValue: conditionWasManuallySelected ? existingEbayDraft!.conditionValue : generation.conditionValue,
         pricePence, quantity: resolvedSettings.quantity, currency: "GBP",
         status: generation.status, readiness: generation.readiness, validationMessages: generation.validationMessages,
         aiGeneration: { model, promptVersion: LISTING_PROMPT_VERSIONS.generation, schemaVersion: LISTING_SCHEMA_VERSIONS.generation, generatedAt: completedAt },
+        // Persist the facts atomically with the draft itself. The previous
+        // second read/patch was swallowed on failure, leaving apparently
+        // generated drafts with no facts for Brand, size, material or
+        // Department mapping.
+        dynamicData: nextDynamicData as MarketplaceDynamicData,
       });
-
-      // Phase 3 fix — persists the authoritative content-generation state
-      // (GENERATED vs FALLBACK, never conflated) alongside the parcel-size
-      // suggestion, in ONE read-merge-write of dynamic_data_json — merged
-      // together deliberately (rather than as two separate read/patch
-      // pairs, the previous shape) so they can no longer race each other
-      // and silently drop one write. "Manual override always wins": a
-      // package size the owner has already confirmed
-      // (dynamicData.__packageSize.userConfirmed) is never touched by a
-      // later suggestion, regenerated or not.
-      try {
-        const draftAfterUpsert = await getMarketplaceDraft(user.id, draftId, "EBAY_UK");
-        if (draftAfterUpsert) {
-          const existingPackage = draftAfterUpsert.dynamicData.__packageSize;
-          const nextDynamicData: Record<string, unknown> = {
-            ...draftAfterUpsert.dynamicData,
-            __contentGeneration: serialiseContentGenerationRecord(generation.contentGeneration),
-            // Problem 8 fix, extended by the live-diagnostic follow-up fix
-            // (proven root cause of "item specifics are not automatically
-            // populated") — the FULL structured facts used to compose
-            // this title/description, persisted regardless of whether
-            // Vinted was ALSO targeted, so category/aspect automation
-            // never has to fall back to listing_drafts' own shared
-            // columns (which stay null for an eBay-only generation). Same
-            // reserved-pseudo-aspect pattern as __packageSize — no schema
-            // migration needed.
-            __productFacts: generation.productFacts,
-          };
-          if (!existingPackage?.userConfirmed) {
-            // Problem 5 fix — a high-confidence, ordinary, single-item
-            // match (suggestPackageSize's own `requiresReview: false`,
-            // e.g. an everyday pair of trainers) is a genuine, reliable
-            // default and must not be flagged uncertain; only a
-            // genuinely uncertain suggestion (bulky boots, multiple
-            // units, no match at all) keeps needsReview true. Never
-            // hardcoded true regardless of confidence, which is what
-            // previously flagged ordinary footwear for review every time.
-            nextDynamicData.__packageSize = {
-              value: generation.packageSuggestion.size, confidence: generation.packageSuggestion.confidence,
-              source: "heuristic", appliedAutomatically: true, needsReview: generation.packageSuggestion.requiresReview,
-              userConfirmed: false, updatedAt: new Date().toISOString(), reason: generation.packageSuggestion.reason,
-            };
-          }
-          await patchMarketplaceDraft(user.id, draftAfterUpsert.id, { dynamic_data_json: nextDynamicData });
-        }
-      } catch {
-        // Never lets a package-suggestion/content-state persistence
-        // failure break "Generate listings" — the eBay draft's own
-        // title/description/readiness above is already safely saved
-        // either way.
-      }
 
       // Fault 3 fix — category (and, once one is resolved, item specifics)
       // are now suggested AUTOMATICALLY as part of the eBay draft job

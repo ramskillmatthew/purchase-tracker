@@ -210,6 +210,30 @@ describe("PATCH /api/listing-studio/groups/[draftId]/ebay-category — manual ca
     expect(supabaseRequest).not.toHaveBeenCalledWith(expect.stringContaining("listing_marketplace_drafts?id=eq."), expect.anything());
   });
 
+  it("BUSINESS RULE: rejects a children's footwear category even when eBay returned it", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow({ dynamic_data_json: { __productFacts: {
+      brand: "New Balance", model: "327", productType: "Trainers", colours: [], material: null,
+      ukShoeSize: "3", clothingSize: null, gender: "womens", itemFamily: "footwear", internalSku: "1713",
+      styleCode: null, conditionState: "very_good_preowned", updatedAt: "x",
+    } } })]);
+    getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "kids-1", categoryName: "Unisex Kids' Shoes" }, categoryTreeNodeAncestors: [{ categoryId: "k", categoryName: "Kids" }], relevancy: "100.0" }] });
+    const response = await patchRoute(jsonRequest({ categoryId: "kids-1", searchTerms: "kids trainers" }), params());
+    expect(response.status).toBe(422);
+    expect((await response.json()).error).toMatch(/Children's footwear categories are not used/);
+  });
+
+  it("BUSINESS RULE: rejects a Women's category for UK size 7+ footwear", async () => {
+    supabaseRequestAll.mockResolvedValue([ebayDraftRow({ dynamic_data_json: { __productFacts: {
+      brand: "On Running", model: "Cloud 5", productType: "Trainers", colours: [], material: null,
+      ukShoeSize: "7", clothingSize: null, gender: "mens", itemFamily: "footwear", internalSku: "x",
+      styleCode: null, conditionState: "very_good_preowned", updatedAt: "x",
+    } } })]);
+    getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "women-1", categoryName: "Trainers" }, categoryTreeNodeAncestors: [{ categoryId: "w", categoryName: "Women's Shoes" }], relevancy: "100.0" }] });
+    const response = await patchRoute(jsonRequest({ categoryId: "women-1", searchTerms: "trainers" }), params());
+    expect(response.status).toBe(422);
+    expect((await response.json()).error).toMatch(/must use a Men's category/);
+  });
+
   it("REGRESSION: a category change clears dynamic_data_json — stale item-specifics from the old category never survive", async () => {
     supabaseRequestAll.mockResolvedValue([ebayDraftRow({ dynamic_data_json: { Game: { value: "Pokémon TCG", confidence: "high", source: "ai", appliedAutomatically: true, needsReview: false, userConfirmed: false, updatedAt: "x" } } })]);
     getCategorySuggestions.mockResolvedValue({ ok: true, data: [{ category: { categoryId: "999", categoryName: "New Category" }, categoryTreeNodeAncestors: [], relevancy: "100.0" }] });

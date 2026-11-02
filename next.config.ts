@@ -2,6 +2,12 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: process.cwd(),
+  images: {
+    remotePatterns: [{ protocol: "https", hostname: "images1.vinted.net" }],
+  },
+  devIndicators: {
+    position: "top-right",
+  },
   // Root cause of the live production PHOTO_HOST_NOT_PERMITTED follow-up
   // bug ("TypeError: Failed to fetch" from the extension, once host
   // permission was fixed): heic-convert -> heic-decode -> libheif-js loads

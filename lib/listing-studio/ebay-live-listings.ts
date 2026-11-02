@@ -144,7 +144,7 @@ export async function publishOneEbayLiveListing(ownerId: string, productDraftId:
   if (reads.length > 1) throw new Error("More than one unpublished eBay offer exists for this SKU. Resolve the duplicates before publishing.");
 
   const [{ imageUrls }, categoryConditions] = await Promise.all([
-    preparePhotos(ownerId, productDraftId),
+    preparePhotos(ownerId, productDraftId, accessToken),
     getEbayCategoryConditions(accessToken, draft.categoryId!),
   ]);
   if (!imageUrls.length) throw new Error("No photo could be verified as reachable by eBay.");
