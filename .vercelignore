@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.git/
+tmp/
+coverage/
+.claude/
+vinted-runner/
+design-previews/
+*.log
